@@ -11,6 +11,7 @@ const CANDIDATES = [
   "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe",
   "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe",
   "C:/Program Files/Microsoft/Edge/Application/msedge.exe",
+  "/usr/local/bin/chrome-headless-shell", "/usr/bin/chromium-headless-shell",
   "/usr/bin/chromium-browser", "/usr/bin/chromium", "/usr/bin/google-chrome",
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
 ].filter(Boolean);
@@ -37,9 +38,13 @@ export class Renderer {
     const exe = CANDIDATES.find((p) => fs.existsSync(p));
     if (!exe) throw new Error("No Chrome/Chromium/Edge found for rendering — set CHROME_PATH");
     this.profile = fs.mkdtempSync(path.join(os.tmpdir(), "paper-lite-render-"));
-    const args = ["--headless=new", "--remote-debugging-port=0", `--user-data-dir=${this.profile}`, "--hide-scrollbars",
+    const isHeadlessShell = path.basename(exe).includes("headless");
+    const args = [
+      ...(isHeadlessShell ? [] : ["--headless=new"]),
+      "--remote-debugging-port=0", `--user-data-dir=${this.profile}`, "--hide-scrollbars",
       "--force-device-scale-factor=1", "--no-first-run", "--no-default-browser-check", "about:blank",
-      ...(process.env.CHROME_FLAGS || "").split(" ").filter(Boolean)];
+      ...(process.env.CHROME_FLAGS || "").split(" ").filter(Boolean),
+    ];
     this.proc = spawn(exe, args, { stdio: ["ignore", "ignore", "pipe"] });
     this.proc.on("exit", () => { this.ws = null; this.proc = null; });
     const wsUrl = await new Promise((resolve, reject) => {
