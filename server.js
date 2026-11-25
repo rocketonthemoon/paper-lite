@@ -31,6 +31,7 @@ const ALLOWED_HOSTS = new Set(
     .filter(Boolean),
 );
 const HISTORY_LIMIT = 60;
+const PKG_VERSION = JSON.parse(await fs.readFile(path.join(ROOT, "package.json"), "utf8")).version;
 
 // ---------------------------------------------------------------------------
 // Workspace: projects on disk, one open project in memory (`state`)
@@ -176,15 +177,30 @@ async function loadWorkspace() {
   if (!workspace.projects.length) {
     await createProject("Untitled", { open: false });
   }
-  const first = workspace.projects.find((p) => p.id === workspace.activeProjectId) || workspace.projects[0];
-  await openProject(first.id, "init");
+  // Open the last active project; if its file is unreadable, fall back to the next one instead of failing to boot.
+  const active = workspace.projects.find((p) => p.id === workspace.activeProjectId);
+  for (const p of [...new Set([active, ...workspace.projects].filter(Boolean))]) {
+    try {
+      await openProject(p.id, "init");
+      return;
+    } catch (err) {
+      console.error(`[paper-lite] could not open project "${p.name}" (${p.id}): ${err.message}`);
+    }
+  }
+  await createProject("Untitled", { open: true, source: "init" });
 }
 
 async function readProject(id) {
   const meta = metaOf(id);
   if (state?.id === id) return structuredClone(state);
   await diskQueue;
-  return normalizeProject(JSON.parse(await fs.readFile(projectFile(id), "utf8")), { id, name: meta.name, warnings: [] });
+  let raw;
+  try {
+    raw = JSON.parse(await fs.readFile(projectFile(id), "utf8"));
+  } catch (err) {
+    throw new HttpError(422, `Project "${meta.name}" could not be read (${err.code === "ENOENT" ? "file missing" : "file is corrupt"})`);
+  }
+  return normalizeProject(raw, { id, name: meta.name, warnings: [] });
 }
 
 async function openProject(id, source = "api") {
@@ -646,7 +662,8 @@ function toHtml(nodeId, { fontBase = PUBLIC_URL, filesBase, doc = state } = {}) 
     const n = doc.nodes[id];
     const pad = "  ".repeat(depth);
     const decl = Object.entries(exportStyles(n, doc)).map(([k, v]) => `  ${kebab(k)}: ${v};`).join("\n");
-    css.push(`/* ${n.name.replace(/\*\//g, "")} */\n.layer-${id} {\n${decl}\n}`);
+    // Layer names are free text: drop "*/" and angle brackets so a name can't end the comment or the <style> element.
+    css.push(`/* ${n.name.replace(/\*\//g, "").replace(/[<>]/g, "")} */\n.layer-${id} {\n${decl}\n}`);
     const attrs = Object.entries(n.attrs || {}).map(([k, v]) => ` ${k}="${escHtml(v)}"`).join("");
     const open = `${pad}<${n.tag} class="layer-${id}"${attrs}>`;
     if (VOID_TAGS.has(n.tag)) return open;
@@ -900,7 +917,7 @@ const mcpContext = {
 };
 
 function buildMcpServer() {
-  const server = new McpServer({ name: "paper-lite", version: "0.3.0" }, { instructions: SERVER_INSTRUCTIONS });
+  const server = new McpServer({ name: "paper-lite", version: PKG_VERSION }, { instructions: SERVER_INSTRUCTIONS });
   registerTools(server, mcpContext);
   return server;
 }
@@ -1037,7 +1054,7 @@ const methodNotAllowed = (req, res) =>
 app.get("/mcp", methodNotAllowed);
 app.delete("/mcp", methodNotAllowed);
 
-for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => { renderer.stop(); setTimeout(() => process.exit(0), 300); });
+for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => { renderer.stop(); setTimeout(() => process.exit(0), 1200); });
 
 await fonts.load();
 await loadWorkspace();
