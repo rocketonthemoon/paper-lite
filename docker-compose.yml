@@ -1,0 +1,12 @@
+services:
+  paper-lite:
+    build: .
+    container_name: paper-lite
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      ALLOWED_HOSTS: host.docker.internal
+    volumes:
+      - ./data:/app/data
+      - ./public:/app/public
+    restart: unless-stopped
