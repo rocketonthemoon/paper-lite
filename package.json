@@ -2,6 +2,7 @@
   "name": "paper-lite",
   "version": "0.1.0",
   "private": true,
+  "license": "Apache-2.0",
   "description": "Lightweight Paper-inspired HTML/CSS design canvas with a live MCP server",
   "type": "module",
   "main": "server.js",
