@@ -91,7 +91,7 @@ export function registerTools(server, ctx) {
       canvas: ctx.urls.ui,
       project: { id: s.id, name: s.name },
       pages: s.pages.map((id) => ({ id, name: s.nodes[id].name, artboards: s.nodes[id].children.length, current: id === s.rootId || undefined })),
-      page: { id: s.rootId, name: root.name, fill: root.styles.backgroundColor || "#282828" },
+      page: { id: s.rootId, name: root.name, fill: root.styles.backgroundColor || "#eef2f6" },
       artboards: root.children.map((id) => {
         const n = s.nodes[id];
         return { id, name: n.name, x: parseFloat(n.styles.left) || 0, y: parseFloat(n.styles.top) || 0, width: n.styles.width, height: n.styles.height, children: n.children.length };
@@ -111,7 +111,7 @@ export function registerTools(server, ctx) {
   }, async () => {
     const sel = ctx.selection();
     return text({ updatedAt: sel.at ? new Date(sel.at).toISOString() : null,
-      nodes: sel.ids.map((id) => ({ ...summary(id), artboard: summary(ctx.artboardOf(id))?.name })).filter((n) => n.id) });
+      nodes: sel.ids.map((id) => { const sum = summary(id); return sum && !ctx.isPage(id) ? { ...sum, artboard: summary(ctx.artboardOf(id))?.name } : null; }).filter(Boolean) });
   });
 
   server.registerTool("get_tree_summary", {

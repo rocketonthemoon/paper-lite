@@ -1,0 +1,141 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-test:
+    name: Lint, Audit & Automated Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install production dependencies
+        run: npm ci
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Run syntax, CSS/DOM & ESLint checks
+        run: npm run lint
+
+      - name: Ensure headless Chromium/Chrome is available
+        run: |
+          if ! command -v google-chrome >/dev/null 2>&1 && ! command -v chromium >/dev/null 2>&1 && ! command -v chromium-browser >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y --no-install-recommends chromium
+          fi
+          which google-chrome chromium chromium-browser || true
+
+      - name: Run unit, integration & browser E2E tests
+        run: npm test
+
+  docker-and-trivy:
+    name: Container Build, Runtime Smoke Test & Trivy Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build production image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: paper-lite:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify image size & container runtime (healthcheck + headless Chromium MCP)
+        run: |
+          docker image inspect paper-lite:ci --format 'Image size: {{.Size}} bytes'
+          docker run -d --name paper-lite-ci -p 127.0.0.1:3000:3000 paper-lite:ci
+          trap 'docker rm -f paper-lite-ci >/dev/null 2>&1 || true' EXIT
+
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3000/api/projects >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+
+          curl -fsS http://127.0.0.1:3000/api/projects >/dev/null
+          node -e '
+            async function mcp(method, params, id) {
+              const r = await fetch("http://127.0.0.1:3000/mcp", {
+                method: "POST",
+                headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+                body: JSON.stringify({ jsonrpc: "2.0", id, method, params })
+              });
+              if (!r.ok) throw new Error("HTTP " + r.status);
+              const ct = r.headers.get("content-type") || "";
+              const body = ct.includes("text/event-stream")
+                ? JSON.parse((await r.text()).split(/\r?\n/).find(l => l.startsWith("data: ")).slice(6))
+                : await r.json();
+              if (body.error) throw new Error(body.error.message);
+              return body.result;
+            }
+            (async () => {
+              await mcp("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "ci", version: "1.0.0" } }, 1);
+              const ab = JSON.parse((await mcp("tools/call", { name: "create_artboard", arguments: { name: "CI Check", width: 320, height: 200 } }, 2)).content[0].text);
+              await mcp("tools/call", { name: "write_html", arguments: { parentId: ab.id, html: "<h1 style=\"color:#0000ff\">CI</h1>" } }, 3);
+              const shot = await mcp("tools/call", { name: "get_screenshot", arguments: { nodeId: ab.id, scale: 0.5 } }, 4);
+              const img = shot.content.find(c => c.type === "image");
+              if (!img || !img.data) throw new Error("Expected PNG screenshot from chrome-headless-shell");
+              console.log("Container MCP screenshot OK (" + img.mimeType + ")");
+            })().catch(e => { console.error(e); process.exit(1); });
+          '
+
+      - name: Trivy Docker filesystem, misconfig & secret scan
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/src:ro" \
+            -v trivy-cache:/root/.cache/ \
+            docker.io/aquasec/trivy:latest fs \
+            --scanners vuln,misconfig,secret \
+            --exit-code 1 \
+            --severity HIGH,CRITICAL \
+            --skip-dirs /src/node_modules \
+            --skip-dirs /src/data \
+            /src
+
+      - name: Trivy Docker Dockerfile strict misconfiguration check
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/src:ro" \
+            -v trivy-cache:/root/.cache/ \
+            docker.io/aquasec/trivy:latest config \
+            --exit-code 1 \
+            --severity LOW,MEDIUM,HIGH,CRITICAL \
+            /src/Dockerfile
+
+      - name: Trivy Docker image vulnerability scan
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v trivy-cache:/root/.cache/ \
+            docker.io/aquasec/trivy:latest image \
+            --scanners vuln \
+            --exit-code 1 \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            paper-lite:ci

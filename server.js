@@ -75,13 +75,13 @@ function projectSummary(doc) {
   const pages = doc.pages.length;
   const artboards = doc.pages.reduce((a, pid) => a + (doc.nodes[pid]?.children?.length || 0), 0);
   const layers = Math.max(0, Object.keys(doc.nodes).length - pages);
-  const bg = doc.nodes[doc.rootId]?.styles?.backgroundColor || "#282828";
+  const bg = doc.nodes[doc.rootId]?.styles?.backgroundColor || "#eef2f6";
   return { pages, artboards, layers, bg };
 }
 
 function buildPreview(doc) {
   const page = doc.nodes[doc.rootId] || doc.nodes[doc.pages[0]];
-  const bg = page?.styles?.backgroundColor || "#282828";
+  const bg = page?.styles?.backgroundColor || "#eef2f6";
   const sorted = [...(page?.children || [])].sort((a, b) => {
     const sa = doc.nodes[a]?.styles || {}, sb = doc.nodes[b]?.styles || {};
     const ya = Math.round((parseFloat(sa.top) || 0) / 300), yb = Math.round((parseFloat(sb.top) || 0) / 300);
@@ -360,7 +360,10 @@ function getPage(id) {
 
 function pageOf(id) {
   let n = getNode(id);
-  while (n.parentId) n = state.nodes[n.parentId];
+  while (n.parentId) {
+    if (!state.nodes[n.parentId]) throw new HttpError(404, `Parent "${n.parentId}" not found`);
+    n = state.nodes[n.parentId];
+  }
   return n.id;
 }
 
@@ -517,7 +520,10 @@ function duplicateNode(id, source = "api") {
 function artboardOf(id) {
   let n = getNode(id);
   if (isPage(n.id)) throw new HttpError(400, "A page is not inside an artboard");
-  while (!isPage(n.parentId)) n = state.nodes[n.parentId];
+  while (!isPage(n.parentId)) {
+    if (!state.nodes[n.parentId]) throw new HttpError(404, `Parent "${n.parentId}" not found`);
+    n = state.nodes[n.parentId];
+  }
   return n.id;
 }
 
@@ -883,6 +889,7 @@ const mcpContext = {
   selection: () => ({ ...uiSelection, ids: uiSelection.ids.filter((id) => state.nodes[id]) }),
   presence: presenceList, touch, finishWorking,
   focusNodes: (ids, zoom) => {
+    if (!ids?.length) { sendEvent("focus", { ids: [], zoom: false }); return; }
     const page = pageOf(ids[0]);
     if (page !== state.rootId) switchPage(page, "mcp");
     sendEvent("focus", { ids, zoom });
