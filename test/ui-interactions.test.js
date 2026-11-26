@@ -286,11 +286,17 @@ test("UI interactions: drawing, editing, shortcuts, panels, projects and live sy
     await waitFor(async () => (await nodeBy((n) => n.id === rectId)).styles.top === "70px", "nudge 10px");
     await ui.key("g", 8);
     assert.equal(await ui.evalJs(`document.getElementById("snap").checked`), true);
+    // Snap shows the 8px grid on the canvas and inside each artboard, layered beneath the artboard's layers.
+    assert.equal(await ui.evalJs(`getComputedStyle(document.getElementById("grid")).display`), "block");
+    const abGrid = await ui.evalJs(`(() => { const el = document.querySelector('#world > [data-node-id="${board}"]'), b = getComputedStyle(el, "::before");
+      return { content: b.content, zIndex: b.zIndex, isolation: getComputedStyle(el).isolation, image: b.backgroundImage.includes("linear-gradient") }; })()`);
+    assert.deepEqual(abGrid, { content: '""', zIndex: "-1", isolation: "isolate", image: true }, "artboard grid sits under the layers");
     const r = await nodeRect(rectId);
     await ui.drag(r.cx, r.cy, r.cx + 13, r.cy + 5);
     await waitFor(async () => { const s = (await nodeBy((n) => n.id === rectId)).styles; return parseFloat(s.left) % 8 === 0 && parseFloat(s.top) % 8 === 0 && s.left !== "71px"; }, "snapped to 8px");
     await ui.key("g", 8);
     assert.equal(await ui.evalJs(`document.getElementById("snap").checked`), false);
+    assert.equal(await ui.evalJs(`getComputedStyle(document.getElementById("grid")).display`), "none", "grid hides with Snap off");
   });
 
   await t.test("Ctrl+D duplicates, Delete removes, Ctrl+Z / Ctrl+Shift+Z undo and redo", async () => {

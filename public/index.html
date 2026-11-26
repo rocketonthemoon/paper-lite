@@ -222,6 +222,30 @@
   #world button { font: inherit; color: inherit; }
   #world .editing { user-select: text; cursor: text; outline: none; }
   #overlay { position: absolute; inset: 0; pointer-events: none; }
+  /* 8px snap grid: shown while Snap is on. Minor lines every 8px, major every 64px; minor lines fade out when zoomed far out. */
+  #grid {
+    position: absolute; inset: 0; pointer-events: none; display: none;
+    background-image:
+      linear-gradient(to right, var(--grid-major) 1px, transparent 1px), linear-gradient(to bottom, var(--grid-major) 1px, transparent 1px),
+      linear-gradient(to right, var(--grid-minor) 1px, transparent 1px), linear-gradient(to bottom, var(--grid-minor) 1px, transparent 1px);
+    background-size: var(--grid-major-size) var(--grid-major-size), var(--grid-major-size) var(--grid-major-size),
+      var(--grid-size) var(--grid-size), var(--grid-size) var(--grid-size);
+    background-position: var(--grid-x) var(--grid-y);
+  }
+  #app.grid-on #grid { display: block; }
+  /* Inside each artboard the grid starts at the artboard's own top-left corner (matching how its layers snap)
+     and sits between the artboard's fill and its layers: isolation makes the z-index:-1 layer paint above the
+     artboard background but below every child. Line width is 1 screen pixel at any zoom (--grid-line = 1/zoom). */
+  #app.grid-on #world > [data-node-id] { isolation: isolate; }
+  #app.grid-on #world > [data-node-id]::before {
+    content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
+    background-image:
+      linear-gradient(to right, rgba(0, 0, 255, 0.16) var(--grid-line), transparent var(--grid-line)),
+      linear-gradient(to bottom, rgba(0, 0, 255, 0.16) var(--grid-line), transparent var(--grid-line)),
+      linear-gradient(to right, var(--grid-ab-minor) var(--grid-line), transparent var(--grid-line)),
+      linear-gradient(to bottom, var(--grid-ab-minor) var(--grid-line), transparent var(--grid-line));
+    background-size: 64px 64px, 64px 64px, 8px 8px, 8px 8px;
+  }
 
   #stage-pill {
     position: absolute; top: 14px; left: 50%; transform: translateX(-50%); z-index: 12;
@@ -690,6 +714,7 @@
       <span class="pill-hint">Press ⌘K for quick jump or F for frame</span>
       <span class="pill-short">⌘K</span>
     </div>
+    <div id="grid" aria-hidden="true"></div>
     <div id="world"></div>
     <div id="overlay">
       <div id="labels"></div>
@@ -707,7 +732,7 @@
     </div>
     <div id="stage-hud" role="toolbar" aria-label="Canvas viewport controls">
       <input type="checkbox" id="snap" hidden>
-      <button type="button" class="hud-btn" id="snap-btn" title="Snap moves and resizes to an 8px grid (Shift+G)">Snap 8px</button>
+      <button type="button" class="hud-btn" id="snap-btn" title="Show the 8px grid and snap moves and resizes to it (Shift+G)">Snap 8px</button>
       <span class="hud-sep"></span>
       <div style="position:relative">
         <button type="button" class="hud-btn mono" id="zoom-btn" aria-haspopup="menu">100% &#9662;</button>
@@ -878,6 +903,7 @@ function setSnap(on) {
   snapInput.checked = Boolean(on);
   snapBtn.classList.toggle("snap-on", snapInput.checked);
   snapBtn.setAttribute("aria-pressed", String(snapInput.checked));
+  app.classList.toggle("grid-on", snapInput.checked);
   localStorage.setItem("paper-lite:snap", snapInput.checked ? "1" : "0");
 }
 setSnap(localStorage.getItem("paper-lite:snap") === "1");
@@ -913,6 +939,7 @@ function render() {
   if (sel && !S.nodes[sel]) sel = null;
   if (hoverId && !S.nodes[hoverId]) hoverId = null;
   stage.style.background = S.nodes[S.rootId].styles.backgroundColor || "";
+  updateGrid();
   $("#stage-page-name").textContent = S.nodes[S.rootId].name || "Page 1";
   renderPages();
   world.replaceChildren(...S.nodes[S.rootId].children.map(buildEl));
@@ -925,9 +952,25 @@ function render() {
 
 function applyView() {
   world.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.z})`;
+  updateGrid();
   $("#zoom-btn").innerHTML = `${Math.round(view.z * 100)}% &#9662;`;
   if (viewKey()) localStorage.setItem(viewKey(), JSON.stringify(view));
   updateOverlay();
+}
+
+// Keep the snap grid aligned with world coordinates as you pan and zoom.
+function updateGrid() {
+  const st = app.style, z = view.z;
+  st.setProperty("--grid-size", `${GRID * z}px`);
+  st.setProperty("--grid-major-size", `${GRID * 8 * z}px`);
+  st.setProperty("--grid-x", `${view.x}px`);
+  st.setProperty("--grid-y", `${view.y}px`);
+  st.setProperty("--grid-line", `${1 / z}px`); // artboard grids live in zoomed world space
+  const dark = S && isDarkColor(S.nodes[S.rootId]?.styles.backgroundColor);
+  const showMinor = GRID * z >= 6; // 8px cells closer than 6 screen px turn into noise
+  st.setProperty("--grid-major", dark ? "rgba(255, 255, 255, 0.14)" : "rgba(10, 11, 13, 0.12)");
+  st.setProperty("--grid-minor", showMinor ? (dark ? "rgba(255, 255, 255, 0.06)" : "rgba(10, 11, 13, 0.05)") : "transparent");
+  st.setProperty("--grid-ab-minor", showMinor ? "rgba(0, 0, 255, 0.07)" : "transparent");
 }
 
 function rectOnStage(el) {
