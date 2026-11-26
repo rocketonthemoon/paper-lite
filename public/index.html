@@ -352,7 +352,7 @@
     cursor: pointer; font-size: 12px; font-weight: 500; display: inline-flex; align-items: center; gap: 6px;
   }
   .hud-btn:hover { background: var(--fill); color: var(--text); }
-  .hud-btn.hud-zoom { font-family: var(--font-mono); font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; padding: 0 8px; }
+  .hud-btn.mono { font-family: var(--font-mono); font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; padding: 0 8px; }
   .hud-btn:focus:not(:focus-visible) { background: none; }
   .hud-btn.snap-on { background: var(--accent-fill); color: var(--accent-text); font-weight: 600; }
   .hud-btn .kbd { font-size: 11px; }
@@ -534,7 +534,6 @@
     border-radius: 999px; padding: 0 8px; line-height: 18px; display: inline-flex; align-items: center; gap: 5px;
   }
   .mcp-live-tag::before { content: ""; width: 6px; height: 6px; border-radius: 99px; background: var(--live); }
-
 
   /* ---------------------------------------------------------------- right tabs + history */
   .right-tabs { margin: 10px 12px; flex-shrink: 0; }
@@ -819,7 +818,7 @@
       <button type="button" class="hud-btn" id="snap-btn" title="Show the 8px grid and snap moves and resizes to it (Shift+G)">Snap 8px</button>
       <span class="hud-sep"></span>
       <div style="position:relative">
-        <button type="button" class="hud-btn hud-zoom" id="zoom-btn" aria-haspopup="menu" title="Zoom">100%</button>
+        <button type="button" class="hud-btn mono" id="zoom-btn" aria-haspopup="menu" title="Zoom">100%</button>
         <div id="zoom-menu" role="menu" hidden>
           <button data-zoom="in">Zoom in <kbd>Ctrl +</kbd></button>
           <button data-zoom="out">Zoom out <kbd>Ctrl −</kbd></button>
@@ -2674,7 +2673,6 @@ if (typeof ResizeObserver !== "undefined") new ResizeObserver(updateOverlay).obs
 // ---------------------------------------------------------------------------
 // Live sync (SSE)
 // ---------------------------------------------------------------------------
-
 // ---------------------------------------------------------------------------
 // Right panel tabs + History (labelled undo history and checkpoints)
 // ---------------------------------------------------------------------------
