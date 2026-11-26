@@ -369,6 +369,46 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
     assert.deepEqual((await ok(B, "get_children", { nodeId: title })).slice(0, 2).map((k) => k.id), [dups[0].id, extra.id]);
     await fails(B, "move_nodes", { nodeIds: [section], parentId: title }, /inside itself/);
 
+    // Nesting rules match the UI: nothing may land where it silently wouldn't render.
+    const icon = (await ok(B, "write_html", { parentId: section, html: `<svg viewBox="0 0 24 24" width="24" height="24"><g><circle cx="12" cy="12" r="9"></circle></g></svg>` })).created[0].id;
+    const [group] = await ok(B, "get_children", { nodeId: icon });
+    const [circle] = await ok(B, "get_children", { nodeId: group.id });
+    const spare = (await ok(B, "create_artboard", { name: "Spare" })).id;
+    const before = (await ok(B, "get_basic_info")).layers;
+    await fails(B, "move_nodes", { nodeIds: [spare], parentId: section }, /top level/);
+    await fails(B, "move_nodes", { nodeIds: [button], parentId: icon }, /can't go inside <svg>/);
+    await fails(B, "move_nodes", { nodeIds: [group.id], parentId: section }, /must be inside an <svg>/);
+    await fails(B, "create_node", { parentId: icon, tag: "div" }, /can't go inside <svg>/);
+    await fails(B, "create_node", { parentId: circle.id, tag: "circle" }, /<circle> can't contain/);
+    await fails(B, "create_node", { parentId: extra.id, tag: "span", text: "x" }, /<img> can't contain/);
+    await fails(B, "create_node", { parentId: section, tag: "path" }, /must be inside an <svg>/);
+    await fails(B, "write_html", { parentId: icon, html: "<p>text</p>" }, /can't go inside <svg>/);
+    await fails(B, "write_html", { targetNodeId: circle.id, mode: "replace", html: "<div>x</div>" }, /can't go inside <g>/);
+    await fails(B, "update_node", { nodeId: circle.id, tag: "div" }, /can't go inside <g>/);
+    const pageId = (await ok(B, "get_basic_info")).page.id;
+    await fails(B, "create_node", { parentId: pageId, tag: "circle" }, /must be inside an <svg>/); // a shape "artboard"
+    await fails(B, "write_html", { html: "<path d='M0 0L1 1'></path>" }, /must be inside an <svg>/);
+    // The REST API (what the UI calls) enforces the same rules.
+    const rest = await fetch(`${B}/api/nodes/${spare}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ parentId: section }) });
+    assert.equal(rest.status, 400);
+    assert.match((await rest.json()).error, /top level/);
+    assert.equal((await ok(B, "get_basic_info")).layers, before, "rejected writes change nothing");
+
+    // Nested elements that can't render where they were written are skipped with a warning; the rest is built.
+    const lenient = await ok(B, "write_html", { parentId: section, html: `<div data-name="Wrap"><circle r="2"></circle><span>kept</span><svg viewBox="0 0 8 8"><svg viewBox="0 0 4 4"><rect width="4" height="4"></rect></svg><text x="1" y="5">Hi</text></svg></div>` });
+    assert.ok(lenient.warnings.some((w) => /Circle: <circle> must be inside an <svg> or <g>; skipped/.test(w)), lenient.warnings.join(" | "));
+    assert.ok(lenient.warnings.some((w) => /can't hold text; dropped "Hi"/.test(w)), "text dropped from SVG is reported");
+    assert.ok(lenient.warnings.some((w) => /<text> isn't supported/.test(w)), "lossy mapping is reported");
+    const wrap = lenient.created[0].id;
+    assert.deepEqual((await ok(B, "get_children", { nodeId: wrap })).map((k) => k.tag), ["span", "svg"], "circle skipped, rest kept");
+    const outer = (await ok(B, "get_children", { nodeId: wrap }))[1].id;
+    assert.deepEqual((await ok(B, "get_children", { nodeId: outer })).map((k) => k.tag), ["svg", "g"], "<svg> inside <svg> renders, so it is kept");
+    await ok(B, "delete_nodes", { nodeIds: [wrap] });
+    // Still allowed: SVG shapes into <svg>/<g>, artboards between pages, reordering in place, a layer onto the page.
+    await ok(B, "create_node", { parentId: group.id, tag: "rect" });
+    await ok(B, "move_nodes", { nodeIds: [spare], parentId: (await ok(B, "get_basic_info")).page.id, index: 0 });
+    await ok(B, "delete_nodes", { nodeIds: [icon, spare] });
+
     const del = await ok(B, "delete_nodes", { nodeIds: [dups[0].id, extra.id, dups[0].id] });
     assert.equal(del.deleted, 2, "already-deleted ids are skipped");
     await fails(B, "get_node_info", { nodeId: extra.id }, /not found/);
@@ -416,6 +456,13 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
     assert.notEqual(agentMsg.author, "you");
     assert.ok(agentMsg.linkedStep?.historyId, "reply links the agent's last edit");
     await fails(B, "reply_to_comment", { id: "ghost", text: "x" }, /not found/);
+    // A private thread stays private even to an agent that knows its id: no reading it back, posting or resolving.
+    const leak = await fails(B, "reply_to_comment", { id: hidden.id, text: "x" }, /not found/);
+    assert.doesNotMatch(leak, /Private note/);
+    await fails(B, "resolve_comment", { id: hidden.id }, /not found/);
+    const priv = (await (await fetch(`${B}/api/comments`)).json()).find((c) => c.id === hidden.id);
+    assert.equal(priv.messages.length, 1, "no agent message was added");
+    assert.equal(priv.status, "open");
 
     const resolved = await ok(B, "resolve_comment", { id: thread.id });
     assert.equal(resolved.status, "resolved");
@@ -453,6 +500,13 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
     const html = await ok(B, "get_jsx", { nodeId: board, format: "html" });
     assert.match(html, new RegExp(`class="layer-${board}"`));
     assert.match(html, /<h1 class="layer-/);
+    assert.doesNotMatch(html, /\{\s*\n\s*\}/, "no empty CSS rules");
+    // An unstyled layer gets neither a rule nor a class.
+    const plain = (await ok(B, "create_node", { parentId: section, tag: "span", text: "plain" })).id;
+    const html2 = await ok(B, "get_jsx", { nodeId: section, format: "html" });
+    assert.match(html2, /<span>plain<\/span>/);
+    assert.doesNotMatch(html2, new RegExp(`layer-${plain}`));
+    await ok(B, "delete_nodes", { nodeIds: [plain] });
     const page = await ok(B, "get_jsx", {});
     assert.match(page, /export function Desktop\(\)/);
     assert.match(page, /export function Mobile\(\)/);
@@ -601,6 +655,11 @@ test("persistence: projects and edits survive a restart", { timeout: 60_000 }, a
   const proj = await ok(B, "create_project", { name: "Persisted" });
   const ab = await ok(B, "create_artboard", { name: "Saved board", width: 500, height: 300 });
   await ok(B, "write_html", { parentId: ab.id, html: `<p data-name="Saved text">Hello</p>` });
+  // A resolved comment whose layer is later deleted must keep its page, layer name and resolved time.
+  const gone = (await ok(B, "write_html", { parentId: ab.id, html: `<p data-name="Doomed">Bye</p>` })).created[0].id;
+  const thread = await (await fetch(`${B}/api/comments`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ nodeId: gone, text: "Remove this" }) })).json();
+  const resolved = await ok(B, "resolve_comment", { id: thread.id });
+  await ok(B, "delete_nodes", { nodeIds: [gone] });
   await ok(B, "add_font", { family: "Inter" });
   await sleep(300);
 
@@ -633,6 +692,11 @@ test("persistence: projects and edits survive a restart", { timeout: 60_000 }, a
   assert.equal(info.artboards[0].name, "Saved board");
   assert.equal((await ok(B2, "find_nodes", { query: "Saved text" })).length, 1);
   assert.ok((await ok(B2, "list_fonts")).some((f) => f.family === "Inter"));
+  const reloaded = (await (await fetch(`${B2}/api/comments`)).json()).find((c) => c.id === thread.id);
+  assert.equal(reloaded.status, "resolved");
+  assert.equal(reloaded.resolvedAt, resolved.resolvedAt, "resolved time survives a restart");
+  assert.equal(reloaded.pageId, info.page.id, "page survives a restart");
+  assert.equal(reloaded.layerName, "Doomed", "layer name survives a restart");
 });
 
 test("startup survives a corrupt project file and reports it clearly", { timeout: 60_000 }, async (t) => {

@@ -33,8 +33,10 @@ const GUIDE = `# weft MCP guide
 ## HTML rules (write_html)
 - Inline styles only: <div style="display:flex; gap:12px">. class / id / <style> / scripts are ignored.
 - Allowed tags: div section header footer nav main article aside h1–h6 p span strong em small label a button img ul ol li
-  figure figcaption hr br, plus svg g path circle rect ellipse line polyline polygon. Others are mapped (b→strong, i→em,
-  table/form/input→div) with a warning.
+  figure figcaption hr br, plus svg g path circle rect ellipse line polyline polygon. Others are mapped: b→strong, i→em
+  quietly; table/form/input→div with a warning.
+- Nesting: SVG shapes only inside <svg>/<g>; no HTML inside SVG; nothing inside <img>/<hr>/<br>; artboards stay at
+  the top level. A misplaced top-level element fails the call; a misplaced nested one is skipped with a warning.
 - Name layers with data-name="Card". Text-only elements become text layers; mixed text becomes span layers.
 - SVG: presentation attributes only (viewBox, d, fill, stroke, stroke-width, cx, cy, r, …). No url() or href.
 - Images: <img src="https://…" alt="…">.

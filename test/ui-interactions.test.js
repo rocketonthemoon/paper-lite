@@ -301,6 +301,61 @@ test("UI interactions: drawing, editing, shortcuts, panels, projects and live sy
     assert.equal(r.styles.height, "80px");
   });
 
+  await t.test("a live re-render mid-draw still places the layer where it was drawn", async () => {
+    await ui.key("r");
+    const b = await nodeRect(board);
+    await ui.move(b.x + 200, b.y + 160);
+    await ui.mouse("mousePressed", b.x + 200, b.y + 160);
+    await ui.evalJs("render(), true"); // what an SSE update (e.g. an agent's edit) does between pointerdown and pointerup
+    await ui.move(b.x + 260, b.y + 220, 1);
+    await ui.mouse("mouseReleased", b.x + 260, b.y + 220);
+    const r = await waitFor(() => nodeBy((n) => n.name === "Rectangle" && n.id !== rectId), "second rectangle created");
+    assert.equal(r.parentId, board);
+    assert.equal(r.styles.left, "200px", "measured against the artboard's live element, not a detached one");
+    assert.equal(r.styles.top, "160px");
+    await mcp(B, "delete_nodes", { nodeIds: [r.id] });
+    await waitFor(async () => !(await nodeBy((n) => n.id === r.id)), "cleanup");
+  });
+
+  await t.test("a tool change mid-draw or a late server reply doesn't change what gets drawn", async () => {
+    const b = await nodeRect(board);
+    const at = (left, top) => nodeBy((n) => n.parentId === board && n.styles.left === left && n.styles.top === top);
+    // The tool is fixed when the gesture starts.
+    await ui.key("r");
+    await ui.move(b.x + 200, b.y + 240);
+    await ui.mouse("mousePressed", b.x + 200, b.y + 240);
+    await ui.evalJs(`setTool("select"), true`);
+    await ui.move(b.x + 240, b.y + 280, 1);
+    await ui.mouse("mouseReleased", b.x + 240, b.y + 280);
+    const first = await waitFor(() => at("200px", "240px"), "shape drawn");
+    assert.equal(first.name, "Rectangle");
+    assert.equal(first.styles.backgroundColor, "#dde3e9");
+
+    // A slow create reply must not knock the user out of a tool they picked while it was in flight.
+    await ui.evalJs(`(() => { const f = window.fetch; window.__restoreFetch = () => { window.fetch = f; };
+      window.fetch = (u, o) => o?.method === "POST" && String(u).endsWith("/api/nodes") ? new Promise((r) => setTimeout(r, 700)).then(() => f(u, o)) : f(u, o);
+      return true; })()`);
+    try {
+      await ui.key("r");
+      await ui.drag(b.x + 296, b.y + 40, b.x + 336, b.y + 80);
+      await ui.key("f"); // pick another tool before the reply lands
+      const second = await waitFor(() => at("296px", "40px"), "slow shape created");
+      await sleep(150);
+      assert.equal(await ui.evalJs("tool"), "frame", "the late reply left the user's new tool alone");
+      await ui.evalJs(`setTool("select"), true`);
+      await mcp(B, "delete_nodes", { nodeIds: [first.id, second.id] });
+    } finally {
+      await ui.evalJs("window.__restoreFetch(), true");
+    }
+    // Without interference the tool still returns to Select after drawing.
+    await ui.key("r");
+    await ui.drag(b.x + 296, b.y + 120, b.x + 336, b.y + 160);
+    const third = await waitFor(() => at("296px", "120px"), "normal shape created");
+    await waitFor(async () => (await ui.evalJs("tool")) === "select", "tool returns to Select");
+    await mcp(B, "delete_nodes", { nodeIds: [third.id] });
+    await waitFor(async () => !(await nodeBy((n) => n.id === third.id)), "cleanup");
+  });
+
   await t.test("T + click creates a text layer in edit mode; Enter commits typed text", async () => {
     await ui.key("t");
     const b = await nodeRect(board);

@@ -1199,7 +1199,7 @@ const TAGS = ["div", "section", "header", "footer", "nav", "main", "article", "a
 let S = null;                 // canvas state from server
 let sel = null;               // selected node id
 let hoverId = null;
-let tool = "select";
+let tool = "select", toolEpoch = 0; // toolEpoch counts tool picks, so a late reply can tell it was overtaken
 let view = { x: 120, y: 120, z: 1 };
 let projects = [];            // [{ id, name, updatedAt, active }]
 let fontLib = [];             // font library entries from the server
@@ -1210,6 +1210,9 @@ const saveExpanded = () => localStorage.setItem("paper-lite:expanded", JSON.stri
 let editingId = null, editOriginal = "", pendingEdit = null, pendingSel = null;
 let selEpoch = 0;             // bumps on every explicit select(); async results only auto-select if it hasn't moved
 let busy = false, pendingRender = false; // drag/resize in progress
+// True while the mouse button is held on the canvas. Re-rendering then would swap out the element a gesture is acting
+// on (interact.js grabs it on pointerdown, before busy is set), so live updates wait until release.
+let pointerHeld = false;
 let spaceDown = false;
 let inspectorDirty = false;
 let cssJsonOpen = false;      // UX #03: collapsed raw CSS JSON by default
@@ -1311,7 +1314,7 @@ const buildEl = (id) => buildNodeEl(S.nodes, id);
 
 function render() {
   if (!S) return;
-  if (editingId || busy) { pendingRender = true; return; }
+  if (editingId || busy || pointerHeld) { pendingRender = true; return; }
   pendingRender = false;
   if (pendingSel && S.nodes[pendingSel]) { sel = pendingSel; pendingSel = null; shareSelection(); }
   if (sel && !S.nodes[sel]) sel = null;
@@ -2023,17 +2026,20 @@ async function duplicateSelected() {
 }
 
 async function createNode(body, { edit = false } = {}) {
-  const epoch = selEpoch, fromTool = tool;
+  const epoch = selEpoch, fromToolEpoch = toolEpoch;
   const node = await api("POST", "/api/nodes", body);
   if (!node || selEpoch !== epoch) return;
   pendingSel = node.id;
   if (edit) pendingEdit = node.id;
   render();
-  if (tool === fromTool) setTool("select");
+  // Only fall back to Select if nobody picked a tool since this layer was drawn (e.g. pressing R again to draw
+  // another rectangle while this request was in flight must not be undone mid-gesture).
+  if (toolEpoch === fromToolEpoch) setTool("select");
 }
 
 function setTool(t) {
   tool = t;
+  toolEpoch += 1;
   document.querySelectorAll(".tool").forEach((b) => b.classList.toggle("on", b.dataset.tool === t));
   stage.className = `tool-${t}`;
   updateOverlay();
@@ -2117,11 +2123,14 @@ function startPan(e) {
 function startCreate(e) {
   const s = stage.getBoundingClientRect();
   const a = { x: e.clientX - s.left, y: e.clientY - s.top, cx: e.clientX, cy: e.clientY };
-  const board = document.elementsFromPoint(e.clientX, e.clientY).find((el) => el.parentElement === world && el.dataset.nodeId);
+  // Remember the artboard by id: a live update (e.g. an agent editing over MCP) can re-render the canvas before
+  // pointerup, and a detached element measures as 0,0, which would drop the new layer at raw screen coordinates.
+  const boardId = document.elementsFromPoint(e.clientX, e.clientY).find((el) => el.parentElement === world && el.dataset.nodeId)?.dataset.nodeId;
   const marquee = $("#marquee");
+  const gestureTool = tool; // fixed for the whole gesture, even if the tool changes before pointerup
   stage.setPointerCapture(e.pointerId);
   const move = (m) => {
-    if (tool === "text") return;
+    if (gestureTool === "text") return;
     const bx = m.clientX - s.left, by = m.clientY - s.top;
     placeBox(marquee, { x: Math.min(a.x, bx), y: Math.min(a.y, by), w: Math.abs(bx - a.x), h: Math.abs(by - a.y) });
   };
@@ -2134,9 +2143,10 @@ function startCreate(e) {
     let x = (Math.min(a.x, bx) - view.x) / view.z, y = (Math.min(a.y, by) - view.y) / view.z;
     let w = Math.abs(bx - a.x) / view.z, h = Math.abs(by - a.y) / view.z;
     let parentId = S.rootId;
+    const board = boardId && isArtboard(boardId) ? elOf(boardId) : null; // the artboard's current element, if it still exists
     if (board) {
       const br = board.getBoundingClientRect();
-      parentId = board.dataset.nodeId;
+      parentId = boardId;
       x = (Math.min(a.cx, u.clientX) - br.left) / view.z;
       y = (Math.min(a.cy, u.clientY) - br.top) / view.z;
     }
@@ -2144,15 +2154,15 @@ function startCreate(e) {
     const pos = { position: "absolute", left: snap(x), top: snap(y) };
     const top = parentId === S.rootId;
     const count = S.nodes[S.rootId].children.length + 1;
-    if (tool === "text") {
+    if (gestureTool === "text") {
       const darkPage = isDarkColor(S.nodes[S.rootId].styles.backgroundColor);
       const styles = { ...pos, margin: 0, fontFamily: "'Geist', system-ui, sans-serif", fontSize: 16, color: top && darkPage ? "#e6e6e6" : "#0a0b0d", whiteSpace: "pre-wrap" };
       if (top) Object.assign(styles, { width: null, height: null, backgroundColor: null, overflow: null });
       return createNode({ parentId, tag: "p", name: "Text", text: "Text", styles }, { edit: true });
     }
-    const size = dragged ? { width: snap(w), height: snap(h) } : top && tool === "frame" ? { width: 390, height: 844 } : { width: 100, height: 100 };
-    const fill = tool === "rect" ? "#dde3e9" : "#ffffff";
-    const name = tool === "rect" ? "Rectangle" : top ? `Frame ${count}` : "Frame";
+    const size = dragged ? { width: snap(w), height: snap(h) } : top && gestureTool === "frame" ? { width: 390, height: 844 } : { width: 100, height: 100 };
+    const fill = gestureTool === "rect" ? "#dde3e9" : "#ffffff";
+    const name = gestureTool === "rect" ? "Rectangle" : top ? `Frame ${count}` : "Frame";
     createNode({ parentId, tag: "div", name, styles: { ...pos, ...size, backgroundColor: fill } });
   };
   stage.addEventListener("pointermove", move);
@@ -2162,6 +2172,18 @@ function startCreate(e) {
 // ---------------------------------------------------------------------------
 // Canvas pointer handling
 // ---------------------------------------------------------------------------
+stage.addEventListener("pointerdown", (e) => { if (e.button === 0) pointerHeld = true; }, true);
+function releasePointer() {
+  if (!pointerHeld) return;
+  pointerHeld = false;
+  if (pendingRender && !busy && !editingId) render();
+}
+window.addEventListener("pointerup", releasePointer, true);
+window.addEventListener("pointercancel", releasePointer, true);
+window.addEventListener("blur", releasePointer);
+// Safety net if the release happened outside the window: any move with no button down ends the hold.
+window.addEventListener("pointermove", (e) => { if (pointerHeld && e.buttons === 0) releasePointer(); }, true);
+
 stage.addEventListener("pointerdown", (e) => {
   // The zoom menu lives inside the stage: let clicks on it land (the document handler closes it on outside clicks).
   if (e.target.closest("#stage-hud, #ctx-bar, #stage-pill, #show-ui, .ab-label, #comment-thread, #comment-pins")) return;

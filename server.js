@@ -1018,6 +1018,27 @@ function isAncestor(ancestorId, id) {
   return false;
 }
 
+// Which layers can hold which, so agents and API clients can't put content where it silently won't render:
+// HTML inside SVG, SVG shapes outside an <svg>/<g>, children of <img>/<hr>/<br> or of a shape, artboards inside
+// layers. (The UI's drag rules are a little stricter still, e.g. no <svg> nested in an <svg>, which does render.)
+// Returns why `childTag` can't go in `parent`, or null when it can.
+function nestError(parent, childTag, { artboard = false } = {}) {
+  const childSvg = SVG_TAGS.has(childTag);
+  if (isPage(parent.id)) return childSvg && childTag !== "svg" ? `<${childTag}> must be inside an <svg> or <g>` : null;
+  if (artboard) return "Artboards stay at the top level of a page; move it to a page or move its layers instead";
+  if (VOID_TAGS.has(parent.tag)) return `<${parent.tag}> can't contain child layers`;
+  if (SVG_TAGS.has(parent.tag)) {
+    if (parent.tag !== "svg" && parent.tag !== "g") return `<${parent.tag}> can't contain child layers; use an <svg> or <g>`;
+    if (!childSvg) return `<${childTag}> can't go inside <${parent.tag}>; only SVG elements can`;
+    return null;
+  }
+  return childSvg && childTag !== "svg" ? `<${childTag}> must be inside an <svg> or <g>` : null;
+}
+function assertCanNest(parent, childTag, opts) {
+  const why = nestError(parent, childTag, opts);
+  if (why) throw new HttpError(400, why);
+}
+
 function insertChild(parent, id, index) {
   const i = Number.isInteger(index) ? Math.max(0, Math.min(index, parent.children.length)) : parent.children.length;
   parent.children.splice(i, 0, id);
@@ -1028,6 +1049,7 @@ const ARTBOARD_DEFAULTS = { position: "absolute", left: "0px", top: "0px", width
 function createNode(input, source = "api", meta = null) {
   const parent = getNode(input.parentId || state.rootId);
   const tag = cleanTag(input.tag);
+  assertCanNest(parent, tag);
   let styles = mergeStyles({}, input.styles);
   // Top-level nodes on a page are artboards placed in world space, like Paper frames.
   if (isPage(parent.id)) styles = mergeStyles(ARTBOARD_DEFAULTS, styles);
@@ -1063,6 +1085,11 @@ function updateNode(id, patch, source = "api", meta = null) {
     if (isPage(id)) throw new HttpError(400, "Pages are reordered with update_page");
     const target = getNode(patch.parentId ?? node.parentId);
     if (isAncestor(id, target.id)) throw new HttpError(400, "Cannot move a node inside itself");
+    if (target.id !== node.parentId) assertCanNest(target, next.tag ?? node.tag, { artboard: isPage(node.parentId) });
+  }
+  // A new tag must still fit where the layer already sits (e.g. a <circle> inside an <svg> can't become a <div>).
+  if (next.tag && next.tag !== node.tag && !(moving && (patch.parentId ?? node.parentId) !== node.parentId)) {
+    assertCanNest(getNode(node.parentId), next.tag);
   }
   let uiTool = "Edit layer";
   if (moving) uiTool = "Move layer";
@@ -1187,10 +1214,23 @@ function addSubtree(spec, parentId, index, warnings) {
   const attrs = lenientMerge((b, p) => mergeAttrs(b, p, tag), spec.attrs, warnings, label);
   const id = newId();
   const noText = SVG_TAGS.has(tag) || VOID_TAGS.has(tag);
-  state.nodes[id] = { id, name: label, tag, parentId: parent.id, children: [], text: noText ? "" : String(spec.text ?? ""), styles, attrs };
+  const text = String(spec.text ?? "");
+  if (noText && text.trim()) warnings.push(`${label}: <${tag}> can't hold text; dropped "${text.length > 40 ? `${text.slice(0, 37)}…` : text}"`);
+  state.nodes[id] = { id, name: label, tag, parentId: parent.id, children: [], text: noText ? "" : text, styles, attrs };
   insertChild(state.nodes[parent.id], id, index);
-  for (const child of spec.children || []) addSubtree(child, id, undefined, warnings);
+  for (const child of spec.children || []) {
+    // Lenient like the rest of write_html: a nested element that couldn't render where it was written is skipped
+    // (with its subtree) and reported, instead of failing the whole call or leaving an invisible layer.
+    const why = nestError(state.nodes[id], specTag(child));
+    if (why) { warnings.push(`${cleanName(child.name, child.tag)}: ${why}; skipped`); continue; }
+    addSubtree(child, id, undefined, warnings);
+  }
   return id;
+}
+
+// The tag addSubtree will actually use for a spec (unknown tags become div).
+function specTag(spec) {
+  try { return cleanTag(spec.tag); } catch { return "div"; }
 }
 
 function writeHtml({ html, parentId, targetNodeId, mode = "insert-children", index }, source = "mcp") {
@@ -1209,6 +1249,8 @@ function writeHtml({ html, parentId, targetNodeId, mode = "insert-children", ind
     if (isPage(parent)) for (const sp of specs) sp.styles = { left: target.styles.left, top: target.styles.top, ...sp.styles };
   }
   const parentNode = getNode(parent);
+  // The top-level elements are what the caller asked for, so a misplaced one fails the call with a clear reason.
+  for (const sp of specs) assertCanNest(parentNode, specTag(sp));
   const firstLabel = cleanName(specs[0].name, specs[0].tag);
   const targetLabel = mode === "replace"
     ? (specs.length === 1 ? firstLabel : replaceTargetName)
@@ -1347,6 +1389,14 @@ function mcpGetComments({ status, nodeId } = {}) {
   }));
 }
 
+// Threads hidden from agents must stay hidden on every MCP path, not just get_comments: answer "not found" so an
+// agent holding a private thread's id can neither read it (via the reply/resolve result) nor post into it.
+function agentVisibleComment(id) {
+  const thread = (state.comments || []).find((c) => c.id === id);
+  if (!thread || thread.agentsCanSee === false) throw new HttpError(404, `Comment "${id}" not found`);
+  return thread;
+}
+
 function openCommentCount() {
   return (state.comments || []).filter((c) => c.agentsCanSee !== false && c.status !== "resolved").length;
 }
@@ -1397,10 +1447,11 @@ function toHtml(nodeId, { fontBase = PUBLIC_URL, filesBase, doc = state } = {}) 
     const n = doc.nodes[id];
     const pad = "  ".repeat(depth);
     const decl = Object.entries(exportStyles(n, doc)).map(([k, v]) => `  ${kebab(k)}: ${v};`).join("\n");
+    // Unstyled layers get neither an empty rule nor a class nothing targets.
     // Layer names are free text: drop "*/" and angle brackets so a name can't end the comment or the <style> element.
-    css.push(`/* ${n.name.replace(/\*\//g, "").replace(/[<>]/g, "")} */\n.layer-${id} {\n${decl}\n}`);
+    if (decl) css.push(`/* ${n.name.replace(/\*\//g, "").replace(/[<>]/g, "")} */\n.layer-${id} {\n${decl}\n}`);
     const attrs = Object.entries(n.attrs || {}).map(([k, v]) => ` ${k}="${escHtml(v)}"`).join("");
-    const open = `${pad}<${n.tag} class="layer-${id}"${attrs}>`;
+    const open = `${pad}<${n.tag}${decl ? ` class="layer-${id}"` : ""}${attrs}>`;
     if (VOID_TAGS.has(n.tag)) return open;
     const kids = n.children.map((c) => markup(c, depth + 1));
     if (!kids.length) return `${open}${escHtml(n.text)}</${n.tag}>`;
@@ -1679,10 +1730,14 @@ const mcpContext = {
     openCount: openCommentCount,
     list: mcpGetComments,
     reply: (id, text, linkStep = true) => {
+      agentVisibleComment(id);
       const store = mcpContextStore.getStore();
       return replyComment(id, { text, author: store?.agent?.name || "Claude", linkStep });
     },
-    resolve: (id) => updateComment(id, { status: "resolved" }),
+    resolve: (id) => {
+      agentVisibleComment(id);
+      return updateComment(id, { status: "resolved" });
+    },
   },
   session: {
     setTitle: setSessionTitle,
