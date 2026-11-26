@@ -8,7 +8,7 @@
 <link rel="apple-touch-icon" href="/apple-touch-icon.svg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@300..800&family=Geist+Mono:wght@400..700&family=Inter:wght@400;500;600;700&display=swap">
 <link rel="stylesheet" id="fonts-css" href="/fonts.css">
 <script src="https://cdn.jsdelivr.net/npm/interactjs@1.10.29/dist/interact.min.js" integrity="sha384-OC57zgc28bGEFySmEUloMqylPxXoVXiS1tBThp8KveETQ/WDz8KT1AOMU6x1gQvN" crossorigin="anonymous" defer></script>
 <style>
@@ -132,10 +132,14 @@
     height: 34px; padding: 0 14px; border-radius: 10px; border: 1px solid var(--line-2); background: var(--panel);
     font-size: 13px; font-weight: 500; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap;
   }
-  .btn-top:hover { background: var(--surface-2); border-color: var(--line-3); }
+  .btn-top:hover:not(:disabled) { background: var(--surface-2); border-color: var(--line-3); }
+  .btn-top:active:not(:disabled) { background: var(--fill-2); border-color: var(--line-3); }
+  .btn-top:disabled { background: var(--surface-2); border-color: var(--line); color: var(--faint); cursor: default; }
   .btn-top.primary { background: var(--ink); border-color: var(--ink); color: #fff; font-weight: 600; }
-  .btn-top.primary:hover { background: #3a3a3c; border-color: #3a3a3c; }
-  .btn-top.primary[aria-expanded="true"] { background: #000; outline: 3px solid var(--line-2); }
+  .btn-top.primary:hover:not(:disabled) { background: #3a3a3c; border-color: #3a3a3c; }
+  .btn-top.primary:active:not(:disabled), .btn-top.primary[aria-expanded="true"] { background: #000; border-color: #000; }
+  .btn-top.primary[aria-expanded="true"] { outline: 3px solid var(--line-2); }
+  .btn-top.primary:disabled { background: var(--line-2); border-color: transparent; color: var(--faint); cursor: default; }
 
   /* ---------------------------------------------------------------- left panel */
   .file-head { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
@@ -222,7 +226,8 @@
   .row.ab { color: var(--text); font-weight: 500; }
   .row:hover { background: var(--fill-2); }
   .row.sel { background: var(--accent-fill); color: var(--accent-text); font-weight: 500; }
-  .row.agent-editing:not(.sel) { border: 1px dashed #e9a68c; background: none; }
+  .row.agent-editing { border: 1px dashed #e9a68c; }
+  .row.agent-editing:not(.sel) { background: none; }
   .row .tw { flex: 0 0 12px; height: 12px; display: grid; place-items: center; color: var(--faint); cursor: pointer; }
   .row.sel .tw { color: var(--accent-text); }
   .row .tw svg { transition: transform 0.12s; }
@@ -299,16 +304,16 @@
   .ab-label:hover { color: var(--text); }
   .ab-label.sel .ab-nm { color: var(--accent-text); font-weight: 600; }
   .box { position: absolute; display: none; }
-  #hover-box { border: 1px solid var(--accent); opacity: 0.55; }
-  #sel-box { border: 1.5px solid var(--accent); }
+  #hover-box { outline: 1px solid var(--muted); outline-offset: 1px; }
+  #sel-box { outline: 1.5px solid var(--accent); outline-offset: 2px; }
   #sel-box i { position: absolute; width: 7px; height: 7px; background: #fff; border: 1.5px solid var(--accent); border-radius: 1px; }
-  #sel-box .nw { left: -4px; top: -4px; } #sel-box .ne { right: -4px; top: -4px; }
-  #sel-box .sw { left: -4px; bottom: -4px; } #sel-box .se { right: -4px; bottom: -4px; }
+  #sel-box .nw { left: -6px; top: -6px; } #sel-box .ne { right: -6px; top: -6px; }
+  #sel-box .sw { left: -6px; bottom: -6px; } #sel-box .se { right: -6px; bottom: -6px; }
   #sel-size {
-    position: absolute; top: 100%; left: 0; transform: translate(0, 6px);
+    position: absolute; top: 100%; left: -2px; transform: translate(0, 8px);
     background: var(--accent); color: #fff; font-family: var(--font-mono); font-weight: 600;
     font-size: 10px; font-variant-numeric: tabular-nums;
-    padding: 1px 6px; border-radius: 5px; white-space: nowrap;
+    padding: 2px 6px; border-radius: 6px; white-space: nowrap;
   }
   #marquee { border: 1.5px solid var(--accent); background: rgba(76, 125, 255, 0.08); }
 
@@ -342,9 +347,9 @@
   /* ---------------------------------------------------------------- canvas controls (HUD) */
   #stage-hud {
     position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 14;
-    display: flex; align-items: center; gap: 4px; height: 38px; padding: 0 6px; max-width: calc(100% - 16px);
+    display: flex; align-items: center; gap: 4px; height: 36px; padding: 0 6px; max-width: calc(100% - 16px);
     background: var(--pop); border: 1px solid var(--line-2); border-radius: 999px;
-    box-shadow: 0 6px 18px rgba(10, 11, 13, 0.06); white-space: nowrap; font-size: 12px;
+    box-shadow: var(--shadow-float); white-space: nowrap; font-size: 12px;
   }
   .hud-sep { width: 1px; height: 14px; background: var(--line-2); margin: 0 2px; }
   .hud-btn {
@@ -352,11 +357,12 @@
     cursor: pointer; font-size: 12px; font-weight: 500; display: inline-flex; align-items: center; gap: 6px;
   }
   .hud-btn:hover { background: var(--fill); color: var(--text); }
-  .hud-btn.mono { font-family: var(--font-mono); font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; padding: 0 8px; }
-  .hud-btn:focus:not(:focus-visible) { background: none; }
+  .hud-btn.hud-zoom { font-family: var(--font-mono); font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; padding: 0 8px; }
+  .hud-btn:focus:not(:focus-visible):not(.snap-on):not(.show-ui-btn):not([aria-expanded="true"]) { background: none; }
+  .hud-btn[aria-expanded="true"] { background: var(--fill); color: var(--text); }
   .hud-btn.snap-on { background: var(--accent-fill); color: var(--accent-text); font-weight: 600; }
   .hud-btn .kbd { font-size: 11px; }
-  .hud-btn.show-ui-btn { background: var(--accent-fill); color: var(--accent-text); }
+  .hud-btn.show-ui-btn { background: var(--accent-fill); color: var(--accent-text); font-weight: 600; }
   #stage-hud .hud-short { display: none; }
   @container stage (max-width: 620px) {
     #stage-hud { gap: 2px; }
@@ -480,7 +486,7 @@
   .seg { display: flex; background: var(--fill); border-radius: 10px; padding: 3px; gap: 2px; }
   .seg button {
     flex: 1; border: 1px solid transparent; background: none; color: var(--muted);
-    height: 26px; border-radius: 7px; cursor: pointer; font-size: 12px; display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+    height: 28px; border-radius: 7px; cursor: pointer; font-size: 12px; display: inline-flex; align-items: center; justify-content: center; gap: 4px;
   }
   .seg button:hover { color: var(--text); }
   .seg button.on { background: var(--panel); border-color: var(--line-2); color: var(--text); font-weight: 600; }
@@ -501,6 +507,7 @@
   .btn.danger-solid { background: var(--danger); border-color: var(--danger); color: #fff; font-weight: 600; }
   .btn.danger-solid:hover { background: #b42318; border-color: #b42318; }
   .btn:disabled { background: var(--surface-2); border-color: var(--line); color: var(--faint); cursor: default; }
+  .btn.primary:disabled { background: var(--line-2); border-color: transparent; color: var(--faint); }
   .btnrow { display: flex; gap: 8px; }
   .btnrow .btn { flex: 1; min-width: 0; }
   .icon-btn {
@@ -535,10 +542,11 @@
   }
   .mcp-live-tag::before { content: ""; width: 6px; height: 6px; border-radius: 99px; background: var(--live); }
 
+
   /* ---------------------------------------------------------------- right tabs + history */
   .right-tabs { margin: 10px 12px; flex-shrink: 0; }
   .right-tabs button { height: 28px; }
-  .tab-count { font-size: 10px; font-weight: 700; color: var(--agent-text); background: var(--agent-badge); border-radius: 999px; padding: 0 5px; line-height: 15px; }
+  .tab-count { display: inline-flex; align-items: center; justify-content: center; height: 16px; min-width: 16px; line-height: 1; font-size: 10px; font-weight: 700; color: var(--agent-text); background: var(--agent-badge); border-radius: 999px; padding: 0 5px; }
   #right .right-head { border-top: 1px solid var(--line); }
   #history-panel { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
   .hist-scroll { flex: 1; min-height: 0; overflow: auto; }
@@ -808,7 +816,7 @@
         <span class="ctx-sep"></span>
         <button type="button" class="primary-act" data-ctx="copy">Copy HTML</button>
         <button type="button" data-ctx="duplicate">Duplicate</button>
-        <button type="button" data-ctx="flex" id="ctx-flex">+ Flex</button>
+        <button type="button" data-ctx="flex" id="ctx-flex"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span>Flex</span></button>
       </div>
       <div id="marquee" class="box"></div>
       <div id="agents"></div>
@@ -818,7 +826,7 @@
       <button type="button" class="hud-btn" id="snap-btn" title="Show the 8px grid and snap moves and resizes to it (Shift+G)">Snap 8px</button>
       <span class="hud-sep"></span>
       <div style="position:relative">
-        <button type="button" class="hud-btn mono" id="zoom-btn" aria-haspopup="menu" title="Zoom">100%</button>
+        <button type="button" class="hud-btn hud-zoom" id="zoom-btn" aria-haspopup="menu" aria-expanded="false" title="Zoom">100%</button>
         <div id="zoom-menu" role="menu" hidden>
           <button data-zoom="in">Zoom in <kbd>Ctrl +</kbd></button>
           <button data-zoom="out">Zoom out <kbd>Ctrl −</kbd></button>
@@ -861,7 +869,7 @@
   </div>
 </div>
 
-<section id="dashboard" aria-label="Projects Dashboard" hidden>
+<section id="dashboard" aria-label="Projects dashboard" hidden>
   <header class="dash-head">
     <div class="dash-brand">
       <span class="dash-logo">
@@ -883,7 +891,7 @@
         <span aria-hidden="true"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="7" cy="7" r="4.8"/><path d="m10.8 10.8 3.2 3.2" stroke-linecap="round"/></svg></span>
         <input id="dash-search" placeholder="Search projects…" autocomplete="off">
         <span class="kbd-pill" id="dash-search-kbd">⌘K</span>
-        <button type="button" class="icon-btn" id="dash-search-clear" title="Clear search" style="width:18px;height:18px;font-size:13px" hidden>×</button>
+        <button type="button" class="icon-btn" id="dash-search-clear" title="Clear search" aria-label="Clear search" style="width:18px;height:18px" hidden><svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
       </label>
       <label class="fld dash-sort"><span>Sort</span><select id="dash-sort">
         <option value="updated">Last edited</option>
@@ -894,8 +902,8 @@
         <button data-dash-view="grid" class="on" title="Grid view"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="1" width="6" height="6" rx="1"/><rect x="9" y="1" width="6" height="6" rx="1"/><rect x="1" y="9" width="6" height="6" rx="1"/><rect x="9" y="9" width="6" height="6" rx="1"/></svg></button>
         <button data-dash-view="list" title="List view"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="2" width="14" height="2.4" rx="1"/><rect x="1" y="6.8" width="14" height="2.4" rx="1"/><rect x="1" y="11.6" width="14" height="2.4" rx="1"/></svg></button>
       </div>
-      <button class="btn primary" id="dash-new">+ New project</button>
-      <button class="btn" id="dash-back">← Back to canvas</button>
+      <button class="btn primary" id="dash-new"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span>New project</span></button>
+      <button class="btn" id="dash-back"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M13 8H3M6.5 4.5L3 8l3.5 3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span id="dash-back-label">Back to canvas</span></button>
     </div>
   </header>
   <div class="dash-body">
@@ -1115,7 +1123,7 @@ function updateOverlay() {
     const canFlex = !VOID_TAGS.has(selNode.tag) && !SVG_TAGS.has(selNode.tag);
     const isFlex = selNode.styles.display === "flex" || selNode.styles.display === "inline-flex";
     $("#ctx-flex").hidden = !canFlex;
-    $("#ctx-flex").textContent = isFlex ? "− Flex" : "+ Flex";
+    $("#ctx-flex").innerHTML = `${isFlex ? `<svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3.5 8h9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>` : `<svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>`}<span>Flex</span>`;
     ctxBar.style.display = "flex";
     const abOffset = isArtboard(sel) ? 24 : 8;
     const bw = ctxBar.offsetWidth || 260, bh = ctxBar.offsetHeight || 30;
@@ -1274,11 +1282,11 @@ function nodePanel(n) {
     ${ab ? `<div class="chips">${presets.map(([lbl, pw, ph]) => `<button type="button" class="chip${(!pw || px(st.width) == pw) && px(st.height) == ph ? " on" : ""}" data-action="preset-size" data-w="${pw ?? ""}" data-h="${ph}">${lbl}</button>`).join("")}</div>` : ""}
   </div>
   <div class="sec">
-    <div class="sec-h${flex ? "" : " solo"}">Flex &amp; Spacing ${flex ? `<button class="icon-btn" data-action="unflex" title="Remove flex">−</button>` : `<button class="icon-btn" data-action="flex" title="Add flex (Shift+A)">+</button>`}</div>
+    <div class="sec-h${flex ? "" : " solo"}">Flex &amp; Spacing ${flex ? `<button class="icon-btn" data-action="unflex" title="Remove flex" aria-label="Remove flex"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3.5 8h9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>` : `<button class="icon-btn" data-action="flex" title="Add flex (Shift+A)" aria-label="Add flex"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button>`}</div>
     ${flex ? `
     <div class="flex-row">${alignGrid(st)}
       <div class="stack">
-        <div class="seg"><button data-action="dir" data-dir="row" class="${st.flexDirection !== "column" ? "on" : ""}" title="Row">→ Row</button><button data-action="dir" data-dir="column" class="${st.flexDirection === "column" ? "on" : ""}" title="Column">↓ Column</button></div>
+        <div class="seg"><button data-action="dir" data-dir="row" class="${st.flexDirection !== "column" ? "on" : ""}" title="Row"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 8h10M9.5 4.5L13 8l-3.5 3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Row</span></button><button data-action="dir" data-dir="column" class="${st.flexDirection === "column" ? "on" : ""}" title="Column"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 3v10M4.5 9.5L8 13l3.5-3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Column</span></button></div>
         ${fld("Gap", "gap", st.gap, "placeholder='0'")}
       </div>
     </div>
@@ -1286,7 +1294,7 @@ function nodePanel(n) {
     <label class="check"><input type="checkbox" data-style="overflow" value="hidden" ${st.overflow === "hidden" || st.overflow === "clip" ? "checked" : ""}> Clip content</label>
   </div>
   <div class="sec">
-    <div class="sec-h">Surface &amp; Border ${st.backgroundColor ? `<button class="icon-btn" data-action="clear" data-key="backgroundColor" title="Remove fill">−</button>` : ""}</div>
+    <div class="sec-h">Surface &amp; Border ${st.backgroundColor ? `<button class="icon-btn" data-action="clear" data-key="backgroundColor" title="Remove fill" aria-label="Remove fill"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3.5 8h9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>` : ""}</div>
     <div class="grid2"><div class="wide" style="grid-column:1/-1">${colorFld("backgroundColor", st.backgroundColor)}</div></div>
     <div class="grid2">${fld("Rad", "borderRadius", st.borderRadius, "placeholder='0'")}<label class="fld"><span>Opc</span><input data-style="opacity" data-kind="percent" value="${opacity}"></label></div>
     <div class="grid2">${fld("Bdr", "border", st.border, "placeholder='1px solid #ebebea' data-mono").replace('class="fld"', 'class="fld wide"')}</div>
@@ -1330,7 +1338,7 @@ function pagePanel() {
   const mcpUrl = `${location.origin}/mcp`;
   return `
   <div class="sec">
-    <div class="sec-h">Canvas Surface</div>
+    <div class="sec-h">Canvas surface</div>
     ${colorFld("backgroundColor", root.styles.backgroundColor, "#eef2f6", "data-page", "#eef2f6")}
     <div class="chips">
       <button type="button" class="chip${bg === "#eef2f6" || !root.styles.backgroundColor ? " on" : ""}" style="flex:1" data-action="page-bg" data-bg="#eef2f6">Light</button>
@@ -1342,7 +1350,7 @@ function pagePanel() {
     <div class="sec-h">Fonts <span class="muted">${fontLib.length} in library</span></div>
     <div class="font-list">${fontLib.map((f) => `<div class="font-row"><span class="fam" style="font-family:${esc(fontStack(f.family))}${f.source === "upload" ? `;font-weight:${f.weight};font-style:${f.style}` : ""}">${esc(f.family)}</span>
       <span class="meta">${f.source === "upload" ? `${f.weightRange ? f.weightRange.join("–") : f.weight}${f.style === "italic" ? " italic" : ""} · ${esc(f.format)}` : f.builtin ? "built-in" : "Google"}</span>
-      ${f.builtin ? "" : `<button class="icon-btn" data-action="remove-font" data-id="${esc(f.id)}" title="Remove ${esc(f.family)}" aria-label="Remove ${esc(f.family)}">×</button>`}</div>`).join("")}</div>
+      ${f.builtin ? "" : `<button class="icon-btn" data-action="remove-font" data-id="${esc(f.id)}" title="Remove ${esc(f.family)}" aria-label="Remove ${esc(f.family)}"><svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>`}</div>`).join("")}</div>
     <label class="fld"><span>Google</span><input id="google-family" placeholder="Family, e.g. Plus Jakarta"></label>
     <div class="btnrow">
       <button class="btn" data-action="add-google"><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>Google Font</button>
@@ -1350,13 +1358,13 @@ function pagePanel() {
     </div>
   </div>
   <div class="sec">
-    <div class="sec-h">MCP Server <span class="mcp-live-tag">Connected</span></div>
+    <div class="sec-h">MCP server <span class="mcp-live-tag">Connected</span></div>
     <div class="mono">${esc(mcpUrl)}</div>
     <div class="mono" id="mcp-cmd" hidden>claude mcp add --transport http weft ${esc(mcpUrl)}</div>
     <button class="btn" data-action="copy-mcp" style="width:100%"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="5" y="5" width="8.5" height="8.5" rx="1.5"/><path d="M11 5V3.5A1 1 0 0010 2.5H3.5a1 1 0 00-1 1V10a1 1 0 001 1H5"/></svg>Copy Claude Code command</button>
   </div>
   <div class="sec">
-    <div class="sec-h">Export Project <span class="muted">.zip</span></div>
+    <div class="sec-h">Export project <span class="muted">.zip</span></div>
     <div class="btnrow">
       <button class="btn primary" data-action="export-zip" data-format="html">HTML</button>
       <button class="btn" data-action="export-zip" data-format="jsx">JSX</button>
@@ -1364,7 +1372,7 @@ function pagePanel() {
     </div>
   </div>
   <div class="sec">
-    <div class="sec-h">Export Page</div>
+    <div class="sec-h">Export page</div>
     <div class="btnrow"><button class="btn" data-action="copy" data-format="html">Copy HTML + CSS</button><button class="btn" data-action="copy" data-format="jsx">Copy JSX</button></div>
   </div>
   <div class="sec">
@@ -2069,7 +2077,7 @@ function renderPages() {
     return `<div class="page-row${id === S.rootId ? " cur" : ""}" data-page="${esc(id)}">
       <span class="nm">${esc(p.name)}</span>
       <span class="pg-cnt">${cnt}</span>
-      ${S.pages.length > 1 ? `<button class="icon-btn del" data-del-page="${esc(id)}" title="Delete page">×</button>` : ""}
+      ${S.pages.length > 1 ? `<button class="icon-btn del" data-del-page="${esc(id)}" title="Delete page" aria-label="Delete page"><svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>` : ""}
     </div>`;
   }).join("");
 }
@@ -2128,7 +2136,7 @@ function openProjectMenu(open = projectMenu.hidden) {
 
 function renderProjectMenu() {
   projectMenu.innerHTML = `<button data-act="dashboard">All projects (Dashboard)</button><div class="sep"></div><div class="label">Projects</div>` +
-    projects.map((p) => `<button data-open="${esc(p.id)}"><span class="check-slot">${p.active ? "✓" : ""}</span>
+    projects.map((p) => `<button data-open="${esc(p.id)}"><span class="check-slot">${p.active ? `<svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M2.5 6.2l2.3 2.3 4.7-5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>` : ""}</span>
       <span class="pn">${esc(p.name)}</span><span class="meta">${ago(p.updatedAt)}</span></button>`).join("") +
     `<div class="sep"></div>
      <button data-act="new">New project…</button>
@@ -2202,30 +2210,30 @@ function buildCmdkEntries() {
   if (!S) return [];
   const entries = [];
   if (sel && S.nodes[sel]) {
-    entries.push({ group: "QUICK ACTIONS", label: `Copy HTML + CSS (${S.nodes[sel].name})`, kbd: "⌘C", run: () => copyExport("html", sel) });
-    entries.push({ group: "QUICK ACTIONS", label: `Copy JSX (${S.nodes[sel].name})`, kbd: "", run: () => copyExport("jsx", sel) });
+    entries.push({ group: "Quick actions", label: `Copy HTML + CSS (${S.nodes[sel].name})`, kbd: "⌘C", run: () => copyExport("html", sel) });
+    entries.push({ group: "Quick actions", label: `Copy JSX (${S.nodes[sel].name})`, kbd: "", run: () => copyExport("jsx", sel) });
   }
-  entries.push({ group: "QUICK ACTIONS", label: `${snapInput.checked ? "Disable" : "Enable"} 8px Snap Grid`, kbd: "⇧G", run: () => { setSnap(!snapInput.checked); toast(snapInput.checked ? "Snap 8px on" : "Snap 8px off"); } });
-  entries.push({ group: "QUICK ACTIONS", label: "Zoom to fit all artboards", kbd: "⇧1", run: () => zoomCmd("fit") });
-  entries.push({ group: "QUICK ACTIONS", label: "Zoom to 100%", kbd: "⇧0", run: () => zoomCmd("100") });
-  if (sel && S.nodes[sel]) entries.push({ group: "QUICK ACTIONS", label: "Zoom to selection", kbd: "⇧2", run: () => zoomCmd("selection") });
-  entries.push({ group: "QUICK ACTIONS", label: app.classList.contains("ui-hidden") ? "Show studio UI" : "Hide studio UI", kbd: "⌘\\", run: () => setUiHidden() });
-  entries.push({ group: "QUICK ACTIONS", label: "All Projects Dashboard", kbd: "⌘⇧P", run: () => openDashboard(true) });
-  entries.push({ group: "QUICK ACTIONS", label: "New artboard", kbd: "", run: () => $("#add-artboard").click() });
-  entries.push({ group: "QUICK ACTIONS", label: "New page", kbd: "", run: () => api("POST", "/api/pages", {}) });
-  entries.push({ group: "QUICK ACTIONS", label: "Export project (.zip)", kbd: "", run: () => downloadZip(S.id, "html") });
-  entries.push({ group: "QUICK ACTIONS", label: "Undo", kbd: "Ctrl+Z", run: () => api("POST", "/api/undo") });
-  entries.push({ group: "QUICK ACTIONS", label: "Redo", kbd: "Ctrl+⇧Z", run: () => api("POST", "/api/redo") });
+  entries.push({ group: "Quick actions", label: `${snapInput.checked ? "Disable" : "Enable"} 8px snap grid`, kbd: "⇧G", run: () => { setSnap(!snapInput.checked); toast(snapInput.checked ? "Snap 8px on" : "Snap 8px off"); } });
+  entries.push({ group: "Quick actions", label: "Zoom to fit all artboards", kbd: "⇧1", run: () => zoomCmd("fit") });
+  entries.push({ group: "Quick actions", label: "Zoom to 100%", kbd: "⇧0", run: () => zoomCmd("100") });
+  if (sel && S.nodes[sel]) entries.push({ group: "Quick actions", label: "Zoom to selection", kbd: "⇧2", run: () => zoomCmd("selection") });
+  entries.push({ group: "Quick actions", label: app.classList.contains("ui-hidden") ? "Show studio UI" : "Hide studio UI", kbd: "⌘\\", run: () => setUiHidden() });
+  entries.push({ group: "Quick actions", label: "All projects dashboard", kbd: "⌘⇧P", run: () => openDashboard(true) });
+  entries.push({ group: "Quick actions", label: "New artboard", kbd: "", run: () => $("#add-artboard").click() });
+  entries.push({ group: "Quick actions", label: "New page", kbd: "", run: () => api("POST", "/api/pages", {}) });
+  entries.push({ group: "Quick actions", label: "Export project (.zip)", kbd: "", run: () => downloadZip(S.id, "html") });
+  entries.push({ group: "Quick actions", label: "Undo", kbd: "Ctrl+Z", run: () => api("POST", "/api/undo") });
+  entries.push({ group: "Quick actions", label: "Redo", kbd: "Ctrl+⇧Z", run: () => api("POST", "/api/redo") });
 
   for (const [label, t, kbd] of [["Tool: Select", "select", "V"], ["Tool: Hand", "hand", "H"], ["Tool: Frame", "frame", "F"], ["Tool: Rectangle", "rect", "R"], ["Tool: Text", "text", "T"]]) {
-    entries.push({ group: "TOOLS", label, kbd: tool === t ? `Active · ${kbd}` : kbd, run: () => setTool(t) });
+    entries.push({ group: "Tools", label, kbd: tool === t ? `Active · ${kbd}` : kbd, run: () => setTool(t) });
   }
 
   for (const pid of S.pages) {
     const p = S.nodes[pid];
     if (!p) continue;
     entries.push({
-      group: "PAGES", label: p.name, kbd: pid === S.rootId ? "Current page" : "Switch page",
+      group: "Pages", label: p.name, kbd: pid === S.rootId ? "Current page" : "Switch page",
       run: () => { if (pid !== S.rootId) api("POST", `/api/pages/${encodeURIComponent(pid)}/open`); },
     });
   }
@@ -2237,7 +2245,7 @@ function buildCmdkEntries() {
     const isAb = n.parentId === S.rootId;
     const trail = isAb ? "Artboard" : `${abName} · ${n.tag}`;
     entries.push({
-      group: "LAYERS & ARTBOARDS",
+      group: "Layers & artboards",
       label: n.name,
       kbd: trail,
       search: `${n.name} ${n.tag} ${abName} ${n.text || ""}`.toLowerCase(),
@@ -2249,7 +2257,7 @@ function buildCmdkEntries() {
 
   for (const pr of projects) {
     entries.push({
-      group: "PROJECTS", label: pr.name, kbd: pr.id === S.id ? "Open" : "Open project",
+      group: "Projects", label: pr.name, kbd: pr.id === S.id ? "Open" : "Open project",
       run: () => { if (pr.id !== S.id) api("POST", `/api/projects/${encodeURIComponent(pr.id)}/open`); },
     });
   }
@@ -2381,7 +2389,7 @@ function thumbMarkup(p, compact = false) {
 function renderDashboard() {
   if (dashEl.hidden) return;
   $("#dash-count").textContent = String(projects.length);
-  $("#dash-back").textContent = S ? `← ${S.name}` : "← Back to canvas";
+  $("#dash-back-label").textContent = S ? S.name : "Back to canvas";
   const list = sortedProjects();
   $("#dash-heading").textContent = dashQuery.trim() ? `Results for “${dashQuery.trim()}”` : "All projects";
   $("#dash-summary").textContent = `Showing ${list.length} of ${plural(projects.length, "project")}`;
@@ -2404,7 +2412,7 @@ function renderDashboard() {
           <span>${plural(p.artboards ?? 0, "artboard")}</span>
           <span>${plural(p.layers ?? 0, "layer")}</span>
         </div>
-        <button class="icon-btn" data-dash-menu="${esc(p.id)}" title="Project actions" aria-label="Project actions" style="color:${p.active ? "var(--accent)" : ""}">⋯</button>
+        <button class="icon-btn" data-dash-menu="${esc(p.id)}" title="Project actions" aria-label="Project actions" style="color:${p.active ? "var(--accent)" : ""}"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="3.5" cy="8" r="1.3"/><circle cx="8" cy="8" r="1.3"/><circle cx="12.5" cy="8" r="1.3"/></svg></button>
       </div>`).join("")}</div>`;
   } else {
     dashContent.innerHTML = `<div class="dash-grid">${list.map((p) => `
@@ -2415,7 +2423,7 @@ function renderDashboard() {
             <div class="dash-name">${esc(p.name)}</div>
             <div class="dash-sub">${plural(p.pages ?? 1, "page")} · ${plural(p.layers ?? 0, "layer")} · ${ago(p.updatedAt)}</div>
           </div>
-          <button class="icon-btn" data-dash-menu="${esc(p.id)}" title="Project actions" aria-label="Project actions">⋯</button>
+          <button class="icon-btn" data-dash-menu="${esc(p.id)}" title="Project actions" aria-label="Project actions"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="3.5" cy="8" r="1.3"/><circle cx="8" cy="8" r="1.3"/><circle cx="12.5" cy="8" r="1.3"/></svg></button>
         </div>
       </article>`).join("")}</div>`;
   }
@@ -2656,9 +2664,13 @@ function setUiHidden(on = !app.classList.contains("ui-hidden")) {
   setTimeout(updateOverlay);
 }
 $("#show-ui").addEventListener("click", () => setUiHidden(false));
-$("#zoom-btn").addEventListener("click", () => { $("#zoom-menu").hidden = !$("#zoom-menu").hidden; });
-$("#zoom-menu").addEventListener("click", (e) => { const b = e.target.closest("[data-zoom]"); if (!b) return; $("#zoom-menu").hidden = true; zoomCmd(b.dataset.zoom); });
-document.addEventListener("pointerdown", (e) => { if (!e.target.closest("#zoom-menu, #zoom-btn")) $("#zoom-menu").hidden = true; });
+function setZoomMenuOpen(open) {
+  $("#zoom-menu").hidden = !open;
+  $("#zoom-btn").setAttribute("aria-expanded", String(open));
+}
+$("#zoom-btn").addEventListener("click", () => setZoomMenuOpen($("#zoom-menu").hidden));
+$("#zoom-menu").addEventListener("click", (e) => { const b = e.target.closest("[data-zoom]"); if (!b) return; setZoomMenuOpen(false); zoomCmd(b.dataset.zoom); });
+document.addEventListener("pointerdown", (e) => { if (!$("#zoom-menu").hidden && !e.target.closest("#zoom-menu, #zoom-btn")) setZoomMenuOpen(false); });
 $("#hud-fit").addEventListener("click", () => zoomCmd("fit"));
 $("#hud-hide-ui").addEventListener("click", () => setUiHidden());
 $("#hide-ui").addEventListener("click", () => setUiHidden(true));
@@ -2673,6 +2685,7 @@ if (typeof ResizeObserver !== "undefined") new ResizeObserver(updateOverlay).obs
 // ---------------------------------------------------------------------------
 // Live sync (SSE)
 // ---------------------------------------------------------------------------
+
 // ---------------------------------------------------------------------------
 // Right panel tabs + History (labelled undo history and checkpoints)
 // ---------------------------------------------------------------------------
@@ -2797,7 +2810,7 @@ function connect() {
     const { source, state } = JSON.parse(ev.data);
     const prevProject = S?.id, prevKey = viewKey();
     S = state;
-    if (!dashEl.hidden) $("#dash-back").textContent = `← ${S.name}`;
+    if (!dashEl.hidden) $("#dash-back-label").textContent = S.name;
     if (source === "mcp") toast("Updated by agent (MCP)");
     if (viewKey() === prevKey) return render();
     if (prevProject && prevProject !== S.id) expanded.clear();
