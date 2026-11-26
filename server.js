@@ -652,6 +652,31 @@ function batch(source, fn, meta = null) {
   return result;
 }
 
+function safePageOf(id) {
+  let n = state?.nodes?.[id];
+  while (n?.parentId && state.nodes[n.parentId]) n = state.nodes[n.parentId];
+  return n && isPage(n.id) ? n.id : null;
+}
+
+function syncCommentsWithState(stepNum) {
+  const list = state?.comments;
+  if (!list?.length) return false;
+  let changed = false;
+  for (const c of list) {
+    const n = state.nodes[c.nodeId];
+    if (n) {
+      if (c.layerName !== n.name) { c.layerName = n.name; changed = true; }
+      const pid = safePageOf(c.nodeId);
+      if (pid && c.pageId !== pid) { c.pageId = pid; changed = true; }
+      if (c.deletedInStep !== undefined) { delete c.deletedInStep; changed = true; }
+    } else if (c.deletedInStep === undefined) {
+      c.deletedInStep = Math.max(1, stepNum);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 function applySnapshotRaw(snap) {
   const comments = state?.comments || [];
   state = { ...structuredClone(snap), comments };
@@ -684,6 +709,7 @@ function commit(source, before, meta = null, startCpId = null) {
   historyTimeline.push(entry);
   if (historyTimeline.length > HISTORY_LIMIT) historyTimeline.shift();
   historyCursor = historyTimeline.length - 1;
+  const commentsChanged = syncCommentsWithState(historyCursor + 1);
 
   if (histSource === "mcp") lastMcpWriteAt = Date.now();
   const artboard = meta?.artboard || artboardNameForNodes(nodeIds, state, before);
@@ -692,6 +718,7 @@ function commit(source, before, meta = null, startCpId = null) {
   persist();
   broadcast(source);
   sendHistory();
+  if (commentsChanged) sendEvent("comments", { comments: state.comments });
 }
 
 function applyHistoryEntry(snap) {
@@ -717,9 +744,11 @@ function stepHistory(source, direction) {
     const entry = historyTimeline[historyCursor];
     applyHistoryEntry(entry.after);
   }
+  const commentsChanged = syncCommentsWithState(Math.max(1, historyCursor + 1));
   persist();
   broadcast(source);
   sendHistory();
+  if (commentsChanged) sendEvent("comments", { comments: state.comments });
   return true;
 }
 
@@ -737,9 +766,11 @@ function jumpHistory(source, targetIndex) {
     historyCursor = targetIndex;
     applyHistoryEntry(historyTimeline[targetIndex].after);
   }
+  const commentsChanged = syncCommentsWithState(Math.max(1, historyCursor + 1));
   persist();
   broadcast(source);
   sendHistory();
+  if (commentsChanged) sendEvent("comments", { comments: state.comments });
   return { cursor: historyCursor, moved };
 }
 
@@ -956,7 +987,16 @@ function deletePage(id, source = "api") {
   const page = getPage(id);
   if (state.pages.length === 1) throw new HttpError(400, "A project needs at least one page");
   return mutate(source, (s) => {
-    const drop = (nid) => { for (const c of s.nodes[nid].children) drop(c); delete s.nodes[nid]; };
+    const drop = (nid) => {
+      for (const c of s.nodes[nid].children) drop(c);
+      for (const cm of s.comments || []) {
+        if (cm.nodeId === nid) {
+          if (!cm.layerName) cm.layerName = s.nodes[nid].name;
+          if (!cm.pageId) cm.pageId = id;
+        }
+      }
+      delete s.nodes[nid];
+    };
     drop(id);
     s.pages = s.pages.filter((p) => p !== id);
     if (s.rootId === id) s.rootId = s.pages[0];
@@ -1050,8 +1090,15 @@ function deleteNode(id, source = "api") {
   const node = getNode(id);
   return mutate(source, (s) => {
     const removed = [];
+    const pid = pageOf(id);
     const drop = (nid) => {
       for (const c of s.nodes[nid].children) drop(c);
+      for (const cm of s.comments || []) {
+        if (cm.nodeId === nid) {
+          if (!cm.layerName) cm.layerName = s.nodes[nid].name;
+          if (!cm.pageId) cm.pageId = pid;
+        }
+      }
       removed.push(nid);
       delete s.nodes[nid];
     };
@@ -1186,7 +1233,7 @@ function latestMcpStep() {
   for (let i = historyCursor; i >= 0; i--) {
     if (historyTimeline[i].source === "mcp") {
       const e = historyTimeline[i];
-      return { historyId: e.id, label: e.label, nodeIds: e.nodeIds || [] };
+      return { historyId: e.id, label: e.label, nodeIds: e.nodeIds || [], step: i + 1 };
     }
   }
   return null;
@@ -1203,7 +1250,7 @@ function listComments({ status, nodeId, agentView = false } = {}) {
 }
 
 function addComment({ nodeId, text, agentsCanSee = true }) {
-  getNode(nodeId);
+  const node = getNode(nodeId);
   if (isPage(nodeId)) throw new HttpError(400, "Comments must attach to a layer or artboard");
   const cleanText = String(text ?? "").trim().slice(0, 4000);
   if (!cleanText) throw new HttpError(400, "Comment text cannot be empty");
@@ -1211,6 +1258,8 @@ function addComment({ nodeId, text, agentsCanSee = true }) {
   const thread = {
     id: newId(),
     nodeId,
+    pageId: pageOf(nodeId),
+    layerName: node.name,
     status: "open",
     agentsCanSee: agentsCanSee !== false,
     messages: [{ id: newId(), author: "you", text: cleanText, at: now }],
@@ -1251,9 +1300,12 @@ function replyComment(id, { text, author = "you", linkStep = false, agentsCanSee
 function updateComment(id, { status, agentsCanSee } = {}) {
   const thread = (state.comments || []).find((c) => c.id === id);
   if (!thread) throw new HttpError(404, `Comment "${id}" not found`);
+  const now = new Date().toISOString();
   if (status !== undefined) {
     if (!["open", "read", "replied", "resolved"].includes(status)) throw new HttpError(400, "Invalid comment status");
     thread.status = status;
+    if (status === "read") thread.readAt = now;
+    if (status === "resolved") thread.resolvedAt = now;
   }
   if (agentsCanSee !== undefined) thread.agentsCanSee = Boolean(agentsCanSee);
   persist({ touchUpdatedAt: false });
