@@ -179,7 +179,7 @@ test("server + MCP integration & edge cases", { timeout: 120_000 }, async (t) =>
       capabilities: {},
       clientInfo: { name: "test-client", version: "1.0.0" },
     });
-    assert.equal(init.serverInfo.name, "paper-lite");
+    assert.equal(init.serverInfo.name, "weft");
 
     const info = mcpTextJson(await mcp(srv.baseUrl, "tools/call", { name: "get_basic_info", arguments: {} }));
     assert.equal(info.page.fill, "#eef2f6");

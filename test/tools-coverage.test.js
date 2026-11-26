@@ -15,10 +15,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const EXPECTED_TOOLS = [
   "add_font", "create_artboard", "create_node", "create_page", "create_project", "delete_nodes", "delete_page",
   "delete_project", "duplicate_nodes", "duplicate_project", "find_nodes", "finish_working_on_nodes", "get_basic_info",
-  "get_children", "get_computed_styles", "get_guide", "get_jsx", "get_node_info", "get_screenshot", "get_selection",
-  "get_tree_summary", "list_fonts", "list_projects", "move_nodes", "open_project", "redo", "remove_font", "rename_nodes",
-  "rename_project", "set_selection", "set_text_content", "switch_page", "undo", "update_node", "update_page",
-  "update_styles", "write_html",
+  "get_children", "get_comments", "get_computed_styles", "get_guide", "get_jsx", "get_node_info", "get_screenshot",
+  "get_selection", "get_tree_summary", "list_checkpoints", "list_fonts", "list_projects", "move_nodes", "open_project",
+  "redo", "remove_font", "rename_nodes", "rename_project", "reply_to_comment", "resolve_comment", "restore_checkpoint",
+  "save_checkpoint", "set_selection", "set_session_title", "set_text_content", "switch_page", "undo", "update_node",
+  "update_page", "update_styles", "write_html",
 ];
 
 // Markup an attacker could put in layer names / text to break out of exported or rendered HTML.
@@ -136,7 +137,7 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
   t.after(() => srv.stop());
   const B = srv.baseUrl;
 
-  await t.test("tools/list exposes exactly the 37 documented tools with schemas", async () => {
+  await t.test("tools/list exposes exactly the 44 documented tools with schemas", async () => {
     const { tools } = await rpc(B, "tools/list");
     assert.deepEqual(tools.map((x) => x.name).sort(), EXPECTED_TOOLS);
     for (const tool of tools) {
@@ -150,7 +151,7 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
 
   await t.test("initialize advertises server info and instructions", async () => {
     const init = await rpc(B, "initialize", { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "test", version: "1" } });
-    assert.equal(init.serverInfo.name, "paper-lite");
+    assert.equal(init.serverInfo.name, "weft");
     const pkg = JSON.parse(await fs.readFile(path.join(PAPER_ROOT, "package.json"), "utf8"));
     assert.equal(init.serverInfo.version, pkg.version, "MCP server version comes from package.json");
     assert.ok(init.instructions?.includes("get_guide"));
@@ -388,6 +389,45 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
     assert.equal((await ok(B, "get_node_info", { nodeId: para })).name, name, "batch is all-or-nothing");
   });
 
+  await t.test("comments, checkpoints and session titles round-trip over MCP", async () => {
+    const post = (url, body) => fetch(`${B}${url}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).then((r) => r.json());
+    const thread = await post("/api/comments", { nodeId: title, text: "Make the title bigger" });
+    assert.equal(thread.status, "open");
+    const hidden = await post("/api/comments", { nodeId: title, text: "Private note", agentsCanSee: false });
+
+    const open = await ok(B, "get_comments", { status: "open" });
+    assert.ok(open.some((c) => c.id === thread.id && c.layerName === "Title"), "agent sees the open thread with its layer name");
+    assert.ok(!open.some((c) => c.id === hidden.id), "threads hidden from agents are not returned");
+    const after = await ok(B, "get_comments", {});
+    assert.equal(after.find((c) => c.id === thread.id).status, "read", "reading marks the thread read");
+
+    await ok(B, "update_styles", { updates: [{ nodeIds: [title], styles: { fontSize: 40 } }] });
+    const replied = await ok(B, "reply_to_comment", { id: thread.id, text: "Bumped to 40px" });
+    assert.equal(replied.status, "replied");
+    const agentMsg = replied.messages.at(-1);
+    assert.notEqual(agentMsg.author, "you");
+    assert.ok(agentMsg.linkedStep?.historyId, "reply links the agent's last edit");
+    await fails(B, "reply_to_comment", { id: "ghost", text: "x" }, /not found/);
+
+    const resolved = await ok(B, "resolve_comment", { id: thread.id });
+    assert.equal(resolved.status, "resolved");
+
+    const cp = await ok(B, "save_checkpoint", { name: "Before experiment" });
+    assert.ok(cp.id);
+    const list = await ok(B, "list_checkpoints");
+    assert.ok((Array.isArray(list) ? list : list.checkpoints).some((c) => c.id === cp.id && c.name === "Before experiment"));
+    await ok(B, "update_node", { nodeId: title, name: "Experiment" });
+    await ok(B, "restore_checkpoint", { id: cp.id });
+    assert.equal((await ok(B, "get_node_info", { nodeId: title })).name, "Title", "restore brings the layer back");
+    await ok(B, "undo");
+    assert.equal((await ok(B, "get_node_info", { nodeId: title })).name, "Experiment", "restore is one undoable step");
+    await ok(B, "redo");
+    await fails(B, "restore_checkpoint", { id: "ghost" }, /not found/);
+
+    const titled = await ok(B, "set_session_title", { text: "Tested comments" });
+    assert.ok(JSON.stringify(titled).includes("Tested comments"));
+  });
+
   await t.test("write_html replace mode swaps a layer in place", async () => {
     const idx = (await ok(B, "get_children", { nodeId: section })).findIndex((k) => k.id === para);
     const res = await ok(B, "write_html", { mode: "replace", targetNodeId: para, html: `<p data-name="Replaced">New</p>` });
@@ -543,7 +583,7 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
   });
 
   await t.test("server logged no unexpected errors", () => {
-    assert.doesNotMatch(srv.logs(), /\[paper-lite\] (?!MCP error)|TypeError|ReferenceError|UnhandledPromise/);
+    assert.doesNotMatch(srv.logs(), /\[weft\] (?!MCP error)|TypeError|ReferenceError|UnhandledPromise/);
   });
 });
 
@@ -746,7 +786,7 @@ test("stdio relay forwards MCP traffic to the HTTP server", { timeout: 60_000 },
     { jsonrpc: "2.0", method: "notifications/initialized" },
     { jsonrpc: "2.0", id: 2, method: "tools/list" },
   ]);
-  assert.equal(replies.find((r) => r.id === 1)?.result?.serverInfo?.name, "paper-lite");
+  assert.equal(replies.find((r) => r.id === 1)?.result?.serverInfo?.name, "weft");
   assert.equal(replies.find((r) => r.id === 2)?.result?.tools?.length, EXPECTED_TOOLS.length);
 
   const port = await freePort();
