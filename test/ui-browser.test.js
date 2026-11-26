@@ -193,7 +193,7 @@ async function mcpCall(baseUrl, name, args = {}) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-test("browser E2E: Light Precision UI, Command Palette (250+ layers), HUD, Context Bar, Dashboard & Viewports", async (t) => {
+test("browser E2E: Light Precision UI, Command Palette (250+ layers), HUD, Context Bar, Dashboard & Viewports", { timeout: 180_000 }, async (t) => {
   const browserBin = findBrowser();
   if (!browserBin) {
     t.skip("No headless Chromium/Chrome binary found");

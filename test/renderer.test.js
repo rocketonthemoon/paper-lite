@@ -11,7 +11,7 @@ const withTimeout = (p, ms, label) => {
   return Promise.race([p, limit]).finally(() => clearTimeout(timer));
 };
 
-test("renderer recovers after Chrome exits between and during jobs", async (t) => {
+test("renderer recovers after Chrome exits between and during jobs", { timeout: 180_000 }, async (t) => {
   const probe = new Renderer("http://127.0.0.1:1");
   if (!probe.available) {
     t.skip("no Chrome/Chromium available");
@@ -52,7 +52,7 @@ test("renderer recovers after Chrome exits between and during jobs", async (t) =
   assert.deepEqual(computed.box.box, { x: 0, y: 0, width: 100, height: 50 });
 });
 
-test("renderer falls back to the next browser when one fails to start", async (t) => {
+test("renderer falls back to the next browser when one fails to start", { timeout: 120_000 }, async (t) => {
   if (!new Renderer("http://127.0.0.1:1").available) {
     t.skip("no Chrome/Chromium available");
     return;

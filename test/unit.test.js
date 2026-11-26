@@ -16,7 +16,7 @@ import {
   normalizeProject,
 } from "../model.js";
 import { htmlToSpecs, parseInlineStyle } from "../html-import.js";
-import { FontLibrary, familiesIn, parseFontFileName } from "../fonts.js";
+import { FontLibrary, familiesIn, parseFontFileName, renameWithRetry } from "../fonts.js";
 
 test("model: cleanTag normalises case and rejects disallowed tags", () => {
   assert.equal(cleanTag("DIV"), "div");
@@ -207,6 +207,21 @@ test("fonts: overlapping library changes all succeed and are all saved", async (
     const onDisk = JSON.parse(await fs.readFile(path.join(tmp, "fonts.json"), "utf8")).map((f) => f.family).sort();
     assert.deepEqual(onDisk, families.slice(3).sort(), "fonts.json reflects every change");
     assert.deepEqual((await fs.readdir(tmp)).filter((f) => f.endsWith(".tmp")), [], "no temp files left");
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("fonts: renameWithRetry renames, and fails fast on errors that aren't transient locks", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "pl-rename-"));
+  try {
+    const a = path.join(tmp, "a.json"), b = path.join(tmp, "b.json");
+    await fs.writeFile(a, "{}");
+    await renameWithRetry(a, b);
+    assert.equal(await fs.readFile(b, "utf8"), "{}");
+    const t0 = Date.now();
+    await assert.rejects(() => renameWithRetry(path.join(tmp, "missing.json"), b), { code: "ENOENT" });
+    assert.ok(Date.now() - t0 < 100, "a missing file is not retried");
   } finally {
     await fs.rm(tmp, { recursive: true, force: true });
   }

@@ -5,6 +5,21 @@ import path from "node:path";
 import zlib from "node:zlib";
 import { HttpError, newId } from "./model.js";
 
+/**
+ * fs.rename that retries briefly on Windows' transient lock errors (antivirus or the search indexer holding the
+ * file for a moment), as graceful-fs does. Other errors, and errors that persist, are thrown.
+ */
+export async function renameWithRetry(from, to, attempts = 8) {
+  for (let i = 1; ; i++) {
+    try {
+      return await fs.rename(from, to);
+    } catch (err) {
+      if (i >= attempts || !["EPERM", "EBUSY", "EACCES"].includes(err.code)) throw err;
+      await new Promise((r) => setTimeout(r, 15 * i));
+    }
+  }
+}
+
 const MAX_BYTES = 8 * 1024 * 1024;
 const FORMATS = { woff2: "woff2", woff: "woff", ttf: "truetype", otf: "opentype" };
 const BUILTIN = [
@@ -198,7 +213,7 @@ export class FontLibrary {
     const run = async () => {
       const tmp = `${this.indexFile}.${process.pid}.tmp`;
       await fs.writeFile(tmp, JSON.stringify(this.fonts, null, 2));
-      await fs.rename(tmp, this.indexFile);
+      await renameWithRetry(tmp, this.indexFile);
     };
     this.saving = (this.saving || Promise.resolve()).catch(() => {}).then(run);
     return this.saving;

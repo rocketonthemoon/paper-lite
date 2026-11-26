@@ -130,7 +130,7 @@ async function fails(baseUrl, name, args, pattern) {
   return r.text;
 }
 
-test("MCP tools: every registered tool works end to end", async (t) => {
+test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, async (t) => {
   const browser = findBrowser();
   const srv = await startTestServer({ chromePath: browser || "" });
   t.after(() => srv.stop());
@@ -547,7 +547,7 @@ test("MCP tools: every registered tool works end to end", async (t) => {
   });
 });
 
-test("persistence: projects and edits survive a restart", async (t) => {
+test("persistence: projects and edits survive a restart", { timeout: 60_000 }, async (t) => {
   const srv = await startTestServer();
   const B = srv.baseUrl;
   const proj = await ok(B, "create_project", { name: "Persisted" });
@@ -587,7 +587,7 @@ test("persistence: projects and edits survive a restart", async (t) => {
   assert.ok((await ok(B2, "list_fonts")).some((f) => f.family === "Inter"));
 });
 
-test("startup survives a corrupt project file and reports it clearly", async (t) => {
+test("startup survives a corrupt project file and reports it clearly", { timeout: 60_000 }, async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pl-tools-corrupt-"));
   const page = { id: "p1", name: "Page 1", tag: "div", children: [], styles: {}, attrs: {} };
   await fs.mkdir(path.join(dir, "projects"), { recursive: true });
@@ -645,7 +645,15 @@ async function openBrowser(bin, url) {
     if (m.id && pending.has(m.id)) { pending.get(m.id)(m); pending.delete(m.id); }
     else if (m.method === "Runtime.exceptionThrown") errors.push(m.params.exceptionDetails?.exception?.description || m.params.exceptionDetails?.text);
   });
-  const send = (method, params = {}) => new Promise((r) => { const id = ++seq; pending.set(id, r); ws.send(JSON.stringify({ id, method, params })); });
+  // A dead browser must fail the test, not hang it: reject in-flight calls when the socket closes or a call stalls.
+  ws.addEventListener("close", () => { for (const fail of pending.values()) fail({ error: { message: "Chrome connection closed" } }); pending.clear(); });
+  const send = (method, params = {}) => new Promise((resolve, reject) => {
+    if (ws.readyState !== WebSocket.OPEN) { reject(new Error(`${method}: Chrome connection closed`)); return; }
+    const id = ++seq;
+    const timer = setTimeout(() => { pending.delete(id); reject(new Error(`${method}: no answer from Chrome in 30s`)); }, 30_000);
+    pending.set(id, (m) => { clearTimeout(timer); if (m.error && !m.result) reject(new Error(`${method}: ${m.error.message}`)); else resolve(m); });
+    ws.send(JSON.stringify({ id, method, params }));
+  });
   const evalJs = async (expression) => {
     const r = await send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
     if (r.result?.exceptionDetails) throw new Error(r.result.exceptionDetails.exception?.description || "eval failed");
@@ -667,7 +675,7 @@ async function openBrowser(bin, url) {
   return { evalJs, errors, close };
 }
 
-test("browser UI escapes hostile project, page, layer and text names", { skip: !findBrowser() && "no Chrome/Chromium available" }, async (t) => {
+test("browser UI escapes hostile project, page, layer and text names", { skip: !findBrowser() && "no Chrome/Chromium available", timeout: 120_000 }, async (t) => {
   const srv = await startTestServer();
   t.after(() => srv.stop());
   const B = srv.baseUrl;
@@ -713,7 +721,7 @@ test("browser UI escapes hostile project, page, layer and text names", { skip: !
   assert.deepEqual(ui.errors, [], "no runtime errors in the UI");
 });
 
-test("stdio relay forwards MCP traffic to the HTTP server", async (t) => {
+test("stdio relay forwards MCP traffic to the HTTP server", { timeout: 60_000 }, async (t) => {
   const srv = await startTestServer();
   t.after(() => srv.stop());
 

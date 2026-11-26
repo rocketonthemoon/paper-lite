@@ -12,7 +12,7 @@ import {
   HttpError, ID_RE, SVG_TAGS, VOID_TAGS, cleanName, cleanTag, emptyPage, emptyProject, lenientMerge, mergeAttrs, mergeStyles,
   newId, normalizeProject,
 } from "./model.js";
-import { FontLibrary, familiesIn } from "./fonts.js";
+import { FontLibrary, familiesIn, renameWithRetry } from "./fonts.js";
 import { htmlToSpecs } from "./html-import.js";
 import { Renderer } from "./renderer.js";
 import { registerTools, SERVER_INSTRUCTIONS } from "./mcp-tools.js";
@@ -57,7 +57,7 @@ const metaOf = (id) => {
 async function writeAtomic(file, text) {
   const tmp = `${file}.${process.pid}.tmp`;
   await fs.writeFile(tmp, text, "utf8");
-  await fs.rename(tmp, file);
+  await renameWithRetry(tmp, file);
 }
 
 // All disk writes are serialized so files are never written concurrently.

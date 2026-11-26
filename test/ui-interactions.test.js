@@ -108,14 +108,29 @@ async function startBrowser(bin, url) {
     }
     if (m.method === "Browser.downloadWillBegin") downloads.push(m.params.suggestedFilename);
   });
+  // A dead browser must fail the test, not hang it: reject in-flight calls when the socket closes or a call stalls.
+  ws.addEventListener("close", () => { for (const fail of pending.values()) fail({ error: { message: "Chrome connection closed" } }); pending.clear(); });
   const send = (method, params = {}) => new Promise((resolve, reject) => {
+    if (ws.readyState !== WebSocket.OPEN) { reject(new Error(`${method}: Chrome connection closed`)); return; }
     const id = ++seq;
-    pending.set(id, (m) => (m.error ? reject(new Error(`${method}: ${m.error.message}`)) : resolve(m.result)));
+    const timer = setTimeout(() => { pending.delete(id); reject(new Error(`${method}: no answer from Chrome in 30s`)); }, 30_000);
+    pending.set(id, (m) => { clearTimeout(timer); return m.error ? reject(new Error(`${method}: ${m.error.message}`)) : resolve(m.result); });
     ws.send(JSON.stringify({ id, method, params }));
   });
   await send("Runtime.enable");
   await send("Page.enable");
   await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+  // PL_UI_CPU_THROTTLE=4 slows the page down like a busy CI runner, to shake out timing assumptions locally.
+  if (Number(process.env.PL_UI_CPU_THROTTLE) > 1) await send("Emulation.setCPUThrottlingRate", { rate: Number(process.env.PL_UI_CPU_THROTTLE) });
+  // PL_UI_SSE_DELAY=300 holds every live update for that many ms, imitating a UI that lags behind the server.
+  if (Number(process.env.PL_UI_SSE_DELAY) > 0) {
+    await send("Page.addScriptToEvaluateOnNewDocument", { source: `(() => {
+      const add = EventSource.prototype.addEventListener;
+      EventSource.prototype.addEventListener = function (type, fn, opts) {
+        return add.call(this, type, (ev) => setTimeout(() => fn(ev), ${Number(process.env.PL_UI_SSE_DELAY)}), opts);
+      };
+    })();` });
+  }
   await send("Browser.setDownloadBehavior", { behavior: "allowAndName", downloadPath: profileDir, eventsEnabled: true }).catch(() => {});
   await send("Browser.grantPermissions", { permissions: ["clipboardReadWrite", "clipboardSanitizedWrite"], origin: new URL(url).origin }).catch(() => {});
   await send("Page.navigate", { url });
@@ -182,7 +197,7 @@ async function mcp(baseUrl, name, args = {}) {
   try { return JSON.parse(text); } catch { return text; }
 }
 
-test("UI interactions: drawing, editing, shortcuts, panels, projects and live sync", { skip: !findBrowser() && "no Chrome/Chromium available" }, async (t) => {
+test("UI interactions: drawing, editing, shortcuts, panels, projects and live sync", { skip: !findBrowser() && "no Chrome/Chromium available", timeout: 300_000 }, async (t) => {
   const srv = await startServer();
   const B = srv.baseUrl;
   const ui = await startBrowser(findBrowser(), `${B}/`);
@@ -194,12 +209,27 @@ test("UI interactions: drawing, editing, shortcuts, panels, projects and live sy
   const rect = (selector) => ui.evalJs(`(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return null; const r = el.getBoundingClientRect(); return { x: r.left, y: r.top, w: r.width, h: r.height, cx: r.left + r.width / 2, cy: r.top + r.height / 2 }; })()`);
   const nodeRect = (id) => rect(`#world [data-node-id="${id}"]`);
   const uiSel = () => ui.evalJs("sel");
-  const waitFor = async (fn, label, ms = 4000) => {
+  // The server applies a change before the browser hears about it over SSE. Keyboard shortcuts and panels act on the
+  // UI's copy of the state, so after every wait we also let the UI catch up to the server's project + version.
+  // (On a busy CI runner that gap is long enough for e.g. a second Shift+A to see stale styles.)
+  const ms = Number(process.env.PL_UI_WAIT_MS) || 8000;
+  const synced = async () => {
     const end = Date.now() + ms;
+    let ui0, srv0;
+    while (Date.now() < end) {
+      srv0 = await state();
+      ui0 = await ui.evalJs("S ? { id: S.id, version: S.version } : null");
+      if (ui0 && ui0.id === srv0.id && ui0.version === srv0.version) return;
+      await sleep(40);
+    }
+    assert.fail(`UI never caught up with the server (ui ${JSON.stringify(ui0)} vs server ${JSON.stringify({ id: srv0?.id, version: srv0?.version })})`);
+  };
+  const waitFor = async (fn, label, timeout = ms) => {
+    const end = Date.now() + timeout;
     let last;
     while (Date.now() < end) {
       last = await fn();
-      if (last) return last;
+      if (last) { await synced(); return last; }
       await sleep(80);
     }
     const ctx = await ui.evalJs(`JSON.stringify({ busy, editingId, pendingRender, sel, tool, toast: document.getElementById("toast").textContent })`).catch(() => "?");
