@@ -51,3 +51,29 @@ test("renderer recovers after Chrome exits between and during jobs", async (t) =
   const computed = await withTimeout(renderer.computed({ artboardId: "board", nodeIds: ["box"], width: 300, height: 200, properties: ["width"] }), 30_000, "computed");
   assert.deepEqual(computed.box.box, { x: 0, y: 0, width: 100, height: 50 });
 });
+
+test("renderer falls back to the next browser when one fails to start", async (t) => {
+  if (!new Renderer("http://127.0.0.1:1").available) {
+    t.skip("no Chrome/Chromium available");
+    return;
+  }
+  // Point CHROME_PATH at something that is not a browser (Node exits on Chrome's flags), then load a fresh copy
+  // of the module so its candidate list picks that up first.
+  const saved = process.env.CHROME_PATH;
+  process.env.CHROME_PATH = process.execPath;
+  const { Renderer: FreshRenderer } = await import(`../renderer.js?fallback=${Date.now()}`);
+  if (saved === undefined) delete process.env.CHROME_PATH;
+  else process.env.CHROME_PATH = saved;
+
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { "content-type": "text/html" });
+    res.end(`<div class="layer-board" style="width:120px;height:80px;background:#0000ff"></div>`);
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const renderer = new FreshRenderer(`http://127.0.0.1:${server.address().port}`);
+  t.after(() => { renderer.stop(); server.close(); });
+
+  const shot = await withTimeout(renderer.screenshot({ artboardId: "board", nodeId: "board", width: 120, height: 80 }), 40_000, "screenshot with a broken first candidate");
+  assert.equal(shot.width, 120);
+  assert.notEqual(renderer.executable, process.execPath, "a real browser was used");
+});

@@ -5,6 +5,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+// Tried in order until one starts. Real Chrome builds come before Ubuntu's /usr/bin/chromium-browser, which is often
+// only a Snap wrapper that can't run headless (e.g. on CI runners).
 const CANDIDATES = [
   process.env.CHROME_PATH,
   "C:/Program Files/Google/Chrome/Application/chrome.exe",
@@ -12,9 +14,10 @@ const CANDIDATES = [
   "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe",
   "C:/Program Files/Microsoft/Edge/Application/msedge.exe",
   "/usr/local/bin/chrome-headless-shell", "/usr/bin/chromium-headless-shell",
-  "/usr/bin/chromium-browser", "/usr/bin/chromium", "/usr/bin/google-chrome",
+  "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable", "/usr/bin/chromium", "/usr/bin/chromium-browser",
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
 ].filter(Boolean);
+const START_TIMEOUT = 15_000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const SEND_TIMEOUT = 30_000;
 // Chrome can hold the profile directory briefly after exiting, so retry the removal a few times.
@@ -46,10 +49,16 @@ export class Renderer {
     this.pending = new Map();
     this.profile = null;
     this.idleTimer = null;
+    this.exe = null;
   }
 
   get available() {
     return CANDIDATES.some((p) => fs.existsSync(p));
+  }
+
+  /** The browser executable in use once one has started (null before). */
+  get executable() {
+    return this.exe ?? null;
   }
 
   // The socket can still look open for a moment after Chrome dies, so also require a live process.
@@ -59,9 +68,26 @@ export class Renderer {
 
   async start() {
     if (this.connected) return;
+    // Once a browser has worked, keep using it; otherwise try each installed one until one starts.
+    const exes = this.exe ? [this.exe] : [...new Set(CANDIDATES)].filter((p) => fs.existsSync(p));
+    if (!exes.length) throw new Error("No Chrome/Chromium/Edge found for rendering — set CHROME_PATH");
+    let lastErr;
+    for (const exe of exes) {
+      try {
+        await this.launch(exe);
+        if (this.exe !== exe && exes.length > 1 && exe !== exes[0]) console.warn(`[paper-lite renderer] using ${exe} (${exes[0]} did not start)`);
+        this.exe = exe;
+        return;
+      } catch (err) {
+        lastErr = err;
+        if (this.exe) { this.exe = null; return this.start(); } // the remembered browser stopped working: search again
+      }
+    }
+    throw new Error(`${lastErr.message} (tried: ${exes.join(", ")}; set CHROME_PATH to a working Chrome/Chromium)`);
+  }
+
+  async launch(exe) {
     this.stop(); // clear any half-dead browser before launching a fresh one
-    const exe = CANDIDATES.find((p) => fs.existsSync(p));
-    if (!exe) throw new Error("No Chrome/Chromium/Edge found for rendering — set CHROME_PATH");
     const profile = fs.mkdtempSync(path.join(os.tmpdir(), "paper-lite-render-"));
     this.profile = profile;
     const isHeadlessShell = path.basename(exe).includes("headless");
@@ -84,7 +110,7 @@ export class Renderer {
     });
     const wsUrl = await new Promise((resolve, reject) => {
       let buf = "";
-      const timer = setTimeout(() => reject(new Error("Chrome did not start within 15s")), 15000);
+      const timer = setTimeout(() => reject(new Error(`Chrome did not start within ${START_TIMEOUT / 1000}s`)), START_TIMEOUT);
       proc.stderr.on("data", (d) => {
         buf += d;
         const m = buf.match(/DevTools listening on (ws:\/\/\S+)/);
