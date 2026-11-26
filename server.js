@@ -266,16 +266,16 @@ async function duplicateProject(id, name) {
 async function deleteProject(id, source = "api") {
   metaOf(id);
   if (workspace.projects.length === 1) throw new HttpError(400, "Cannot delete the only project");
+  // Switch away first so there is never a moment without an open project (requests and timers read `state`).
+  if (state.id === id) {
+    const next = projectList().find((p) => p.id !== id);
+    await openProject(next.id, source);
+  }
   workspace.projects = workspace.projects.filter((p) => p.id !== id);
   previewCache.delete(id);
   await queueDisk(() => fs.rm(projectFile(id), { force: true }));
-  if (state.id === id) {
-    state = null;
-    await openProject(projectList()[0].id, source);
-  } else {
-    await saveWorkspace();
-    sendEvent("projects", { projects: projectList() });
-  }
+  await saveWorkspace();
+  sendEvent("projects", { projects: projectList() });
   return { deleted: id };
 }
 
@@ -346,7 +346,7 @@ let uiSelection = { ids: [], at: 0 };
 
 function presenceList() {
   const now = Date.now();
-  for (const [id, p] of presence) if (now - p.at > PRESENCE_TTL || !state.nodes[id]) presence.delete(id);
+  for (const [id, p] of presence) if (now - p.at > PRESENCE_TTL || !state?.nodes[id]) presence.delete(id);
   return [...presence].map(([id, p]) => ({ id, label: p.label }));
 }
 function touch(nodeIds, label = "Agent") {
@@ -468,7 +468,15 @@ function updateNode(id, patch, source = "api") {
   const node = getNode(id);
   const next = {};
   if (patch.name !== undefined) next.name = cleanName(patch.name, node.name);
-  if (patch.tag !== undefined) next.tag = cleanTag(patch.tag);
+  if (patch.tag !== undefined) {
+    next.tag = cleanTag(patch.tag);
+    // img/hr/br can't hold children, and HTML and SVG children don't render inside each other.
+    if (node.children.length && next.tag !== node.tag) {
+      if (VOID_TAGS.has(next.tag)) throw new HttpError(400, `<${next.tag}> can't contain child layers; move or delete them first`);
+      const toSvg = SVG_TAGS.has(next.tag), wasSvg = SVG_TAGS.has(node.tag);
+      if (toSvg !== wasSvg) throw new HttpError(400, `Can't switch between HTML and SVG tags while the layer has children`);
+    }
+  }
   if (patch.text !== undefined) next.text = String(patch.text);
   if (patch.styles !== undefined) next.styles = mergeStyles(patch.replaceStyles ? {} : node.styles, patch.styles);
   if (patch.attrs !== undefined) next.attrs = mergeAttrs(node.attrs, patch.attrs, next.tag ?? node.tag);

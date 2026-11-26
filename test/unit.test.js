@@ -194,3 +194,20 @@ test("fonts: parseFontFileName, familiesIn, and FontLibrary manage Google and up
     await fs.rm(tmp, { recursive: true, force: true });
   }
 });
+
+test("fonts: overlapping library changes all succeed and are all saved", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "pl-fonts-race-"));
+  try {
+    const lib = new FontLibrary(tmp);
+    await lib.load();
+    const families = ["Inter", "Manrope", "Sora", "Outfit", "Lexend", "Urbanist", "Figtree", "Onest"];
+    const added = await Promise.all(families.map((family) => lib.addGoogle({ family })));
+    await Promise.all(added.slice(0, 3).map((f) => lib.remove(f.id)));
+
+    const onDisk = JSON.parse(await fs.readFile(path.join(tmp, "fonts.json"), "utf8")).map((f) => f.family).sort();
+    assert.deepEqual(onDisk, families.slice(3).sort(), "fonts.json reflects every change");
+    assert.deepEqual((await fs.readdir(tmp)).filter((f) => f.endsWith(".tmp")), [], "no temp files left");
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});

@@ -193,10 +193,15 @@ export class FontLibrary {
     }
   }
 
-  async save() {
-    const tmp = `${this.indexFile}.tmp`;
-    await fs.writeFile(tmp, JSON.stringify(this.fonts, null, 2));
-    await fs.rename(tmp, this.indexFile);
+  // Saves run one at a time (overlapping writes used to race on the same temp file); each writes the latest list.
+  save() {
+    const run = async () => {
+      const tmp = `${this.indexFile}.${process.pid}.tmp`;
+      await fs.writeFile(tmp, JSON.stringify(this.fonts, null, 2));
+      await fs.rename(tmp, this.indexFile);
+    };
+    this.saving = (this.saving || Promise.resolve()).catch(() => {}).then(run);
+    return this.saving;
   }
 
   list() {

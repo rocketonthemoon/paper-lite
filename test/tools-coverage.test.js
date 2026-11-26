@@ -183,6 +183,28 @@ test("MCP tools: every registered tool works end to end", async (t) => {
     await fails(B, "open_project", { projectId: "../etc" }, /not found|Invalid/);
     await fails(B, "create_project", { name: "" });
 
+    // Deleting the open project must never leave a moment without one. A large project to fall back to makes
+    // the switch take a while; keep polling throughout and every response must still have an open project.
+    const big = await ok(B, "create_project", { name: "Big fallback" });
+    const bigBoard = await ok(B, "create_artboard", { name: "Big" });
+    await ok(B, "write_html", { parentId: bigBoard.id, html: `<p>${"x".repeat(3_000_000)}</p>` });
+    const doomed = await ok(B, "create_project", { name: "Doomed" });
+    let deleting = true;
+    const outcomes = [];
+    // A few sequential pollers (one request in flight each) using a small response.
+    const pollers = Array.from({ length: 4 }, async () => {
+      while (deleting) outcomes.push(!(await call(B, "get_tree_summary", { depth: 0 })).isError);
+    });
+    await sleep(20);
+    const del = await call(B, "delete_project", { projectId: doomed.id });
+    deleting = false;
+    await Promise.all(pollers);
+    assert.equal(del.isError, false, del.text);
+    assert.ok(outcomes.length > 4, "polled while deleting");
+    assert.ok(outcomes.every(Boolean), `${outcomes.filter((x) => !x).length} of ${outcomes.length} requests saw no open project`);
+    assert.equal((await ok(B, "get_basic_info")).project.id, big.id, "falls back to the most recent other project");
+    await ok(B, "delete_project", { projectId: big.id });
+
     const opened = await ok(B, "open_project", { projectId });
     assert.equal(opened.id, projectId);
     assert.equal((await ok(B, "get_basic_info")).project.id, projectId);
@@ -311,6 +333,10 @@ test("MCP tools: every registered tool works end to end", async (t) => {
     await ok(B, "update_node", { nodeId: para, styles: { opacity: 0.5 }, replaceStyles: true });
     assert.deepEqual((await ok(B, "get_node_info", { nodeId: para })).styles, { opacity: "0.5" });
     await fails(B, "update_node", { nodeId: para, tag: "script" }, /not allowed/);
+    await fails(B, "update_node", { nodeId: section, tag: "img" }, /can't contain child layers/);
+    await fails(B, "update_node", { nodeId: section, tag: "svg" }, /HTML and SVG/);
+    await ok(B, "update_node", { nodeId: section, tag: "article" });
+    await ok(B, "update_node", { nodeId: section, tag: "section" });
     await fails(B, "update_node", { nodeId: para, attrs: { onclick: "x" } }, /not supported/);
 
     assert.deepEqual(await ok(B, "set_text_content", { updates: [{ nodeId: button, text: "Start now" }] }), { updated: 1 });
