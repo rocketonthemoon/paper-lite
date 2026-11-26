@@ -83,17 +83,40 @@ async function startBrowser(bin, url) {
   const cdpPort = await freePort();
   const proc = spawn(bin, [
     ...(path.basename(bin).includes("headless") ? [] : ["--headless=new"]),
-    "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", "--force-device-scale-factor=1",
+    "--no-sandbox", "--no-first-run", "--no-default-browser-check", "--disable-gpu", "--disable-dev-shm-usage", "--force-device-scale-factor=1",
     `--remote-debugging-port=${cdpPort}`, `--user-data-dir=${profileDir}`, "--window-size=1440,900", "about:blank",
   ], { stdio: "ignore" });
-  let wsUrl;
-  for (let i = 0; i < 150 && !wsUrl; i++) {
-    try { wsUrl = (await (await fetch(`http://127.0.0.1:${cdpPort}/json/list`)).json()).find((p) => p.type === "page")?.webSocketDebuggerUrl; } catch {}
-    if (!wsUrl) await sleep(80);
+  const kill = async () => {
+    if (proc.exitCode === null && proc.signalCode === null) {
+      proc.kill("SIGTERM");
+      await new Promise((r) => {
+        const t = setTimeout(() => { try { proc.kill("SIGKILL"); } catch {} r(); }, 1500);
+        proc.once("exit", () => { clearTimeout(t); r(); });
+      });
+    }
+    for (let i = 0; i < 6; i++) {
+      try { await fs.rm(profileDir, { recursive: true, force: true }); break; } catch { await sleep(200); }
+    }
+  };
+  // A cold Chrome on a busy CI runner can take well over 15s to open its DevTools port. If it never does, kill it:
+  // a leaked browser keeps this test file's process alive and the whole `node --test` run hangs until CI gives up.
+  let ws;
+  try {
+    let wsUrl;
+    const deadline = Date.now() + 45_000;
+    while (!wsUrl && Date.now() < deadline) {
+      if (proc.exitCode !== null) throw new Error(`Chrome exited (${proc.exitCode})`);
+      try { wsUrl = (await (await fetch(`http://127.0.0.1:${cdpPort}/json/list`)).json()).find((p) => p.type === "page")?.webSocketDebuggerUrl; } catch {}
+      if (!wsUrl) await sleep(80);
+    }
+    assert.ok(wsUrl, "Chrome DevTools target");
+    ws = new WebSocket(wsUrl);
+    await new Promise((r, j) => { ws.addEventListener("open", r, { once: true }); ws.addEventListener("error", j, { once: true }); });
+  } catch (err) {
+    try { ws?.close(); } catch {}
+    await kill();
+    throw err;
   }
-  assert.ok(wsUrl, "Chrome DevTools target");
-  const ws = new WebSocket(wsUrl);
-  await new Promise((r, j) => { ws.addEventListener("open", r, { once: true }); ws.addEventListener("error", j, { once: true }); });
   let seq = 0;
   const pending = new Map();
   const errors = [];
@@ -176,10 +199,7 @@ async function startBrowser(bin, url) {
     // Chrome often drops the socket before answering Browser.close, so never wait on the reply for long.
     await Promise.race([send("Browser.close").catch(() => {}), sleep(2000)]);
     try { ws.close(); } catch {}
-    try { proc.kill(); } catch {}
-    for (let i = 0; i < 6; i++) {
-      try { await fs.rm(profileDir, { recursive: true, force: true }); break; } catch { await sleep(200); }
-    }
+    await kill();
   };
   return { send, evalJs, mouse, move, click, drag, key, type, errors, downloads, close };
 }
@@ -199,10 +219,12 @@ async function mcp(baseUrl, name, args = {}) {
 }
 
 test("UI interactions: drawing, editing, shortcuts, panels, projects and live sync", { skip: !findBrowser() && "no Chrome/Chromium available", timeout: 300_000 }, async (t) => {
+  // Register each cleanup as soon as its resource exists, so a failed browser start still stops the server.
   const srv = await startServer();
+  t.after(() => srv.stop());
   const B = srv.baseUrl;
   const ui = await startBrowser(findBrowser(), `${B}/`);
-  t.after(async () => { try { await ui.close(); } finally { await srv.stop(); } });
+  t.after(() => ui.close());
 
   const state = async () => (await fetch(`${B}/api/state`)).json();
   const nodes = async () => Object.values((await state()).nodes);
@@ -703,7 +725,10 @@ test("UI interactions: drawing, editing, shortcuts, panels, projects and live sy
     await waitFor(() => ui.evalJs(`Boolean(document.querySelector('#layers .row[data-id="${id}"] .mcp-badge'))`), "MCP badge in layers");
     await mcp(B, "finish_working_on_nodes");
     await waitFor(() => ui.evalJs(`!document.querySelector('#layers .mcp-badge')`), "badges cleared");
-    await ui.evalJs(`(() => { const r = document.querySelector('#world [data-node-id="${id}"]'); return r && true; })()`);
+    // set_selection zooms to the layer on the next animation frame. Measure only once the view has stopped moving,
+    // or the click can land where the layer used to be and deselect it instead.
+    await waitFor(() => ui.evalJs(`new Promise((r) => { const w = document.getElementById("world"), t0 = w.style.transform;
+      requestAnimationFrame(() => requestAnimationFrame(() => r(w.style.transform === t0))); })`), "view settled after agent zoom");
     const rr = await nodeRect(id);
     await ui.click(rr.cx, rr.cy);
     await waitFor(async () => (await (await fetch(`${B}/mcp`, {
