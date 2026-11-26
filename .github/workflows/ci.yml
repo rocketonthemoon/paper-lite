@@ -17,6 +17,7 @@ jobs:
   lint-and-test:
     name: Lint, Audit & Automated Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -44,6 +45,7 @@ jobs:
           which google-chrome chromium chromium-browser || true
 
       - name: Run unit, integration & browser E2E tests
+        timeout-minutes: 10
         run: npm test
 
   docker-and-trivy:

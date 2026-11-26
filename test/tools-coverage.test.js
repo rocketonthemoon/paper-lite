@@ -665,7 +665,8 @@ async function openBrowser(bin, url) {
   await send("Page.navigate", { url });
   await sleep(1500);
   const close = async () => {
-    try { await send("Browser.close"); } catch {}
+    // Chrome often drops the socket before answering Browser.close, so never wait on the reply for long.
+    await Promise.race([send("Browser.close").catch(() => {}), sleep(2000)]);
     try { ws.close(); } catch {}
     try { proc.kill(); } catch {}
     for (let i = 0; i < 6; i++) {

@@ -173,7 +173,8 @@ async function startBrowser(bin, url) {
   };
   const type = async (text) => send("Input.insertText", { text });
   const close = async () => {
-    try { await send("Browser.close"); } catch {}
+    // Chrome often drops the socket before answering Browser.close, so never wait on the reply for long.
+    await Promise.race([send("Browser.close").catch(() => {}), sleep(2000)]);
     try { ws.close(); } catch {}
     try { proc.kill(); } catch {}
     for (let i = 0; i < 6; i++) {
@@ -201,7 +202,7 @@ test("UI interactions: drawing, editing, shortcuts, panels, projects and live sy
   const srv = await startServer();
   const B = srv.baseUrl;
   const ui = await startBrowser(findBrowser(), `${B}/`);
-  t.after(async () => { await ui.close(); await srv.stop(); });
+  t.after(async () => { try { await ui.close(); } finally { await srv.stop(); } });
 
   const state = async () => (await fetch(`${B}/api/state`)).json();
   const nodes = async () => Object.values((await state()).nodes);
