@@ -597,7 +597,7 @@ test("UI interactions: drawing, editing, shortcuts, panels, projects and live sy
     await waitFor(async () => !(await (await fetch(`${B}/api/fonts`)).json()).some((f) => f.id === inter.id), "font removed");
 
     await ui.evalJs(`document.querySelector('[data-action="copy-mcp"]').click()`);
-    await waitFor(async () => (await ui.evalJs("navigator.clipboard.readText().catch(() => '')")) === `claude mcp add --transport http paper-lite ${B}/mcp`, "MCP command copied");
+    await waitFor(async () => (await ui.evalJs("navigator.clipboard.readText().catch(() => '')")) === `claude mcp add --transport http weft ${B}/mcp`, "MCP command copied");
   });
 
   await t.test("export: page Copy JSX and project ZIP download", async () => {
@@ -714,6 +714,6 @@ test("UI interactions: drawing, editing, shortcuts, panels, projects and live sy
 
   await t.test("no runtime errors in the UI and none logged by the server", () => {
     assert.deepEqual(ui.errors, []);
-    assert.doesNotMatch(srv.logs(), /TypeError|ReferenceError|\[paper-lite\] (?!MCP)/);
+    assert.doesNotMatch(srv.logs(), /TypeError|ReferenceError|\[weft\] (?!MCP)/);
   });
 });
