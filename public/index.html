@@ -352,7 +352,7 @@
     cursor: pointer; font-size: 12px; font-weight: 500; display: inline-flex; align-items: center; gap: 6px;
   }
   .hud-btn:hover { background: var(--fill); color: var(--text); }
-  .hud-btn.mono { font-family: var(--font-mono); font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; padding: 0 8px; }
+  .hud-btn.hud-zoom { font-family: var(--font-mono); font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; padding: 0 8px; }
   .hud-btn:focus:not(:focus-visible) { background: none; }
   .hud-btn.snap-on { background: var(--accent-fill); color: var(--accent-text); font-weight: 600; }
   .hud-btn .kbd { font-size: 11px; }
@@ -534,6 +534,56 @@
     border-radius: 999px; padding: 0 8px; line-height: 18px; display: inline-flex; align-items: center; gap: 5px;
   }
   .mcp-live-tag::before { content: ""; width: 6px; height: 6px; border-radius: 99px; background: var(--live); }
+
+
+  /* ---------------------------------------------------------------- right tabs + history */
+  .right-tabs { margin: 10px 12px; flex-shrink: 0; }
+  .right-tabs button { height: 28px; }
+  .tab-count { font-size: 10px; font-weight: 700; color: var(--agent-text); background: var(--agent-badge); border-radius: 999px; padding: 0 5px; line-height: 15px; }
+  #right .right-head { border-top: 1px solid var(--line); }
+  #history-panel { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+  .hist-scroll { flex: 1; min-height: 0; overflow: auto; }
+  .hist-cps { padding: 6px 16px 14px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; }
+  .cp-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 9px; background: var(--fill); }
+  .cp-row .cp-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .cp-row .cp-name { font-size: 12px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cp-row .cp-meta { font-size: 11px; color: var(--muted); }
+  .cp-row .link-toggle { flex-shrink: 0; }
+  .cp-more { align-self: flex-start; }
+  .cp-new { display: flex; gap: 6px; }
+  .cp-new .fld { flex: 1; background: #fff; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-fill); }
+  .hist-list { padding: 12px 16px; display: flex; flex-direction: column; gap: 2px; }
+  .hist-list .sec-h { padding-bottom: 6px; }
+  .hist-count { font-family: var(--font-mono); font-size: 11px; font-weight: 500; }
+  .hist-step {
+    display: flex; gap: 10px; padding: 7px 8px; border-radius: 8px; border: 0; background: none; text-align: left;
+    width: 100%; cursor: pointer; color: var(--text); font: inherit;
+  }
+  .hist-step:hover { background: var(--fill); }
+  .hist-step.cur { background: var(--accent-fill); }
+  .hist-step.undone { opacity: 0.45; }
+  .hist-step.undone:hover { opacity: 0.8; }
+  .hist-av {
+    width: 20px; height: 20px; border-radius: 6px; flex-shrink: 0; display: grid; place-items: center;
+    font-size: 9px; font-weight: 700; background: var(--fill-2); color: var(--text-3);
+  }
+  .hist-av.ai { background: var(--agent-chip); color: var(--agent-text); }
+  .hist-txt { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1; }
+  .hist-lbl { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hist-lbl code { font-family: var(--font-mono); font-size: 11px; }
+  .hist-step.cur .hist-lbl { color: var(--accent-text); font-weight: 500; }
+  .hist-meta { font-size: 11px; color: var(--muted); }
+  .hist-step.cur .hist-meta { color: #5b7fd6; }
+  .hist-mark { display: flex; align-items: center; gap: 8px; padding: 6px 8px; font-size: 11px; font-weight: 600; color: var(--agent-text); }
+  .hist-mark::before, .hist-mark::after { content: ""; height: 1px; flex: 1; background: var(--agent-line); }
+  .hist-mark.manual { color: var(--text-3); }
+  .hist-mark.manual::before, .hist-mark.manual::after { background: var(--line-2); }
+  .hist-empty { padding: 16px 8px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+  .hist-foot { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); flex-shrink: 0; }
+  .hist-foot .btn { flex: 1; }
+  .hist-foot .icon-btn { width: 32px; height: 32px; border: 1px solid var(--line-2); flex-shrink: 0; }
+  .hist-foot .icon-btn.on { border-color: var(--accent); background: var(--accent-fill); color: var(--accent-text); }
+  .hist-filter { margin-bottom: 6px; }
 
   /* ---------------------------------------------------------------- command palette */
   #cmdk {
@@ -769,7 +819,7 @@
       <button type="button" class="hud-btn" id="snap-btn" title="Show the 8px grid and snap moves and resizes to it (Shift+G)">Snap 8px</button>
       <span class="hud-sep"></span>
       <div style="position:relative">
-        <button type="button" class="hud-btn mono" id="zoom-btn" aria-haspopup="menu" title="Zoom">100%</button>
+        <button type="button" class="hud-btn hud-zoom" id="zoom-btn" aria-haspopup="menu" title="Zoom">100%</button>
         <div id="zoom-menu" role="menu" hidden>
           <button data-zoom="in">Zoom in <kbd>Ctrl +</kbd></button>
           <button data-zoom="out">Zoom out <kbd>Ctrl −</kbd></button>
@@ -788,9 +838,14 @@
   </main>
 
   <aside id="right" class="panel">
+    <div class="seg right-tabs" id="right-tabs" role="tablist" aria-label="Right panel">
+      <button type="button" role="tab" data-tab="design" class="on">Design</button>
+      <button type="button" role="tab" data-tab="history">History</button>
+    </div>
     <div class="right-head" id="right-head"></div>
     <div id="inspector"></div>
     <div id="inspector-foot" hidden></div>
+    <div id="history-panel" hidden></div>
   </aside>
 </div>
 
@@ -2619,6 +2674,122 @@ if (typeof ResizeObserver !== "undefined") new ResizeObserver(updateOverlay).obs
 // ---------------------------------------------------------------------------
 // Live sync (SSE)
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Right panel tabs + History (labelled undo history and checkpoints)
+// ---------------------------------------------------------------------------
+let rightTab = localStorage.getItem("weft:right-tab") || "design";
+let hist = { entries: [], cursor: -1, limit: 60, checkpoints: [] };
+let histFilter = "all", histFilterOpen = false, cpNaming = false, cpShowAll = false;
+const historyEl = $("#history-panel");
+const clock = (iso) => { const d = new Date(iso); return Number.isNaN(+d) ? "" : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); };
+const BOOKMARK = (filled) => `<svg width="12" height="12" viewBox="0 0 16 16" fill="${filled ? "#d97757" : "none"}"><path d="M4 2.5h8v11l-4-2.8-4 2.8z" stroke="${filled ? "#d97757" : "currentColor"}" stroke-width="1.5" stroke-linejoin="round"/></svg>`;
+
+function setRightTab(tab) {
+  if (!$(`#right-tabs [data-tab="${tab}"]`)) tab = "design";
+  rightTab = tab;
+  localStorage.setItem("weft:right-tab", tab);
+  for (const b of $("#right-tabs").children) {
+    b.classList.toggle("on", b.dataset.tab === tab);
+    b.setAttribute("aria-selected", String(b.dataset.tab === tab));
+  }
+  const design = tab === "design";
+  rightHead.hidden = !design;
+  inspector.hidden = !design;
+  historyEl.hidden = tab !== "history";
+  if (design) renderInspector(true);
+  if (tab === "history") renderHistory();
+  renderRightPanels?.();
+}
+let renderRightPanels = null; // extended by later tabs (comments)
+$("#right-tabs").addEventListener("click", (e) => { const b = e.target.closest("[data-tab]"); if (b) setRightTab(b.dataset.tab); });
+
+function histLabel(e) {
+  if (e.source === "mcp") return `<code>${esc(e.tool)}</code> · ${esc(e.target || "")}`;
+  return esc(e.label || `${e.tool} · ${e.target || ""}`);
+}
+
+function renderHistory() {
+  if (!S || historyEl.hidden) return;
+  const scroll = historyEl.querySelector(".hist-scroll")?.scrollTop || 0;
+  const cps = [...(hist.checkpoints || [])].sort((a, b) => String(b.at).localeCompare(String(a.at)));
+  const shownCps = cpShowAll ? cps : cps.slice(0, 3);
+  const cpMeta = (c) => `${c.auto ? (c.kind === "agent-start" ? "Auto · agent run" : "Auto") : "Saved"} · ${clock(c.at)}`;
+  const cpHtml = `
+    <section class="hist-cps">
+      <div class="sec-h"><span>Checkpoints</span><span class="muted">${cps.length} saved</span></div>
+      ${cpNaming ? `<div class="cp-new"><label class="fld"><input id="cp-name" value="${esc(`Checkpoint ${clock(new Date().toISOString())}`)}" aria-label="Checkpoint name"></label><button class="btn primary" data-hist="cp-save">Save</button></div>`
+        : `<button class="btn primary" data-hist="cp-new">${BOOKMARK(false).replace('currentColor', '#ffffff')}Save checkpoint</button>`}
+      ${shownCps.map((c) => `<div class="cp-row">${BOOKMARK(c.auto && c.kind === "agent-start")}<div class="cp-text" title="${esc(c.name)}${c.layerCount != null ? ` · ${c.layerCount} layers` : ""}"><span class="cp-name">${esc(c.name)}</span><span class="cp-meta">${esc(cpMeta(c))}</span></div><button class="link-toggle" data-hist="cp-restore" data-id="${esc(c.id)}">Restore</button></div>`).join("")}
+      ${cps.length > 3 ? `<button class="link-toggle cp-more" data-hist="cp-all">${cpShowAll ? "Show fewer" : `Show all ${cps.length}`}</button>` : ""}
+    </section>`;
+
+  const entries = hist.entries || [];
+  const byHistory = new Map();
+  for (const c of cps) if (c.historyId) { if (!byHistory.has(c.historyId)) byHistory.set(c.historyId, []); byHistory.get(c.historyId).push(c); }
+  const rows = [];
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i];
+    if (histFilter === "agent" && e.source !== "mcp") continue;
+    if (histFilter === "you" && e.source === "mcp") continue;
+    const state = i > hist.cursor ? "undone" : i === hist.cursor ? "cur" : "";
+    const meta = state === "undone" ? "Undone · Ctrl+Shift+Z to redo" : state === "cur" ? `Current state · ${clock(e.at)}` : `${clock(e.at)}${e.nodeIds?.length > 1 ? ` · ${e.nodeIds.length} layers` : ""}`;
+    rows.push(`<button type="button" class="hist-step ${state}" data-hist="jump" data-index="${i}" title="${state === "cur" ? "Current state" : "Jump to this step"}">
+      <span class="hist-av${e.source === "mcp" ? " ai" : ""}">${e.source === "mcp" ? "AI" : "Y"}</span>
+      <span class="hist-txt"><span class="hist-lbl">${histLabel(e)}</span><span class="hist-meta">${esc(meta)}</span></span></button>`);
+    for (const c of byHistory.get(e.id) || []) rows.push(`<div class="hist-mark${c.auto ? "" : " manual"}">${BOOKMARK(c.auto && c.kind === "agent-start")}<span>${esc(c.name)}</span></div>`);
+  }
+  const canUndoAgent = entries.some((e, i) => i <= hist.cursor && e.source === "mcp");
+  historyEl.innerHTML = `<div class="hist-scroll">${cpHtml}
+    <section class="hist-list">
+      <div class="sec-h"><span>Undo history</span><span class="hist-count">${hist.cursor + 1} / ${hist.limit}</span></div>
+      ${histFilterOpen ? `<div class="seg hist-filter">${["all", "agent", "you"].map((f) => `<button data-hist="filter" data-f="${f}" class="${histFilter === f ? "on" : ""}">${f === "all" ? "All" : f === "agent" ? "Agent" : "You"}</button>`).join("")}</div>` : ""}
+      ${rows.join("") || `<div class="hist-empty">${entries.length ? "No steps match this filter." : "No edits yet. Every change by you or an agent shows up here, newest first. History resets when you switch projects."}</div>`}
+    </section></div>
+    <div class="hist-foot">
+      <button class="btn" data-hist="undo-agent" ${canUndoAgent ? "" : "disabled"} title="Jump back to just before the agent's most recent run (also undoes anything after it)">Undo last agent run</button>
+      <button class="icon-btn${histFilterOpen || histFilter !== "all" ? " on" : ""}" data-hist="filter-toggle" title="Filter by who made the change" aria-label="Filter history"><svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M3 4h10M5 8h6M7 12h2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button>
+    </div>`;
+  historyEl.querySelector(".hist-scroll").scrollTop = scroll;
+  if (cpNaming) { const f = $("#cp-name"); f.focus(); f.select(); }
+}
+
+async function saveCheckpoint() {
+  const name = ($("#cp-name")?.value || "").trim() || `Checkpoint ${clock(new Date().toISOString())}`;
+  cpNaming = false;
+  const cp = await api("POST", "/api/checkpoints", { name });
+  if (cp) toast(`Saved checkpoint “${cp.name}”`);
+  renderHistory();
+}
+
+historyEl.addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-hist]");
+  if (!b) return;
+  const act = b.dataset.hist;
+  if (act === "cp-new") { cpNaming = true; return renderHistory(); }
+  if (act === "cp-save") return saveCheckpoint();
+  if (act === "cp-all") { cpShowAll = !cpShowAll; return renderHistory(); }
+  if (act === "cp-restore") {
+    const cp = hist.checkpoints.find((c) => c.id === b.dataset.id);
+    const res = await api("POST", `/api/checkpoints/${encodeURIComponent(b.dataset.id)}/restore`);
+    if (res) toast(`Restored “${cp?.name || "checkpoint"}”`, { action: "Undo", onAction: () => api("POST", "/api/undo") });
+    return;
+  }
+  if (act === "jump") { const i = Number(b.dataset.index); if (i !== hist.cursor) api("POST", "/api/history/jump", { index: i }); return; }
+  if (act === "undo-agent") {
+    const res = await api("POST", "/api/history/undo-agent-run");
+    if (res?.ok) toast(`Undid the last agent run (${res.undone} ${res.undone === 1 ? "step" : "steps"})`, { action: "Redo", onAction: () => api("POST", "/api/history/jump", { index: res.cursor + res.undone }) });
+    return;
+  }
+  if (act === "filter-toggle") { histFilterOpen = !histFilterOpen; if (!histFilterOpen) histFilter = "all"; return renderHistory(); }
+  if (act === "filter") { histFilter = b.dataset.f; return renderHistory(); }
+});
+historyEl.addEventListener("keydown", (e) => {
+  if (e.target.id !== "cp-name") return;
+  if (e.key === "Enter") { e.preventDefault(); saveCheckpoint(); }
+  if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); cpNaming = false; renderHistory(); }
+});
+
 function connect() {
   const es = new EventSource("/events");
   const live = $("#live");
@@ -2639,6 +2810,10 @@ function connect() {
     render();
     if (!saved) requestAnimationFrame(() => { const b = worldBounds([...world.children]); if (b) fitTo(b, 1); });
     shareSelection();
+  });
+  es.addEventListener("history", (ev) => {
+    hist = JSON.parse(ev.data);
+    renderHistory();
   });
   es.addEventListener("projects", (ev) => {
     projects = JSON.parse(ev.data).projects || [];
@@ -2676,6 +2851,7 @@ function connect() {
 
 setTool("select");
 applyView();
+setRightTab(rightTab);
 connect();
 document.fonts?.ready.then(updateOverlay);
 window.addEventListener("load", setupInteract);
