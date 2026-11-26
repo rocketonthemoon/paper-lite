@@ -265,13 +265,19 @@ test("browser E2E: Light Precision UI, Command Palette (250+ layers), HUD, Conte
     return {
       panel: cs.getPropertyValue("--panel").trim(),
       accent: cs.getPropertyValue("--accent").trim(),
+      agent: cs.getPropertyValue("--agent").trim(),
+      title: document.title,
+      favicon: document.querySelector('link[rel="icon"]')?.getAttribute("href"),
       stage: cs.getPropertyValue("--stage").trim(),
       hasFavicon: Boolean(document.querySelector('link[rel="icon"]')),
       hudVisible: getComputedStyle(document.getElementById("stage-hud")).display !== "none"
     };
   })()`);
   assert.equal(theme.panel, "#ffffff");
-  assert.equal(theme.accent, "#0000ff");
+  assert.equal(theme.accent, "#4c7dff", "selection blue is the focus accent");
+  assert.equal(theme.agent, "#d97757", "agent orange");
+  assert.match(theme.title, /weft$/);
+  assert.equal(theme.favicon, "/favicon.svg");
   assert.equal(theme.stage, "#eef2f6");
   assert.equal(theme.hasFavicon, true);
   assert.equal(theme.hudVisible, true);
@@ -308,7 +314,7 @@ test("browser E2E: Light Precision UI, Command Palette (250+ layers), HUD, Conte
       ctxDisplay: getComputedStyle(ctx).display,
       ctxName: document.getElementById("ctx-name").textContent,
       ctxFlexHidden: document.getElementById("ctx-flex").hidden,
-      rightPill: rh.querySelector(".type-pill")?.textContent,
+      rightKind: rh.querySelector(".right-id")?.dataset.kind,
       hasMcpBadge: Boolean(mcpBadge),
       footHidden: foot.hidden,
       cssJsonCollapsed: !cssJson,
@@ -318,9 +324,9 @@ test("browser E2E: Light Precision UI, Command Palette (250+ layers), HUD, Conte
   assert.equal(selCheck.ctxDisplay, "flex");
   assert.equal(selCheck.ctxName, "Deep Target Label");
   assert.equal(selCheck.ctxFlexHidden, false);
-  assert.equal(selCheck.rightPill, "LAYER");
+  assert.equal(selCheck.rightKind, "layer");
   assert.equal(selCheck.hasMcpBadge, true);
-  assert.equal(selCheck.footHidden, false);
+  assert.equal(selCheck.footHidden, true, "copy actions moved to the context bar and Export menu");
   assert.equal(selCheck.cssJsonCollapsed, true);
   assert.equal(selCheck.pickedHex, "#0000ff");
 
@@ -382,9 +388,9 @@ test("browser E2E: Light Precision UI, Command Palette (250+ layers), HUD, Conte
   assert.deepEqual(await cdp.evalJs(`({
     hidden: document.getElementById("app").classList.contains("ui-hidden"),
     hudDisplay: getComputedStyle(document.getElementById("stage-hud")).display,
-    ctxDisplay: getComputedStyle(document.getElementById("ctx-bar")).display,
+    hudToggle: document.getElementById("hud-hide-ui").textContent,
     showUiDisplay: getComputedStyle(document.getElementById("show-ui")).display
-  })`), { hidden: true, hudDisplay: "none", ctxDisplay: "none", showUiDisplay: "flex" });
+  })`), { hidden: true, hudDisplay: "flex", hudToggle: "Show UI", showUiDisplay: "flex" });
 
   await cdp.evalJs(`document.getElementById("show-ui").click()`);
   await sleep(60);
@@ -408,16 +414,17 @@ test("browser E2E: Light Precision UI, Command Palette (250+ layers), HUD, Conte
     const box = await cdp.evalJs(`(() => {
       const s = document.getElementById("stage").getBoundingClientRect();
       const hud = document.getElementById("stage-hud").getBoundingClientRect();
-      const pill = document.getElementById("stage-pill").getBoundingClientRect();
+      const bar = document.getElementById("topbar").getBoundingClientRect();
+      const tools = document.getElementById("rail").getBoundingClientRect();
       return {
         overflow: document.documentElement.scrollWidth > document.documentElement.clientWidth,
         hudInside: hud.left >= s.left - 1 && hud.right <= s.right + 1,
-        pillInside: pill.left >= s.left - 1 && pill.right <= s.right + 1
+        toolsInside: tools.left >= bar.left - 1 && tools.right <= bar.right + 1
       };
     })()`);
     assert.equal(box.overflow, false, `Horizontal overflow at ${w}x${h}`);
     assert.equal(box.hudInside, true, `HUD clipped at ${w}x${h}`);
-    assert.equal(box.pillInside, true, `Stage pill clipped at ${w}x${h}`);
+    assert.equal(box.toolsInside, true, `Toolbar clipped at ${w}x${h}`);
   }
 
   // 7. Dashboard: Grid/List switch, Search + Escape clear, New project modal, Delete modal
