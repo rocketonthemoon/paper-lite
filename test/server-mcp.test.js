@@ -96,7 +96,7 @@ function mcpTextJson(res) {
   return JSON.parse(item.text);
 }
 
-test("server + MCP integration & edge cases", async (t) => {
+test("server + MCP integration & edge cases", { timeout: 120_000 }, async (t) => {
   const srv = await startTestServer();
   t.after(() => srv.stop());
 

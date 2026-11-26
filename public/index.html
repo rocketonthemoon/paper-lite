@@ -8,7 +8,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" id="fonts-css" href="/fonts.css">
-<script src="https://cdn.jsdelivr.net/npm/interactjs@1.10.29/dist/interact.min.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/interactjs@1.10.29/dist/interact.min.js" integrity="sha384-OC57zgc28bGEFySmEUloMqylPxXoVXiS1tBThp8KveETQ/WDz8KT1AOMU6x1gQvN" crossorigin="anonymous" defer></script>
 <style>
   :root {
     --panel: #ffffff;
@@ -222,6 +222,30 @@
   #world button { font: inherit; color: inherit; }
   #world .editing { user-select: text; cursor: text; outline: none; }
   #overlay { position: absolute; inset: 0; pointer-events: none; }
+  /* 8px snap grid: shown while Snap is on. Minor lines every 8px, major every 64px; minor lines fade out when zoomed far out. */
+  #grid {
+    position: absolute; inset: 0; pointer-events: none; display: none;
+    background-image:
+      linear-gradient(to right, var(--grid-major) 1px, transparent 1px), linear-gradient(to bottom, var(--grid-major) 1px, transparent 1px),
+      linear-gradient(to right, var(--grid-minor) 1px, transparent 1px), linear-gradient(to bottom, var(--grid-minor) 1px, transparent 1px);
+    background-size: var(--grid-major-size) var(--grid-major-size), var(--grid-major-size) var(--grid-major-size),
+      var(--grid-size) var(--grid-size), var(--grid-size) var(--grid-size);
+    background-position: var(--grid-x) var(--grid-y);
+  }
+  #app.grid-on #grid { display: block; }
+  /* Inside each artboard the grid starts at the artboard's own top-left corner (matching how its layers snap)
+     and sits between the artboard's fill and its layers: isolation makes the z-index:-1 layer paint above the
+     artboard background but below every child. Line width is 1 screen pixel at any zoom (--grid-line = 1/zoom). */
+  #app.grid-on #world > [data-node-id] { isolation: isolate; }
+  #app.grid-on #world > [data-node-id]::before {
+    content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
+    background-image:
+      linear-gradient(to right, rgba(0, 0, 255, 0.16) var(--grid-line), transparent var(--grid-line)),
+      linear-gradient(to bottom, rgba(0, 0, 255, 0.16) var(--grid-line), transparent var(--grid-line)),
+      linear-gradient(to right, var(--grid-ab-minor) var(--grid-line), transparent var(--grid-line)),
+      linear-gradient(to bottom, var(--grid-ab-minor) var(--grid-line), transparent var(--grid-line));
+    background-size: 64px 64px, 64px 64px, 8px 8px, 8px 8px;
+  }
 
   #stage-pill {
     position: absolute; top: 14px; left: 50%; transform: translateX(-50%); z-index: 12;
@@ -690,6 +714,7 @@
       <span class="pill-hint">Press ⌘K for quick jump or F for frame</span>
       <span class="pill-short">⌘K</span>
     </div>
+    <div id="grid" aria-hidden="true"></div>
     <div id="world"></div>
     <div id="overlay">
       <div id="labels"></div>
@@ -707,7 +732,7 @@
     </div>
     <div id="stage-hud" role="toolbar" aria-label="Canvas viewport controls">
       <input type="checkbox" id="snap" hidden>
-      <button type="button" class="hud-btn" id="snap-btn" title="Snap moves and resizes to an 8px grid (Shift+G)">Snap 8px</button>
+      <button type="button" class="hud-btn" id="snap-btn" title="Show the 8px grid and snap moves and resizes to it (Shift+G)">Snap 8px</button>
       <span class="hud-sep"></span>
       <div style="position:relative">
         <button type="button" class="hud-btn mono" id="zoom-btn" aria-haspopup="menu">100% &#9662;</button>
@@ -821,6 +846,7 @@ const viewKey = () => (S ? `paper-lite:view:${S.id}:${S.rootId}` : null);
 const expanded = new Set(JSON.parse(localStorage.getItem("paper-lite:expanded") || "[]"));
 const saveExpanded = () => localStorage.setItem("paper-lite:expanded", JSON.stringify([...expanded].slice(-400)));
 let editingId = null, editOriginal = "", pendingEdit = null, pendingSel = null;
+let selEpoch = 0;             // bumps on every explicit select(); async results only auto-select if it hasn't moved
 let busy = false, pendingRender = false; // drag/resize in progress
 let spaceDown = false;
 let inspectorDirty = false;
@@ -877,6 +903,7 @@ function setSnap(on) {
   snapInput.checked = Boolean(on);
   snapBtn.classList.toggle("snap-on", snapInput.checked);
   snapBtn.setAttribute("aria-pressed", String(snapInput.checked));
+  app.classList.toggle("grid-on", snapInput.checked);
   localStorage.setItem("paper-lite:snap", snapInput.checked ? "1" : "0");
 }
 setSnap(localStorage.getItem("paper-lite:snap") === "1");
@@ -912,6 +939,7 @@ function render() {
   if (sel && !S.nodes[sel]) sel = null;
   if (hoverId && !S.nodes[hoverId]) hoverId = null;
   stage.style.background = S.nodes[S.rootId].styles.backgroundColor || "";
+  updateGrid();
   $("#stage-page-name").textContent = S.nodes[S.rootId].name || "Page 1";
   renderPages();
   world.replaceChildren(...S.nodes[S.rootId].children.map(buildEl));
@@ -924,9 +952,25 @@ function render() {
 
 function applyView() {
   world.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.z})`;
+  updateGrid();
   $("#zoom-btn").innerHTML = `${Math.round(view.z * 100)}% &#9662;`;
   if (viewKey()) localStorage.setItem(viewKey(), JSON.stringify(view));
   updateOverlay();
+}
+
+// Keep the snap grid aligned with world coordinates as you pan and zoom.
+function updateGrid() {
+  const st = app.style, z = view.z;
+  st.setProperty("--grid-size", `${GRID * z}px`);
+  st.setProperty("--grid-major-size", `${GRID * 8 * z}px`);
+  st.setProperty("--grid-x", `${view.x}px`);
+  st.setProperty("--grid-y", `${view.y}px`);
+  st.setProperty("--grid-line", `${1 / z}px`); // artboard grids live in zoomed world space
+  const dark = S && isDarkColor(S.nodes[S.rootId]?.styles.backgroundColor);
+  const showMinor = GRID * z >= 6; // 8px cells closer than 6 screen px turn into noise
+  st.setProperty("--grid-major", dark ? "rgba(255, 255, 255, 0.14)" : "rgba(10, 11, 13, 0.12)");
+  st.setProperty("--grid-minor", showMinor ? (dark ? "rgba(255, 255, 255, 0.06)" : "rgba(10, 11, 13, 0.05)") : "transparent");
+  st.setProperty("--grid-ab-minor", showMinor ? "rgba(0, 0, 255, 0.07)" : "transparent");
 }
 
 function rectOnStage(el) {
@@ -1012,6 +1056,7 @@ function iconFor(n) {
 let layerFilter = "";
 function renderLayers() {
   if (!S) return;
+  if (layersEl.querySelector(".row input")) return; // a rename is in progress; it re-renders when it finishes
   for (let p = sel && S.nodes[sel]?.parentId; p && p !== S.rootId; p = S.nodes[p]?.parentId) expanded.add(p);
   const agentIds = new Set(agentNodes.map((a) => a.id));
   const q = layerFilter.trim().toLowerCase();
@@ -1347,7 +1392,6 @@ $("#right").addEventListener("click", async (e) => {
     return;
   }
   if (!sel) return;
-  const n = S.nodes[sel];
   if (act === "zoom-sel") return zoomCmd("selection");
   if (act === "preset-size") {
     const styles = { height: b.dataset.h === "fit-content" ? "fit-content" : Number(b.dataset.h) };
@@ -1356,8 +1400,7 @@ $("#right").addEventListener("click", async (e) => {
   }
   if (act === "delete") return removeSelected();
   if (act === "duplicate") return duplicateSelected();
-  if (act === "flex") return patchStyles(sel, { display: "flex", flexDirection: n.styles.flexDirection || "column", gap: n.styles.gap || 8 });
-  if (act === "unflex") return patchStyles(sel, { display: null, flexDirection: null, justifyContent: null, alignItems: null, gap: null, flexWrap: null });
+  if (act === "flex" || act === "unflex") return toggleFlex(sel);
   if (act === "dir") return patchStyles(sel, { flexDirection: b.dataset.dir });
   if (act === "align") return patchStyles(sel, { justifyContent: b.dataset.j, alignItems: b.dataset.a });
   if (act === "textAlign") return patchStyles(sel, { textAlign: b.dataset.v === "left" ? null : b.dataset.v });
@@ -1378,14 +1421,16 @@ $("#ctx-bar").addEventListener("click", (e) => {
   const act = b.dataset.ctx;
   if (act === "copy") return copyExport("html", sel);
   if (act === "duplicate") return duplicateSelected();
-  if (act === "flex") {
-    const st = S.nodes[sel].styles;
-    const isFlex = st.display === "flex" || st.display === "inline-flex";
-    return patchStyles(sel, isFlex
-      ? { display: null, flexDirection: null, justifyContent: null, alignItems: null, gap: null, flexWrap: null }
-      : { display: "flex", flexDirection: st.flexDirection || "column", gap: st.gap || 8 });
-  }
+  if (act === "flex") return toggleFlex(sel);
 });
+
+// One flex toggle for the context bar, inspector and Shift+A: removing flex clears every flex-only property.
+const UNFLEX = { display: null, flexDirection: null, justifyContent: null, alignItems: null, gap: null, flexWrap: null };
+function toggleFlex(id) {
+  const st = S.nodes[id].styles;
+  const isFlex = st.display === "flex" || st.display === "inline-flex";
+  return patchStyles(id, isFlex ? UNFLEX : { display: "flex", flexDirection: st.flexDirection || "column", gap: st.gap || 8 });
+}
 
 async function copyText(text, msg) {
   try {
@@ -1433,6 +1478,8 @@ async function downloadZip(projectId = S?.id, format = "html") {
 // Selection, editing, commands
 // ---------------------------------------------------------------------------
 function select(id) {
+  pendingSel = null; // an explicit choice wins over a selection still waiting on the server (e.g. a fresh duplicate)
+  selEpoch += 1;
   if (id === sel) return;
   if (editingId) finishEdit(true);
   elOf(sel)?.classList.remove("is-selected");
@@ -1504,24 +1551,27 @@ function finishEdit(commit) {
 
 async function removeSelected() {
   if (!sel || !S?.nodes[sel]) return;
-  const parent = S.nodes[sel].parentId;
+  const epoch = selEpoch, parent = S.nodes[sel].parentId;
   const ok = await api("DELETE", `/api/nodes/${encodeURIComponent(sel)}`);
-  if (ok) select(parent === S.rootId ? null : parent);
+  if (ok && selEpoch === epoch) select(parent === S.rootId || !S.nodes[parent] ? null : parent);
 }
 
+// Only jump to the new layer if the user hasn't selected something else (or switched tools) while the request ran.
 async function duplicateSelected() {
   if (!sel || !S?.nodes[sel]) return;
+  const epoch = selEpoch;
   const dup = await api("POST", `/api/nodes/${encodeURIComponent(sel)}/duplicate`);
-  if (dup) { pendingSel = dup.id; render(); }
+  if (dup && selEpoch === epoch) { pendingSel = dup.id; render(); }
 }
 
 async function createNode(body, { edit = false } = {}) {
+  const epoch = selEpoch, fromTool = tool;
   const node = await api("POST", "/api/nodes", body);
-  if (!node) return;
+  if (!node || selEpoch !== epoch) return;
   pendingSel = node.id;
   if (edit) pendingEdit = node.id;
   render();
-  setTool("select");
+  if (tool === fromTool) setTool("select");
 }
 
 function setTool(t) {
@@ -1653,7 +1703,7 @@ function startCreate(e) {
 // Canvas pointer handling
 // ---------------------------------------------------------------------------
 stage.addEventListener("pointerdown", (e) => {
-  $("#zoom-menu").hidden = true;
+  // The zoom menu lives inside the stage: let clicks on it land (the document handler closes it on outside clicks).
   if (e.target.closest("#stage-hud, #ctx-bar, #stage-pill, #show-ui, .ab-label")) return;
   if (e.button === 1 || spaceDown || tool === "hand") { e.preventDefault(); return startPan(e); }
   if (e.button !== 0) return;
@@ -1797,7 +1847,10 @@ function renameRow(id) {
   const finish = (save) => {
     if (done) return;
     done = true;
-    if (save && input.value.trim() && input.value !== S.nodes[id].name) patch(id, { name: input.value.trim() });
+    const name = input.value.trim();
+    const changed = save && name && S.nodes[id] && name !== S.nodes[id].name;
+    input.replaceWith(nm); // restore the row first so live re-renders aren't held back
+    if (changed) { nm.textContent = name; patch(id, { name }).then((ok) => { if (!ok) renderLayers(); }); }
     else renderLayers();
   };
   input.addEventListener("keydown", (k) => { k.stopPropagation(); if (k.key === "Enter") finish(true); if (k.key === "Escape") finish(false); });
@@ -1805,14 +1858,21 @@ function renameRow(id) {
 }
 
 let dragRowId = null;
+// Can the dragged layer become a child of target? Artboards stay top-level, and HTML and SVG don't mix.
+function canNestIn(dragId, targetId) {
+  const target = S.nodes[targetId], drag = S.nodes[dragId];
+  if (!target || !drag || drag.parentId === S.rootId) return false;
+  if (VOID_TAGS.has(target.tag) || isTextNode(targetId)) return false;
+  const targetSvg = SVG_TAGS.has(target.tag), dragSvg = SVG_TAGS.has(drag.tag);
+  if (targetSvg) return dragSvg && (target.tag === "svg" || target.tag === "g") && drag.tag !== "svg";
+  return !dragSvg || drag.tag === "svg";
+}
 function dropZone(e, row) {
   const r = row.getBoundingClientRect();
   const f = (e.clientY - r.top) / r.height;
-  const target = S.nodes[row.dataset.id];
-  const canNest = !VOID_TAGS.has(target.tag) && !isTextNode(target.id);
   if (f < 0.3) return "before";
   if (f > 0.7) return "after";
-  return canNest ? "inside" : f < 0.5 ? "before" : "after";
+  return canNestIn(dragRowId, row.dataset.id) ? "inside" : f < 0.5 ? "before" : "after";
 }
 layersEl.addEventListener("dragstart", (e) => { dragRowId = e.target.closest(".row")?.dataset.id; e.dataTransfer.effectAllowed = "move"; });
 layersEl.addEventListener("dragover", (e) => {
@@ -1831,9 +1891,14 @@ layersEl.addEventListener("drop", (e) => {
   layersEl.querySelectorAll(".drop-before,.drop-after,.drop-inside").forEach((r) => r.classList.remove("drop-before", "drop-after", "drop-inside"));
   if (!row || !id || row.dataset.id === id) return;
   const target = S.nodes[row.dataset.id];
+  dragRowId = id;
   let zone = dropZone(e, row);
-  if (target.parentId === S.rootId && S.nodes[id].parentId !== S.rootId && zone !== "inside") zone = "inside";
-  if (S.nodes[id].parentId === S.rootId && target.parentId !== S.rootId) return toast("Artboards stay at the top level");
+  dragRowId = null;
+  const dragIsArtboard = S.nodes[id].parentId === S.rootId;
+  if (dragIsArtboard && target.parentId !== S.rootId) return toast("Artboards stay at the top level");
+  // A layer dropped on an artboard row goes into that artboard (there's no "between artboards" for layers).
+  if (!dragIsArtboard && target.parentId === S.rootId) zone = "inside";
+  if (zone === "inside" && !canNestIn(id, target.id)) return toast(`Can't put ${S.nodes[id].tag} inside ${target.tag}`);
   if (zone === "inside") return patch(id, { parentId: target.id });
   const parent = S.nodes[target.parentId];
   let index = parent.children.indexOf(target.id) + (zone === "after" ? 1 : 0);
@@ -1883,6 +1948,7 @@ async function uploadFonts(files) {
 function renderPages() {
   $("#project-name").textContent = S.name;
   document.title = `${S.name} · Paper-Lite`;
+  if ($("#pages input")) return; // a rename is in progress; it re-renders when it finishes
   $("#pages").innerHTML = S.pages.map((id) => {
     const p = S.nodes[id];
     const cnt = p.children ? p.children.length : 0;
@@ -1916,7 +1982,10 @@ $("#pages").addEventListener("dblclick", (e) => {
   const finish = (save) => {
     if (done) return;
     done = true;
-    if (save && input.value.trim() && input.value.trim() !== S.nodes[id].name) api("PATCH", `/api/pages/${encodeURIComponent(id)}`, { name: input.value.trim() });
+    const name = input.value.trim();
+    const changed = save && name && S.nodes[id] && name !== S.nodes[id].name;
+    input.replaceWith(nm); // restore the row first so live re-renders aren't held back
+    if (changed) { nm.textContent = name; api("PATCH", `/api/pages/${encodeURIComponent(id)}`, { name }).then(() => renderPages()); }
     else renderPages();
   };
   input.addEventListener("keydown", (k) => { k.stopPropagation(); if (k.key === "Enter") finish(true); if (k.key === "Escape") finish(false); });
@@ -2004,6 +2073,8 @@ const cmdkEl = $("#cmdk"), cmdkInput = $("#cmdk-input"), cmdkList = $("#cmdk-lis
 let cmdkItems = [], cmdkIdx = 0;
 
 function openCmdk(open = cmdkEl.hidden) {
+  // Release focus on close so canvas shortcuts (V, F, Delete…) work right away.
+  if (!open && cmdkEl.contains(document.activeElement)) document.activeElement.blur();
   cmdkEl.hidden = !open;
   if (open) {
     cmdkInput.value = "";
@@ -2407,10 +2478,7 @@ document.addEventListener("keydown", (e) => {
   if (e.shiftKey && (e.code === "Digit2" || e.key === "@" || e.key === '"')) return zoomCmd("selection");
   if (e.shiftKey && (e.code === "Digit0" || e.key === ")" || e.key === "=")) return zoomCmd("100");
   if (e.shiftKey && k === "g") { setSnap(!snapInput.checked); toast(snapInput.checked ? "Snap 8px on" : "Snap 8px off"); return; }
-  if (e.shiftKey && k === "a" && sel) {
-    const st = S.nodes[sel].styles;
-    return patchStyles(sel, st.display === "flex" ? { display: null } : { display: "flex", flexDirection: st.flexDirection || "column", gap: st.gap || 8 });
-  }
+  if (e.shiftKey && k === "a" && sel) return toggleFlex(sel);
   const tools = { v: "select", h: "hand", f: "frame", r: "rect", t: "text" };
   if (!e.shiftKey && tools[k]) return setTool(tools[k]);
   if (!sel) return;

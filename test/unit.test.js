@@ -16,7 +16,7 @@ import {
   normalizeProject,
 } from "../model.js";
 import { htmlToSpecs, parseInlineStyle } from "../html-import.js";
-import { FontLibrary, familiesIn, parseFontFileName } from "../fonts.js";
+import { FontLibrary, familiesIn, parseFontFileName, renameWithRetry } from "../fonts.js";
 
 test("model: cleanTag normalises case and rejects disallowed tags", () => {
   assert.equal(cleanTag("DIV"), "div");
@@ -190,6 +190,38 @@ test("fonts: parseFontFileName, familiesIn, and FontLibrary manage Google and up
 
     await lib.remove(up.id);
     assert.equal(lib.fileFor(up.file), null);
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("fonts: overlapping library changes all succeed and are all saved", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "pl-fonts-race-"));
+  try {
+    const lib = new FontLibrary(tmp);
+    await lib.load();
+    const families = ["Inter", "Manrope", "Sora", "Outfit", "Lexend", "Urbanist", "Figtree", "Onest"];
+    const added = await Promise.all(families.map((family) => lib.addGoogle({ family })));
+    await Promise.all(added.slice(0, 3).map((f) => lib.remove(f.id)));
+
+    const onDisk = JSON.parse(await fs.readFile(path.join(tmp, "fonts.json"), "utf8")).map((f) => f.family).sort();
+    assert.deepEqual(onDisk, families.slice(3).sort(), "fonts.json reflects every change");
+    assert.deepEqual((await fs.readdir(tmp)).filter((f) => f.endsWith(".tmp")), [], "no temp files left");
+  } finally {
+    await fs.rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test("fonts: renameWithRetry renames, and fails fast on errors that aren't transient locks", async () => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "pl-rename-"));
+  try {
+    const a = path.join(tmp, "a.json"), b = path.join(tmp, "b.json");
+    await fs.writeFile(a, "{}");
+    await renameWithRetry(a, b);
+    assert.equal(await fs.readFile(b, "utf8"), "{}");
+    const t0 = Date.now();
+    await assert.rejects(() => renameWithRetry(path.join(tmp, "missing.json"), b), { code: "ENOENT" });
+    assert.ok(Date.now() - t0 < 100, "a missing file is not retried");
   } finally {
     await fs.rm(tmp, { recursive: true, force: true });
   }

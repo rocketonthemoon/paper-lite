@@ -12,7 +12,7 @@ import {
   HttpError, ID_RE, SVG_TAGS, VOID_TAGS, cleanName, cleanTag, emptyPage, emptyProject, lenientMerge, mergeAttrs, mergeStyles,
   newId, normalizeProject,
 } from "./model.js";
-import { FontLibrary, familiesIn } from "./fonts.js";
+import { FontLibrary, familiesIn, renameWithRetry } from "./fonts.js";
 import { htmlToSpecs } from "./html-import.js";
 import { Renderer } from "./renderer.js";
 import { registerTools, SERVER_INSTRUCTIONS } from "./mcp-tools.js";
@@ -31,6 +31,7 @@ const ALLOWED_HOSTS = new Set(
     .filter(Boolean),
 );
 const HISTORY_LIMIT = 60;
+const PKG_VERSION = JSON.parse(await fs.readFile(path.join(ROOT, "package.json"), "utf8")).version;
 
 // ---------------------------------------------------------------------------
 // Workspace: projects on disk, one open project in memory (`state`)
@@ -56,7 +57,7 @@ const metaOf = (id) => {
 async function writeAtomic(file, text) {
   const tmp = `${file}.${process.pid}.tmp`;
   await fs.writeFile(tmp, text, "utf8");
-  await fs.rename(tmp, file);
+  await renameWithRetry(tmp, file);
 }
 
 // All disk writes are serialized so files are never written concurrently.
@@ -176,15 +177,30 @@ async function loadWorkspace() {
   if (!workspace.projects.length) {
     await createProject("Untitled", { open: false });
   }
-  const first = workspace.projects.find((p) => p.id === workspace.activeProjectId) || workspace.projects[0];
-  await openProject(first.id, "init");
+  // Open the last active project; if its file is unreadable, fall back to the next one instead of failing to boot.
+  const active = workspace.projects.find((p) => p.id === workspace.activeProjectId);
+  for (const p of [...new Set([active, ...workspace.projects].filter(Boolean))]) {
+    try {
+      await openProject(p.id, "init");
+      return;
+    } catch (err) {
+      console.error(`[paper-lite] could not open project "${p.name}" (${p.id}): ${err.message}`);
+    }
+  }
+  await createProject("Untitled", { open: true, source: "init" });
 }
 
 async function readProject(id) {
   const meta = metaOf(id);
   if (state?.id === id) return structuredClone(state);
   await diskQueue;
-  return normalizeProject(JSON.parse(await fs.readFile(projectFile(id), "utf8")), { id, name: meta.name, warnings: [] });
+  let raw;
+  try {
+    raw = JSON.parse(await fs.readFile(projectFile(id), "utf8"));
+  } catch (err) {
+    throw new HttpError(422, `Project "${meta.name}" could not be read (${err.code === "ENOENT" ? "file missing" : "file is corrupt"})`);
+  }
+  return normalizeProject(raw, { id, name: meta.name, warnings: [] });
 }
 
 async function openProject(id, source = "api") {
@@ -250,16 +266,16 @@ async function duplicateProject(id, name) {
 async function deleteProject(id, source = "api") {
   metaOf(id);
   if (workspace.projects.length === 1) throw new HttpError(400, "Cannot delete the only project");
+  // Switch away first so there is never a moment without an open project (requests and timers read `state`).
+  if (state.id === id) {
+    const next = projectList().find((p) => p.id !== id);
+    await openProject(next.id, source);
+  }
   workspace.projects = workspace.projects.filter((p) => p.id !== id);
   previewCache.delete(id);
   await queueDisk(() => fs.rm(projectFile(id), { force: true }));
-  if (state.id === id) {
-    state = null;
-    await openProject(projectList()[0].id, source);
-  } else {
-    await saveWorkspace();
-    sendEvent("projects", { projects: projectList() });
-  }
+  await saveWorkspace();
+  sendEvent("projects", { projects: projectList() });
   return { deleted: id };
 }
 
@@ -330,7 +346,7 @@ let uiSelection = { ids: [], at: 0 };
 
 function presenceList() {
   const now = Date.now();
-  for (const [id, p] of presence) if (now - p.at > PRESENCE_TTL || !state.nodes[id]) presence.delete(id);
+  for (const [id, p] of presence) if (now - p.at > PRESENCE_TTL || !state?.nodes[id]) presence.delete(id);
   return [...presence].map(([id, p]) => ({ id, label: p.label }));
 }
 function touch(nodeIds, label = "Agent") {
@@ -452,7 +468,15 @@ function updateNode(id, patch, source = "api") {
   const node = getNode(id);
   const next = {};
   if (patch.name !== undefined) next.name = cleanName(patch.name, node.name);
-  if (patch.tag !== undefined) next.tag = cleanTag(patch.tag);
+  if (patch.tag !== undefined) {
+    next.tag = cleanTag(patch.tag);
+    // img/hr/br can't hold children, and HTML and SVG children don't render inside each other.
+    if (node.children.length && next.tag !== node.tag) {
+      if (VOID_TAGS.has(next.tag)) throw new HttpError(400, `<${next.tag}> can't contain child layers; move or delete them first`);
+      const toSvg = SVG_TAGS.has(next.tag), wasSvg = SVG_TAGS.has(node.tag);
+      if (toSvg !== wasSvg) throw new HttpError(400, `Can't switch between HTML and SVG tags while the layer has children`);
+    }
+  }
   if (patch.text !== undefined) next.text = String(patch.text);
   if (patch.styles !== undefined) next.styles = mergeStyles(patch.replaceStyles ? {} : node.styles, patch.styles);
   if (patch.attrs !== undefined) next.attrs = mergeAttrs(node.attrs, patch.attrs, next.tag ?? node.tag);
@@ -646,7 +670,8 @@ function toHtml(nodeId, { fontBase = PUBLIC_URL, filesBase, doc = state } = {}) 
     const n = doc.nodes[id];
     const pad = "  ".repeat(depth);
     const decl = Object.entries(exportStyles(n, doc)).map(([k, v]) => `  ${kebab(k)}: ${v};`).join("\n");
-    css.push(`/* ${n.name.replace(/\*\//g, "")} */\n.layer-${id} {\n${decl}\n}`);
+    // Layer names are free text: drop "*/" and angle brackets so a name can't end the comment or the <style> element.
+    css.push(`/* ${n.name.replace(/\*\//g, "").replace(/[<>]/g, "")} */\n.layer-${id} {\n${decl}\n}`);
     const attrs = Object.entries(n.attrs || {}).map(([k, v]) => ` ${k}="${escHtml(v)}"`).join("");
     const open = `${pad}<${n.tag} class="layer-${id}"${attrs}>`;
     if (VOID_TAGS.has(n.tag)) return open;
@@ -900,7 +925,7 @@ const mcpContext = {
 };
 
 function buildMcpServer() {
-  const server = new McpServer({ name: "paper-lite", version: "0.3.0" }, { instructions: SERVER_INSTRUCTIONS });
+  const server = new McpServer({ name: "paper-lite", version: PKG_VERSION }, { instructions: SERVER_INSTRUCTIONS });
   registerTools(server, mcpContext);
   return server;
 }
@@ -1037,7 +1062,7 @@ const methodNotAllowed = (req, res) =>
 app.get("/mcp", methodNotAllowed);
 app.delete("/mcp", methodNotAllowed);
 
-for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => { renderer.stop(); setTimeout(() => process.exit(0), 300); });
+for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => { renderer.stop(); setTimeout(() => process.exit(0), 1200); });
 
 await fonts.load();
 await loadWorkspace();

@@ -138,7 +138,7 @@ Key HTTP endpoints served alongside the UI:
 # Syntax, CSS/DOM invariants, and ESLint v9 check
 npm run lint
 
-# Unit, MCP/HTTP integration, and browser E2E tests (15 tests)
+# Unit, all-37-tool MCP coverage, HTTP integration, stdio relay, and browser E2E tests
 npm test
 ```
 

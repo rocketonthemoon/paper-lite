@@ -159,7 +159,8 @@ async function startBrowser(bin) {
   };
 
   const stop = async () => {
-    try { await send("Browser.close"); } catch {}
+    // Chrome often drops the socket before answering Browser.close, so never wait on the reply for long.
+    await Promise.race([send("Browser.close").catch(() => {}), new Promise((r) => setTimeout(r, 2000))]);
     try { ws.close(); } catch {}
     if (proc.exitCode === null) {
       proc.kill("SIGTERM");
@@ -168,6 +169,7 @@ async function startBrowser(bin) {
         proc.once("exit", () => { clearTimeout(t); r(); });
       });
     }
+    proc.stderr?.destroy(); // helper processes can inherit this pipe and keep the test process alive
     for (let i = 0; i < 6; i++) {
       try { await fs.rm(profileDir, { recursive: true, force: true }); break; } catch {
         await new Promise((r) => setTimeout(r, 150));
@@ -193,7 +195,7 @@ async function mcpCall(baseUrl, name, args = {}) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-test("browser E2E: Light Precision UI, Command Palette (250+ layers), HUD, Context Bar, Dashboard & Viewports", async (t) => {
+test("browser E2E: Light Precision UI, Command Palette (250+ layers), HUD, Context Bar, Dashboard & Viewports", { timeout: 180_000 }, async (t) => {
   const browserBin = findBrowser();
   if (!browserBin) {
     t.skip("No headless Chromium/Chrome binary found");
@@ -203,8 +205,7 @@ test("browser E2E: Light Precision UI, Command Palette (250+ layers), HUD, Conte
   const srv = await startTestServer();
   const cdp = await startBrowser(browserBin);
   t.after(async () => {
-    await cdp.stop();
-    await srv.stop();
+    try { await cdp.stop(); } finally { await srv.stop(); }
   });
 
   const ab = await mcpCall(srv.baseUrl, "create_artboard", {

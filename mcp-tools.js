@@ -286,7 +286,8 @@ export function registerTools(server, ctx) {
     inputSchema: { nodeIds: ids },
     annotations: { ...WRITE, destructiveHint: true },
   }, async ({ nodeIds }) => {
-    const deleted = ctx.batch("mcp", () => nodeIds.filter((id) => S().nodes[id]).flatMap((id) => ctx.deleteNode(id, "mcp").deleted));
+    // Check existence as we go: an id may already be gone because an earlier id was its ancestor (or a repeat).
+    const deleted = ctx.batch("mcp", () => nodeIds.flatMap((id) => (S().nodes[id] ? ctx.deleteNode(id, "mcp").deleted : [])));
     return text({ deleted: deleted.length });
   });
 
