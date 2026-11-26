@@ -674,17 +674,40 @@ async function openBrowser(bin, url) {
   const cdpPort = await freePort();
   const proc = spawn(bin, [
     ...(path.basename(bin).includes("headless") ? [] : ["--headless=new"]),
-    "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", "--force-device-scale-factor=1",
+    "--no-sandbox", "--no-first-run", "--no-default-browser-check", "--disable-gpu", "--disable-dev-shm-usage", "--force-device-scale-factor=1",
     `--remote-debugging-port=${cdpPort}`, `--user-data-dir=${profileDir}`, "--window-size=1440,900", "about:blank",
   ], { stdio: "ignore" });
-  let wsUrl;
-  for (let i = 0; i < 150 && !wsUrl; i++) {
-    try { wsUrl = (await (await fetch(`http://127.0.0.1:${cdpPort}/json/list`)).json()).find((p) => p.type === "page")?.webSocketDebuggerUrl; } catch {}
-    if (!wsUrl) await sleep(80);
+  const kill = async () => {
+    if (proc.exitCode === null && proc.signalCode === null) {
+      proc.kill("SIGTERM");
+      await new Promise((r) => {
+        const t = setTimeout(() => { try { proc.kill("SIGKILL"); } catch {} r(); }, 1500);
+        proc.once("exit", () => { clearTimeout(t); r(); });
+      });
+    }
+    for (let i = 0; i < 6; i++) {
+      try { await fs.rm(profileDir, { recursive: true, force: true }); break; } catch { await sleep(200); }
+    }
+  };
+  // A cold Chrome on a busy CI runner can take well over 15s to open its DevTools port. If it never does, kill it:
+  // a leaked browser keeps this test file's process alive and the whole `node --test` run hangs until CI gives up.
+  let ws;
+  try {
+    let wsUrl;
+    const deadline = Date.now() + 45_000;
+    while (!wsUrl && Date.now() < deadline) {
+      if (proc.exitCode !== null) throw new Error(`Chrome exited (${proc.exitCode})`);
+      try { wsUrl = (await (await fetch(`http://127.0.0.1:${cdpPort}/json/list`)).json()).find((p) => p.type === "page")?.webSocketDebuggerUrl; } catch {}
+      if (!wsUrl) await sleep(80);
+    }
+    assert.ok(wsUrl, "Chrome DevTools target");
+    ws = new WebSocket(wsUrl);
+    await new Promise((r, j) => { ws.addEventListener("open", r, { once: true }); ws.addEventListener("error", j, { once: true }); });
+  } catch (err) {
+    try { ws?.close(); } catch {}
+    await kill();
+    throw err;
   }
-  assert.ok(wsUrl, "Chrome DevTools target");
-  const ws = new WebSocket(wsUrl);
-  await new Promise((r, j) => { ws.addEventListener("open", r, { once: true }); ws.addEventListener("error", j, { once: true }); });
   let seq = 0;
   const pending = new Map();
   const errors = [];
@@ -716,10 +739,7 @@ async function openBrowser(bin, url) {
     // Chrome often drops the socket before answering Browser.close, so never wait on the reply for long.
     await Promise.race([send("Browser.close").catch(() => {}), sleep(2000)]);
     try { ws.close(); } catch {}
-    try { proc.kill(); } catch {}
-    for (let i = 0; i < 6; i++) {
-      try { await fs.rm(profileDir, { recursive: true, force: true }); break; } catch { await sleep(150); }
-    }
+    await kill();
   };
   return { evalJs, errors, close };
 }

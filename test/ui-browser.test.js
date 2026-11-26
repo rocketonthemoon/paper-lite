@@ -94,6 +94,8 @@ async function startBrowser(bin) {
   const proc = spawn(bin, [
     ...(isHeadlessShell ? [] : ["--headless=new"]),
     "--no-sandbox",
+    "--no-first-run",
+    "--no-default-browser-check",
     "--disable-gpu",
     "--disable-dev-shm-usage",
     "--force-device-scale-factor=1",
@@ -106,24 +108,48 @@ async function startBrowser(bin) {
   let errLogs = "";
   proc.stderr.on("data", (d) => { errLogs += d.toString(); });
 
-  let wsUrl = null;
-  const deadline = Date.now() + 12_000;
-  while (Date.now() < deadline) {
-    if (proc.exitCode !== null) throw new Error(`Chrome exited (${proc.exitCode}):\n${errLogs}`);
-    try {
-      const pages = await (await fetch(`http://127.0.0.1:${cdpPort}/json/list`)).json();
-      const page = pages.find((p) => p.type === "page" && p.webSocketDebuggerUrl);
-      if (page) { wsUrl = page.webSocketDebuggerUrl; break; }
-    } catch {}
-    await new Promise((r) => setTimeout(r, 80));
-  }
-  assert.ok(wsUrl, "Timed out waiting for Chrome DevTools target");
+  const kill = async () => {
+    if (proc.exitCode === null && proc.signalCode === null) {
+      proc.kill("SIGTERM");
+      await new Promise((r) => {
+        const t = setTimeout(() => { try { proc.kill("SIGKILL"); } catch {} r(); }, 1500);
+        proc.once("exit", () => { clearTimeout(t); r(); });
+      });
+    }
+    proc.stderr?.destroy(); // helper processes can inherit this pipe and keep the test process alive
+    for (let i = 0; i < 6; i++) {
+      try { await fs.rm(profileDir, { recursive: true, force: true }); break; } catch {
+        await new Promise((r) => setTimeout(r, 150));
+      }
+    }
+  };
 
-  const ws = new WebSocket(wsUrl);
-  await new Promise((resolve, reject) => {
-    ws.addEventListener("open", resolve, { once: true });
-    ws.addEventListener("error", reject, { once: true });
-  });
+  // A cold Chrome on a busy CI runner can take well over 15s to open its DevTools port. If it never does, kill it:
+  // a leaked browser keeps this test file's process alive and the whole `node --test` run hangs until CI gives up.
+  let ws;
+  try {
+    let wsUrl = null;
+    const deadline = Date.now() + 45_000;
+    while (Date.now() < deadline) {
+      if (proc.exitCode !== null) throw new Error(`Chrome exited (${proc.exitCode}):\n${errLogs}`);
+      try {
+        const pages = await (await fetch(`http://127.0.0.1:${cdpPort}/json/list`)).json();
+        const page = pages.find((p) => p.type === "page" && p.webSocketDebuggerUrl);
+        if (page) { wsUrl = page.webSocketDebuggerUrl; break; }
+      } catch {}
+      await new Promise((r) => setTimeout(r, 80));
+    }
+    assert.ok(wsUrl, `Timed out waiting for Chrome DevTools target:\n${errLogs}`);
+    ws = new WebSocket(wsUrl);
+    await new Promise((resolve, reject) => {
+      ws.addEventListener("open", resolve, { once: true });
+      ws.addEventListener("error", reject, { once: true });
+    });
+  } catch (err) {
+    try { ws?.close(); } catch {}
+    await kill();
+    throw err;
+  }
 
   let seq = 0;
   const pending = new Map();
@@ -143,9 +169,16 @@ async function startBrowser(bin) {
     }
   });
 
+  // A dead browser must fail the test, not hang it: reject in-flight calls when the socket closes or a call stalls.
+  ws.addEventListener("close", () => { for (const { reject } of pending.values()) reject(new Error("Chrome connection closed")); pending.clear(); });
   const send = (method, params = {}) => new Promise((resolve, reject) => {
+    if (ws.readyState !== WebSocket.OPEN) { reject(new Error(`${method}: Chrome connection closed`)); return; }
     const id = ++seq;
-    pending.set(id, { resolve, reject });
+    const timer = setTimeout(() => { pending.delete(id); reject(new Error(`${method}: no answer from Chrome in 30s`)); }, 30_000);
+    pending.set(id, {
+      resolve: (v) => { clearTimeout(timer); resolve(v); },
+      reject: (e) => { clearTimeout(timer); reject(e); },
+    });
     ws.send(JSON.stringify({ id, method, params }));
   });
 
@@ -165,19 +198,7 @@ async function startBrowser(bin) {
     // Chrome often drops the socket before answering Browser.close, so never wait on the reply for long.
     await Promise.race([send("Browser.close").catch(() => {}), new Promise((r) => setTimeout(r, 2000))]);
     try { ws.close(); } catch {}
-    if (proc.exitCode === null) {
-      proc.kill("SIGTERM");
-      await new Promise((r) => {
-        const t = setTimeout(() => { try { proc.kill("SIGKILL"); } catch {} r(); }, 1500);
-        proc.once("exit", () => { clearTimeout(t); r(); });
-      });
-    }
-    proc.stderr?.destroy(); // helper processes can inherit this pipe and keep the test process alive
-    for (let i = 0; i < 6; i++) {
-      try { await fs.rm(profileDir, { recursive: true, force: true }); break; } catch {
-        await new Promise((r) => setTimeout(r, 150));
-      }
-    }
+    await kill();
   };
 
   return { send, evalJs, runtimeErrors, stop };
@@ -205,11 +226,11 @@ test("browser E2E: Light Precision UI, Command Palette (250+ layers), HUD, Conte
     return;
   }
 
+  // Register each cleanup as soon as its resource exists, so a failed browser start still stops the server.
   const srv = await startTestServer();
+  t.after(() => srv.stop());
   const cdp = await startBrowser(browserBin);
-  t.after(async () => {
-    try { await cdp.stop(); } finally { await srv.stop(); }
-  });
+  t.after(() => cdp.stop());
 
   const ab = await mcpCall(srv.baseUrl, "create_artboard", {
     name: "Studio Landing",
