@@ -380,7 +380,7 @@
   #zoom-menu kbd { border: 0; padding: 0; }
 
   #toast {
-    position: fixed; right: 320px; top: 76px; z-index: 60; display: flex; align-items: center; gap: 10px;
+    position: fixed; right: 320px; top: 76px; z-index: 54; display: flex; align-items: center; gap: 10px;
     background: var(--ink); color: #fff; padding: 10px 14px; border-radius: 12px;
     box-shadow: var(--shadow-float); font-size: 13px; font-weight: 500;
     opacity: 0; transform: translateY(-4px); transition: opacity 0.18s, transform 0.18s; pointer-events: none; white-space: nowrap;
@@ -511,6 +511,8 @@
   .btn.primary:disabled { background: var(--line-2); border-color: transparent; color: var(--faint); }
   .btnrow { display: flex; gap: 8px; }
   .btnrow .btn { flex: 1; min-width: 0; }
+  #inspector .btnrow { flex-wrap: wrap; }
+  #inspector .btnrow .btn { flex: 1 1 auto; min-width: 0; }
   .icon-btn {
     background: none; border: 0; color: var(--muted); width: 24px; height: 24px; padding: 0;
     border-radius: 8px; cursor: pointer; display: grid; place-items: center; font-size: 15px; line-height: 1;
@@ -596,7 +598,7 @@
 
   /* ---------------------------------------------------------------- command palette */
   #cmdk {
-    position: fixed; inset: 0; z-index: 55; background: rgba(29, 29, 31, 0.16);
+    position: fixed; inset: 0; z-index: 58; background: rgba(29, 29, 31, 0.16);
     display: flex; justify-content: center; align-items: flex-start; padding: 104px 20px 20px;
   }
   .cmdk-box {
@@ -651,7 +653,7 @@
 
   /* ---------------------------------------------------------------- export menu */
   #export-menu {
-    position: fixed; right: 16px; top: 52px; width: 380px; z-index: 35;
+    position: fixed; right: 16px; top: 52px; width: 380px; z-index: 56;
     background: var(--pop); border: 1px solid var(--line-2); border-radius: 12px;
     box-shadow: var(--shadow-float); overflow: hidden; display: flex; flex-direction: column;
   }
@@ -696,6 +698,8 @@
   .agent-cursor-tag span { font-family: var(--font-mono); font-size: 10.5px; color: #fde3d6; }
   .agent-cursor.look .agent-cursor-tag { background: #fff; border: 1.5px solid var(--agent); color: var(--agent-text); }
   .agent-cursor.look .agent-cursor-tag span { color: inherit; opacity: 0.92; }
+  .agent-cursor.flip-x .agent-cursor-tag { margin-left: 0; transform: translateX(calc(-100% + 12px)); border-radius: 10px 4px 10px 10px; }
+  .agent-cursor.flip-y .agent-cursor-tag { order: -1; margin-top: 0; margin-bottom: -4px; border-radius: 10px 10px 10px 4px; }
 
   /* Comments: pins, placing hint, thread popover, panel & layer indicator */
   #stage.tool-comment { cursor: crosshair; }
@@ -809,8 +813,11 @@
   .onb-copy { display: flex; flex-direction: column; gap: 4px; }
   .onb-copy strong { font-size: 15px; font-weight: 600; color: var(--ink); }
   .onb-copy span { font-size: 13px; color: var(--text-3); line-height: 1.5; }
-  .onb-presets { display: flex; gap: 8px; }
-  .onb-presets .btn { flex: 1; height: 34px; border-radius: 10px; font-size: 13px; }
+  .onb-presets { display: flex; flex-wrap: wrap; gap: 8px; }
+  .onb-presets .btn { flex: 1 1 180px; min-width: 0; height: 34px; border-radius: 10px; font-size: 13px; }
+  @container stage (max-width: 440px) {
+    #empty-onboarding { width: calc(100% - 24px); padding: 18px; gap: 12px; }
+  }
   .onb-mcp {
     display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-radius: 10px;
     background: var(--surface-2); border: 1px solid var(--line);
@@ -1455,7 +1462,11 @@ function updateOverlay() {
     const curColor = c.color || "#d97757";
     const sub = [c.tool, c.detail].filter(Boolean).join(" · ");
     const tagStyle = isLook ? ` style="border-color:${esc(curColor)};color:${esc(curColor)}"` : ` style="background:${esc(curColor)}"`;
-    return `<div class="agent-cursor${isLook ? " look" : ""}" data-agent-node="${esc(c.nodeIds[0])}" style="left:${Math.round(rx - 6)}px;top:${Math.round(ry - 6)}px">` +
+    const cx = Math.max(12, Math.min(stage.clientWidth - 24, rx - 6));
+    const cy = Math.max(12, Math.min(stage.clientHeight - 24, ry - 6));
+    const flipX = cx > stage.clientWidth - 210 ? " flip-x" : "";
+    const flipY = cy > stage.clientHeight - 86 ? " flip-y" : "";
+    return `<div class="agent-cursor${isLook ? " look" : ""}${flipX}${flipY}" data-agent-node="${esc(c.nodeIds[0])}" style="left:${Math.round(cx)}px;top:${Math.round(cy)}px">` +
       `<svg width="36" height="36" viewBox="0 0 28 28" fill="none"><path d="M4 3l19 8.4-8.2 2.4-3.3 8z" fill="${isLook ? "#ffffff" : esc(curColor)}" stroke="${isLook ? esc(curColor) : "#ffffff"}" stroke-width="2" stroke-linejoin="round"/></svg>` +
       `<div class="agent-cursor-tag"${tagStyle}><strong>${esc(c.name || "Claude")}</strong>${sub ? `<span>${esc(sub)}</span>` : ""}</div></div>`;
   }).join("");

@@ -35,7 +35,15 @@ function findBrowser() {
         "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
         "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
       ]
-    : ["/usr/local/bin/chrome-headless-shell", "/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser"];
+    : [
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        "/usr/local/bin/chrome-headless-shell",
+        "/usr/bin/google-chrome",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+      ];
   for (const c of candidates) if (existsSync(c)) return c;
   if (process.platform !== "win32") {
     for (const cmd of ["chrome-headless-shell", "google-chrome", "chromium"]) {
