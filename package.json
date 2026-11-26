@@ -9,7 +9,7 @@
   "scripts": {
     "start": "node server.js",
     "lint": "node test/lint.mjs",
-    "test": "node --test test/*.test.js"
+    "test": "node --test --test-force-exit test/*.test.js"
   },
   "engines": {
     "node": ">=20"
