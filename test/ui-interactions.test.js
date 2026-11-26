@@ -22,7 +22,15 @@ function findBrowser() {
         "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
         "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
       ]
-    : ["/usr/local/bin/chrome-headless-shell", "/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser"];
+    : [
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        "/usr/local/bin/chrome-headless-shell",
+        "/usr/bin/google-chrome",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+      ];
   for (const c of candidates) if (existsSync(c)) return c;
   if (process.platform !== "win32") {
     for (const cmd of ["chrome-headless-shell", "google-chrome", "chromium"]) {
@@ -158,7 +166,7 @@ async function startBrowser(bin, url) {
   };
   const KEYS = {
     Enter: { code: "Enter", keyCode: 13, text: "\r" }, Escape: { code: "Escape", keyCode: 27 }, Delete: { code: "Delete", keyCode: 46 },
-    Backspace: { code: "Backspace", keyCode: 8 }, ArrowLeft: { code: "ArrowLeft", keyCode: 37 }, ArrowUp: { code: "ArrowUp", keyCode: 38 },
+    Backspace: { code: "Backspace", keyCode: 8 }, Tab: { code: "Tab", keyCode: 9 }, ArrowLeft: { code: "ArrowLeft", keyCode: 37 }, ArrowUp: { code: "ArrowUp", keyCode: 38 },
     ArrowRight: { code: "ArrowRight", keyCode: 39 }, ArrowDown: { code: "ArrowDown", keyCode: 40 }, " ": { code: "Space", keyCode: 32 },
     "\\": { code: "Backslash", keyCode: 220 },
   };
@@ -712,6 +720,173 @@ test("UI interactions: drawing, editing, shortcuts, panels, projects and live sy
     })).text()).includes(id), "UI selection visible to agents");
   });
 
+  // ---------------------------------------------------------------- export menu, cmdk hl/tab, activity, cursors, comments
+  await t.test("export menu: syntax preview, Ctrl C hint, layer count and ZIP slug", async () => {
+    const res = await mcp(B, "write_html", { parentId: board, html: `<div data-name="Hero Card" style="position:absolute;left:16px;top:16px;width:180px;height:60px;background:#ffffff;border-radius:12px">Export me</div>` });
+    const heroId = res.created[0].id;
+    await pick(heroId);
+    await ui.evalJs(`document.getElementById("export-btn").click()`);
+    await waitFor(() => ui.evalJs(`!document.getElementById("export-menu").hidden`), "export menu open");
+    const info = await ui.evalJs(`(() => {
+      const m = document.getElementById("export-menu");
+      return {
+        hasTags: Boolean(m.querySelector(".exp-code .t")),
+        hasNums: Boolean(m.querySelector(".exp-code .n")),
+        hasStrs: Boolean(m.querySelector(".exp-code .s")),
+        ctrlC: m.querySelector('[data-exp="copy-sel-html"] .exp-kbd')?.textContent,
+        meta: m.querySelector(".exp-scope.subtle .exp-meta")?.textContent,
+        dl: m.querySelector('[data-exp="download-zip"]')?.textContent?.trim(),
+      };
+    })()`);
+    assert.ok(info.hasTags && info.hasNums && info.hasStrs, "syntax spans rendered");
+    assert.equal(info.ctrlC, "Ctrl C");
+    assert.match(info.meta, /layer/, "project layer count shown");
+    assert.match(info.dl, /^Download [a-z0-9-]+\.zip$/, "slug filename trimmed");
+    await ui.evalJs(`document.querySelector('#export-menu [data-exp-fmt="jsx"]').click()`);
+    assert.equal(await ui.evalJs(`document.querySelector('#export-menu [data-exp-fmt="jsx"]').classList.contains("on")`), true);
+    await ui.key("Escape");
+    await waitFor(() => ui.evalJs(`document.getElementById("export-menu").hidden`), "export menu closed on Escape");
+  });
+
+  await t.test("command palette: hl() entity escaping and Tab / Shift+Tab group cycling", async () => {
+    const ampersand = await mcp(B, "write_html", { parentId: board, html: `<p data-name="Terms & Conditions">Legal &amp; copy</p>` });
+    const ampId = ampersand.created[0].id;
+    await waitFor(() => ui.evalJs(`Boolean(S?.nodes[${JSON.stringify(ampId)}])`), "ampersand node synced");
+    await pick(null);
+    await ui.key("k", 2);
+    await waitFor(() => ui.evalJs(`!document.getElementById("cmdk").hidden`), "cmdk open");
+    const beforeGroup = await ui.evalJs(`(() => {
+      const on = document.querySelector(".cmdk-item.on");
+      let p = on?.previousElementSibling;
+      while (p && !p.classList.contains("cmdk-group")) p = p.previousElementSibling;
+      return p?.textContent || "";
+    })()`);
+    await ui.key("Tab");
+    const afterGroup = await ui.evalJs(`(() => {
+      const on = document.querySelector(".cmdk-item.on");
+      let p = on?.previousElementSibling;
+      while (p && !p.classList.contains("cmdk-group")) p = p.previousElementSibling;
+      return p?.textContent || "";
+    })()`);
+    assert.notEqual(afterGroup, beforeGroup, "Tab jumps to next group");
+    await ui.key("Tab", 8);
+    const backGroup = await ui.evalJs(`(() => {
+      const on = document.querySelector(".cmdk-item.on");
+      let p = on?.previousElementSibling;
+      while (p && !p.classList.contains("cmdk-group")) p = p.previousElementSibling;
+      return p?.textContent || "";
+    })()`);
+    assert.equal(backGroup, beforeGroup, "Shift+Tab jumps back to previous group");
+
+    await ui.evalJs(`(() => { const i = document.getElementById("cmdk-input"); i.value = "& conditions"; i.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+    const labelHtml = await ui.evalJs(`document.querySelector(".cmdk-item .cmdk-label")?.innerHTML || ""`);
+    assert.ok(labelHtml.includes("<mark>&amp;</mark>"), `expected clean highlighted entity in ${labelHtml}`);
+    assert.ok(!labelHtml.includes("&<mark>amp</mark>"), "entity must not be corrupted by hl()");
+    await ui.key("Escape");
+  });
+
+  await t.test("dashboard activity: live/ended agent sessions and revert to checkpoint", async () => {
+    await mcp(B, "set_session_title", { text: "Polish Pricing Card" });
+    await mcp(B, "write_html", { parentId: board, html: `<div data-name="Session Target" style="width:80px;height:30px">V1</div>` });
+    await ui.key("p", 10);
+    await waitFor(() => ui.evalJs(`!document.getElementById("dashboard").hidden`), "dashboard open");
+    await waitFor(() => ui.evalJs(`document.querySelectorAll("#dash-activity .dash-act-row").length >= 1`), "activity rows shown");
+    const rowTitle = await ui.evalJs(`document.querySelector("#dash-activity .dash-act-info strong")?.textContent || ""`);
+    assert.equal(rowTitle, "Polish Pricing Card");
+    assert.equal(await ui.evalJs(`document.querySelector("#dash-activity .dash-act-pill.live")?.textContent`), "Live");
+    await ui.evalJs(`document.querySelector('[data-act-filter="agent"]').click()`);
+    assert.ok(await ui.evalJs(`document.querySelectorAll("#dash-activity .dash-act-row").length >= 1`), "agent filter matches active session");
+    await ui.evalJs(`document.querySelector('[data-act-filter="all"]').click()`);
+    await mcp(B, "finish_working_on_nodes");
+    await waitFor(() => ui.evalJs(`Boolean(document.querySelector('#dash-activity [data-act-revert]:not([disabled])'))`), "revert button enabled after agent finishes");
+    await ui.evalJs(`document.querySelector('#dash-activity [data-act-revert]:not([disabled])').click()`);
+    await waitFor(() => ui.evalJs(`document.getElementById("toast").textContent.includes("Reverted")`), "revert toast shown");
+    await ui.evalJs(`document.getElementById("dash-back").click()`);
+    await waitFor(() => ui.evalJs(`document.getElementById("dashboard").hidden`), "returned to editor");
+  });
+
+  await t.test("multi-agent cursors: .agent-cursor.look renders dynamic agent color, follow button & top chip", async () => {
+    const targetRes = await mcp(B, "write_html", { parentId: board, html: `<div data-name="Cursor Target" style="position:absolute;left:24px;top:360px;width:120px;height:40px">cursor</div>` });
+    const tid = targetRes.created[0].id;
+    const callAsAgent = async (agentKey, name, tool, args) => {
+      const headers = { "content-type": "application/json", accept: "application/json, text/event-stream", "x-weft-client": agentKey };
+      await fetch(`${B}/mcp`, { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name, version: "1" } } }) });
+      const res = await fetch(`${B}/mcp`, { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: tool, arguments: args } }) });
+      const raw = await res.text();
+      const line = raw.split(/\r?\n/).find((l) => l.startsWith("data: "));
+      const body = JSON.parse(line ? line.slice(6) : raw);
+      if (body.error || body.result?.isError) throw new Error(body.error?.message || "MCP call failed");
+    };
+    await callAsAgent("agent-primary", "Claude", "update_styles", { updates: [{ nodeIds: [tid], styles: { opacity: 0.95 } }] });
+    await callAsAgent("agent-reader", "Reviewer", "get_node_info", { nodeId: tid });
+    await waitFor(() => ui.evalJs(`!document.getElementById("top-agent-chip").hidden && document.querySelectorAll("#agents .agent-cursor.look").length >= 1`), "agent chip & outline cursor visible");
+
+    const curStyle = await ui.evalJs(`(() => {
+      const look = document.querySelector("#agents .agent-cursor.look");
+      const tag = look?.querySelector(".agent-cursor-tag");
+      const box = document.querySelector("#agents .agent-box");
+      return {
+        borderColor: tag?.style.borderColor || "",
+        color: tag?.style.color || "",
+        hasPulse: box?.classList.contains("pulse") || false,
+        followPressed: document.getElementById("follow-agent-btn")?.getAttribute("aria-pressed"),
+      };
+    })()`);
+    assert.ok(curStyle.borderColor && curStyle.color, "look cursor has dynamic inline border and text color");
+    assert.equal(curStyle.hasPulse, false, "agent-box is static without pulse flicker");
+    assert.equal(curStyle.borderColor, curStyle.color, "look cursor border and text match dynamic c.color");
+
+    await ui.evalJs(`document.getElementById("follow-agent-btn").click()`);
+    assert.equal(await ui.evalJs(`document.getElementById("follow-agent-btn").classList.contains("follow-on")`), true);
+    await ui.evalJs(`document.getElementById("follow-agent-btn").click()`);
+    await callAsAgent("agent-primary", "Claude", "finish_working_on_nodes", {});
+    await callAsAgent("agent-reader", "Reviewer", "finish_working_on_nodes", {});
+  });
+
+  await t.test("comments: create, MCP readAt/reply with linked step, draft preservation, resolve toggle and orphan restore", async () => {
+    const boxRes = await mcp(B, "write_html", { parentId: board, html: `<div data-name="Comment Target" style="position:absolute;left:30px;top:420px;width:140px;height:48px">commentable</div>` });
+    const cidNode = boxRes.created[0].id;
+    await pick(cidNode);
+    await ui.evalJs(`openNewComment(${JSON.stringify(cidNode)})`);
+    await waitFor(() => ui.evalJs(`!document.getElementById("comment-thread").hidden`), "draft comment composer open");
+
+    await ui.type("Make this card pop");
+    await ui.evalJs(`document.querySelector('#comment-thread [data-ct="send"]').click()`);
+    await waitFor(() => ui.evalJs(`document.querySelectorAll("#comment-pins .cmt-pin").length >= 1 && document.getElementById("comments-tab-count").textContent === "1"`), "comment pin and tab badge rendered");
+    const cmtId = await ui.evalJs(`activeThreadId`);
+
+    const listed = await mcp(B, "get_comments", {});
+    const found = listed.find((x) => x.id === cmtId);
+    assert.equal(found.status, "read");
+    assert.ok(found.readAt, "readAt timestamp recorded");
+
+    await ui.evalJs(`(() => { const ta = document.getElementById("ct-input"); ta.focus(); ta.value = "Draft reply in progress"; })()`);
+    await mcp(B, "reply_to_comment", { id: cmtId, text: "Updated padding and contrast", linkStep: true });
+
+    await waitFor(() => ui.evalJs(`document.querySelectorAll("#comment-thread .ct-msg").length === 2`), "agent reply appeared via SSE");
+    const draftAfter = await ui.evalJs(`document.getElementById("ct-input")?.value`);
+    assert.equal(draftAfter, "Draft reply in progress", "SSE comments update must not wipe user draft in #ct-input");
+    assert.ok(await ui.evalJs(`document.getElementById("toast").textContent.includes("replied to your comment")`), "reply toast shown");
+    assert.match(await ui.evalJs(`document.querySelector("#comment-thread .ct-link code")?.textContent || ""`), /· step \d+/, "linkedStep shows step number");
+
+    await ui.evalJs(`document.querySelector('#right-tabs [data-tab="comments"]').click()`);
+    await waitFor(() => ui.evalJs(`!document.getElementById("comments-panel").hidden && document.querySelectorAll("#comments-panel .cmt-row").length >= 1`), "comments panel populated");
+    assert.equal(await ui.evalJs(`document.querySelector(".cmts-scope")?.textContent`), "This page");
+    await ui.evalJs(`document.querySelector('#comment-thread [data-ct="resolve"]').click()`);
+    await waitFor(() => ui.evalJs(`document.getElementById("comment-thread").hidden && document.querySelectorAll("#comment-pins .cmt-pin").length === 0`), "resolved pin hidden by default");
+    await ui.evalJs(`document.getElementById("show-resolved-pins").click()`);
+    await waitFor(() => ui.evalJs(`document.querySelectorAll("#comment-pins .cmt-pin.resolved").length === 1`), "resolved pin shown when checkbox checked");
+
+    const orphanNodeRes = await mcp(B, "write_html", { parentId: board, html: `<div data-name="Orphan Banner" style="position:absolute;left:30px;top:490px;width:140px;height:36px">bye</div>` });
+    const orphanNodeId = orphanNodeRes.created[0].id;
+    await fetch(`${B}/api/comments`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ nodeId: orphanNodeId, text: "Check alignment" }) });
+    await mcp(B, "delete_nodes", { nodeIds: [orphanNodeId] });
+    await waitFor(() => ui.evalJs(`Boolean(document.querySelector("#comments-panel .cmt-row.orphaned .cmt-warn-pill"))`), "orphaned comment badge shown");
+    assert.equal(await ui.evalJs(`document.querySelector("#comments-panel .cmt-row.orphaned strong.del")?.textContent`), "Orphan Banner");
+    assert.match(await ui.evalJs(`document.querySelector("#comments-panel .cmt-row.orphaned .cmt-row-meta")?.textContent || ""`), /Removed in step \d+/);
+    await ui.evalJs(`document.querySelector('#comments-panel [data-restore-orphan]').click()`);
+    await waitFor(() => ui.evalJs(`!document.querySelector("#comments-panel .cmt-row.orphaned")`), "Restore recovers deleted layer & clears orphan state");
+  });
   await t.test("no runtime errors in the UI and none logged by the server", () => {
     assert.deepEqual(ui.errors, []);
     assert.doesNotMatch(srv.logs(), /TypeError|ReferenceError|\[weft\] (?!MCP)/);
