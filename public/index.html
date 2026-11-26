@@ -167,7 +167,8 @@
     display: flex; align-items: center; gap: 8px; width: 100%; background: none; border: 0; height: 32px;
     color: var(--text); padding: 0 10px; border-radius: 8px; cursor: pointer; text-align: left; font-size: 13px;
   }
-  .menu button:not(.btn):hover:not(:disabled) { background: var(--fill); }
+  .menu button:not(.btn):hover:not(:disabled), .menu button.dash-open-item { background: var(--fill); }
+  .menu button.dash-open-item { font-weight: 500; }
   .menu button:disabled { opacity: 0.4; cursor: default; }
   .menu .sep { height: 1px; background: var(--line); margin: 4px 6px; }
   .menu .label { color: var(--muted); font-size: 11px; font-weight: 600; padding: 6px 10px 4px; }
@@ -528,7 +529,8 @@
   .kv b { color: var(--muted); font-weight: 400; text-align: right; font-family: var(--font-mono); font-size: 11px; }
   .mono {
     font-family: var(--font-mono); font-size: 11px; word-break: break-all; color: var(--text-2);
-    background: var(--fill); border-radius: 8px; padding: 7px 10px;
+    background: var(--fill); border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px;
+    line-height: 14px; letter-spacing: -0.01em;
   }
   .font-row { display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 8px; border-radius: 8px; background: var(--surface-2); }
   .font-row .fam { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 500; color: var(--text); }
@@ -642,110 +644,152 @@
   .cmdk-foot kbd { background: #fff; border-color: var(--line-2); }
   .cmdk-foot .cmdk-count { margin-left: auto; }
 
-  /* Projects Dashboard (Light Precision) */
-  #dashboard { position: fixed; inset: 0; z-index: 30; background: var(--canvas); display: flex; flex-direction: column; }
+  /* Projects Dashboard (weft) */
+  #dashboard { position: fixed; inset: 0; z-index: 30; background: var(--panel); display: flex; flex-direction: row; }
+  .dash-side {
+    width: 256px; flex-shrink: 0; height: 100%; background: var(--surface-2); border-right: 1px solid var(--line);
+    display: flex; flex-direction: column; padding: 12px 10px; gap: 18px;
+  }
+  .dash-brand { display: flex; align-items: center; gap: 10px; padding: 0 4px; height: 40px; }
+  .dash-brand-name { font-size: 17px; font-weight: 700; letter-spacing: -0.03em; line-height: 1; color: var(--ink); }
+  .dash-search { width: 100%; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; height: 32px; color: var(--muted); }
+  .dash-search svg { color: var(--muted); transition: color 0.12s; }
+  .dash-search:focus-within svg.search-ic { color: var(--accent); }
+  .dash-nav-all {
+    display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 8px; border-radius: 8px;
+    font-size: 13px; font-weight: 600; background: var(--panel); border: 1px solid var(--line); color: var(--ink);
+  }
+  .dash-count { margin-left: auto; font-size: 12px; font-weight: 500; color: var(--muted); }
+  .dash-recent { display: flex; flex-direction: column; gap: 2px; flex: 1; min-height: 0; overflow: auto; }
+  .dash-recent-h { padding: 0 8px 6px; font-size: 12px; font-weight: 600; color: var(--muted); }
+  #dash-recent-list { display: flex; flex-direction: column; gap: 2px; }
+  .dash-recent-row {
+    display: flex; align-items: center; gap: 10px; height: 30px; padding: 0 8px; border-radius: 8px;
+    font-size: 13px; color: var(--text-2); cursor: pointer; border: 0; background: none; width: 100%; text-align: left;
+  }
+  .dash-recent-row:hover { background: var(--fill-2); color: var(--ink); }
+  .dash-recent-row.active { color: var(--ink); font-weight: 500; }
+  .dash-recent-dot { width: 8px; height: 8px; border-radius: 99px; flex-shrink: 0; }
+  .dash-recent-nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dash-recent-meta { font-size: 12px; color: var(--muted); flex-shrink: 0; }
+  .dash-open-pill { font-size: 11px; font-weight: 600; color: var(--live-text); background: var(--live-fill); border-radius: 999px; padding: 1px 7px; flex-shrink: 0; }
+  .dash-mcp-card {
+    display: flex; flex-direction: column; gap: 10px; padding: 12px; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 12px; flex-shrink: 0;
+  }
+  .dash-mcp-top { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; }
+  .dash-mcp-top .live-dot { width: 8px; height: 8px; border-radius: 99px; background: var(--live); }
+  .dash-mcp-top .st { margin-left: auto; font-size: 11px; font-weight: 600; color: var(--live-text); }
+
+  .dash-main { flex: 1; min-width: 0; height: 100%; display: flex; flex-direction: column; background: var(--panel); }
   .dash-head {
-    min-height: 60px; padding: 10px 28px; background: var(--panel); border-bottom: 1px solid var(--line);
-    display: flex; align-items: center; flex-wrap: wrap; gap: 12px; flex-shrink: 0;
+    height: 56px; padding: 0 20px; background: var(--panel); border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 12px; flex-shrink: 0;
   }
-  .dash-brand {
-    display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 14px;
-    letter-spacing: -0.02em; margin-right: auto;
-  }
-  .dash-logo { width: 28px; height: 28px; display: grid; place-items: center; flex: 0 0 28px; }
-  .dash-count {
-    background: var(--canvas); color: var(--muted); font-family: var(--font-mono);
-    font-size: 11px; font-weight: 500; padding: 2px 8px; border-radius: 99px;
-  }
-  .dash-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
-  .dash-controls .fld { height: 32px; border-radius: 7px; border: 1px solid var(--line); }
-  .dash-search { width: 220px; background: var(--canvas); }
-  .dash-sort { width: auto; min-width: 140px; background: var(--panel); }
-  .dash-sort select { font-weight: 500; }
-  .dash-seg { width: 64px; flex-shrink: 0; height: 32px; padding: 2px; }
-  .dash-seg button { display: grid; place-items: center; height: 26px; }
-  .dash-controls .btn { height: 32px; padding: 0 13px; }
-  .dash-body { flex: 1; min-height: 0; overflow: auto; padding: 32px 48px 56px; }
-  .dash-wrap { max-width: 1344px; margin: 0 auto; }
-  .dash-bar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; color: var(--muted); font-size: 12px; }
-  .dash-bar strong { color: var(--text); font-weight: 600; font-size: 14px; }
-  #dash-summary { font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
-  .dash-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 20px; }
+  #dash-heading { font-size: 15px; font-weight: 600; color: var(--ink); }
+  #dash-summary { font-size: 13px; color: var(--muted); }
+  .dash-controls { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+  .dash-sort { width: auto; min-width: 140px; height: 34px; border-radius: 10px; background: var(--panel); border: 1px solid var(--line-2); }
+  .dash-sort select { font-weight: 500; font-family: var(--font-sans); font-size: 13px; }
+  .dash-seg { width: 72px; flex-shrink: 0; height: 34px; padding: 3px; }
+  .dash-seg button { display: grid; place-items: center; height: 28px; }
+  .dash-controls .btn { height: 34px; padding: 0 14px; border-radius: 10px; font-size: 13px; }
+
+  .dash-body { flex: 1; min-height: 0; overflow: auto; padding: 28px 32px 48px; background: var(--surface-2); }
+  .dash-wrap { max-width: 1344px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px; }
+  .dash-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 20px; }
   .dash-card {
-    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
-    overflow: hidden; display: flex; flex-direction: column;
-    transition: border-color 0.14s, transform 0.14s;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+    overflow: hidden; display: flex; flex-direction: column; transition: border-color 0.14s;
   }
-  .dash-card:hover { border-color: #aeb7c2; transform: translateY(-1px); }
-  .dash-card.active { border: 1.5px solid var(--accent); }
-  .dash-thumb {
-    position: relative; height: 196px; background: var(--stage);
-    border-bottom: 1px solid var(--line); overflow: hidden; cursor: pointer;
+  .dash-card:hover { border-color: var(--line-3); }
+  .dash-card.active { border: 1.5px solid var(--ink); }
+  .dash-card-new {
+    min-height: 262px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
+    border-radius: 14px; border: 1.5px dashed var(--line-3); background: transparent; cursor: pointer; text-align: center; padding: 20px;
   }
+  .dash-card-new:hover { background: var(--panel); border-color: var(--muted); }
+  .dash-card-new-ic { width: 36px; height: 36px; border-radius: 999px; background: var(--fill-2); display: grid; place-items: center; }
+  .dash-card-new strong { font-size: 14px; font-weight: 600; color: var(--ink); }
+  .dash-card-new span { font-size: 12px; color: var(--muted); max-width: 220px; line-height: 1.5; }
+  .dash-card-new code { font-family: var(--font-mono); font-size: 11px; color: var(--text-2); }
+  .dash-thumb { position: relative; height: 200px; background: var(--stage); overflow: hidden; cursor: pointer; }
   .dash-thumb-world { position: absolute; left: 0; top: 0; transform-origin: 0 0; pointer-events: none; font: initial; line-height: normal; color: initial; }
   .dash-thumb-world * { pointer-events: none !important; }
   .dash-empty-thumb {
     position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center;
     justify-content: center; gap: 8px; color: var(--muted); font-family: var(--font-mono); font-size: 11px;
   }
-  .dash-empty-thumb svg { opacity: 0.6; }
-  .dash-pill {
-    position: absolute; top: 12px; left: 12px; background: var(--accent); color: #fff;
-    font-family: var(--font-mono); font-size: 10px; font-weight: 600;
-    letter-spacing: 0.04em; text-transform: uppercase; padding: 3px 8px; border-radius: 99px; pointer-events: none;
+  .dash-agent-chip {
+    position: absolute; top: 12px; left: 12px; display: inline-flex; align-items: center; gap: 6px;
+    font-size: 11px; font-weight: 600; color: #fff; background: var(--agent); border-radius: 999px; padding: 3px 9px 3px 7px; pointer-events: none;
   }
-  .dash-ab-pill {
-    position: absolute; bottom: 10px; right: 12px; background: var(--panel);
-    border: 1px solid var(--line); color: var(--text); font-family: var(--font-mono);
-    font-size: 10px; padding: 2px 8px; border-radius: 99px; pointer-events: none;
-  }
-  .dash-card-foot { display: flex; align-items: center; gap: 8px; padding: 14px 16px; }
+  .dash-agent-chip::before { content: ""; width: 6px; height: 6px; border-radius: 99px; background: #fff; }
+  .dash-card-foot { display: flex; align-items: center; gap: 8px; padding: 12px 14px; }
+  .dash-card-foot [data-dash-menu], .dash-row [data-dash-menu] { width: 28px; height: 28px; border-radius: 8px; flex-shrink: 0; }
+  .dash-card-foot [data-dash-menu][aria-expanded="true"], .dash-row [data-dash-menu][aria-expanded="true"] { background: var(--fill-2); color: var(--ink); }
   .dash-meta { flex: 1; min-width: 0; cursor: pointer; }
+  .dash-name-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
   .dash-name { font-size: 14px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .dash-sub { font-family: var(--font-mono); font-size: 11px; color: var(--muted); margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dash-sub { font-size: 12px; color: var(--muted); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-  .dash-list { display: flex; flex-direction: column; gap: 10px; max-width: 1040px; }
-  .dash-row {
-    display: flex; align-items: center; gap: 14px; height: 68px; padding: 0 14px;
-    background: var(--panel); border: 1px solid var(--line); border-radius: 10px; transition: border-color 0.14s;
-  }
-  .dash-row:hover { border-color: #aeb7c2; }
-  .dash-row.active { border: 1.5px solid var(--accent); }
-  .dash-row .dash-thumb { width: 84px; height: 48px; border: 1px solid var(--line); border-radius: 6px; flex-shrink: 0; }
-  .dash-row .dash-name { font-size: 13px; }
-  .dash-row .dash-sub { font-family: var(--font-sans); margin-top: 2px; }
-  .dash-row-stats {
-    display: flex; align-items: center; gap: 16px; color: var(--muted);
-    font-family: var(--font-mono); font-size: 11px; white-space: nowrap; font-variant-numeric: tabular-nums;
-  }
-  .dash-row-stats span { min-width: 78px; text-align: right; }
-  .dash-row-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
-  .dash-inline-badge {
-    background: var(--row-sel); color: var(--accent); font-family: var(--font-mono);
-    font-size: 10px; font-weight: 500; padding: 1px 7px; border-radius: 99px; flex-shrink: 0;
-  }
-  .dash-empty { text-align: center; padding: 64px 20px; border: 1px dashed var(--line); border-radius: 12px; color: var(--muted); background: var(--panel); }
-  .dash-empty p { margin: 0 0 14px; font-size: 13px; }
-  #dash-menu { z-index: 40; min-width: 196px; }
-  #dash-modal {
-    position: fixed; inset: 0; z-index: 50; background: rgba(10, 11, 13, 0.25);
-    display: grid; place-items: center; padding: 16px;
-  }
+  .dash-list { display: flex; flex-direction: column; border-radius: 14px; background: var(--panel); border: 1px solid var(--line); overflow: hidden; }
+  .dash-row { display: flex; align-items: center; gap: 14px; height: 64px; padding: 0 16px; border-bottom: 1px solid var(--fill-2); }
+  .dash-row:last-child { border-bottom: 0; }
+  .dash-row.active { background: var(--surface-2); }
+  .dash-row .dash-thumb { width: 52px; height: 36px; border: 1px solid var(--line-2); border-radius: 6px; flex-shrink: 0; }
+  .dash-row.active .dash-thumb { border: 1.5px solid var(--ink); }
+  .dash-row .dash-meta { width: 300px; flex: 0 0 300px; min-width: 0; }
+  .dash-row-stats { flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; color: var(--text-2); font-family: var(--font-mono); font-size: 12px; white-space: nowrap; }
+  .dash-row-title { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .dash-inline-badge { background: var(--live-fill); color: var(--live-text); font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 99px; flex-shrink: 0; }
+  .dash-inline-agent { background: var(--agent-badge); color: var(--agent-text); font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 99px; flex-shrink: 0; }
+
+  /* Agent activity card on Dashboard */
+  .dash-activity { display: flex; flex-direction: column; border-radius: 14px; background: var(--panel); border: 1px solid var(--line); overflow: hidden; }
+  .dash-act-head { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+  .dash-act-head strong { font-size: 13px; font-weight: 600; }
+  .dash-act-head span { font-size: 12px; color: var(--muted); }
+  .dash-act-head .seg { margin-left: auto; }
+  .dash-act-head .seg button { padding: 0 10px; }
+  .dash-act-row { display: flex; align-items: center; gap: 14px; height: 56px; padding: 0 16px; border-bottom: 1px solid var(--fill-2); font-size: 13px; }
+  .dash-act-row:last-child { border-bottom: 0; }
+  .dash-act-ic { width: 28px; height: 28px; border-radius: 8px; background: var(--fill); display: grid; place-items: center; flex-shrink: 0; color: var(--muted); }
+  .dash-act-ic.live { background: var(--agent-chip); color: var(--agent); }
+  .dash-act-info { display: flex; flex-direction: column; gap: 2px; width: 300px; flex-shrink: 0; min-width: 0; }
+  .dash-act-info strong { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dash-act-info span { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dash-act-tools { flex: 1; min-width: 0; color: var(--text-3); font-family: var(--font-mono); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dash-act-pill { font-size: 11px; font-weight: 500; padding: 2px 8px; border-radius: 999px; background: var(--fill-2); color: var(--text-3); flex-shrink: 0; }
+  .dash-act-pill.live { background: var(--live-fill); color: var(--live-text); font-weight: 600; }
+  .dash-act-empty { padding: 20px 16px; font-size: 12px; color: var(--muted); }
+
+  .dash-empty { text-align: center; padding: 64px 24px; border: 1px dashed var(--line-3); border-radius: 14px; color: var(--muted); background: var(--surface-2); display: flex; flex-direction: column; align-items: center; gap: 12px; }
+  .dash-empty-ic { width: 40px; height: 40px; border-radius: 999px; background: var(--fill-2); display: grid; place-items: center; color: var(--text-2); }
+  .dash-empty strong { font-size: 15px; font-weight: 600; color: var(--ink); }
+  .dash-empty p { margin: 0; font-size: 13px; color: var(--muted); }
+  .dash-empty-acts { display: flex; gap: 8px; margin-top: 4px; }
+  .dash-empty .btn { height: 34px; padding: 0 14px; border-radius: 10px; font-size: 13px; }
+  #dash-menu { z-index: 40; min-width: 200px; }
+  #dash-modal { position: fixed; inset: 0; z-index: 50; background: rgba(10, 11, 13, 0.42); display: grid; place-items: center; padding: 16px; }
   .dash-dialog {
-    width: 100%; max-width: 380px; background: var(--pop); border: 1px solid var(--line);
-    border-radius: 12px; padding: 20px; box-shadow: var(--shadow-float);
-    display: flex; flex-direction: column; gap: 14px;
+    width: 100%; max-width: 420px; background: var(--pop); border: 1px solid var(--line-2);
+    border-radius: 14px; padding: 22px; box-shadow: var(--shadow-float); display: flex; flex-direction: column; gap: 16px;
   }
+  .dash-dialog-head { display: flex; align-items: flex-start; gap: 12px; }
+  .dash-dialog-ic { width: 36px; height: 36px; border-radius: 10px; background: var(--danger-fill); color: var(--danger); display: grid; place-items: center; flex-shrink: 0; }
   .dash-dialog h3 { margin: 0; font-size: 15px; font-weight: 600; color: var(--text); }
-  .dash-dialog p { margin: 0; font-size: 12px; color: var(--muted); line-height: 1.5; }
+  .dash-dialog p { margin: 4px 0 0; font-size: 13px; color: var(--text-3); line-height: 1.5; }
   .dash-dialog .fld { height: 36px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); }
   .dash-dialog .fld input { font-size: 13px; }
-  .dash-dialog .btn { height: 34px; border-radius: 8px; }
-  @media (max-width: 720px) {
-    .dash-head { padding: 10px 16px; }
+  .dash-dialog .btn { height: 34px; padding: 0 14px; border-radius: 10px; font-size: 13px; }
+  .dash-dialog-acts { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+  @media (max-width: 820px) {
+    .dash-side { display: none; }
+    .dash-head { padding: 0 16px; }
     .dash-body { padding: 20px 16px 40px; }
-    .dash-search { width: 100%; }
-    .dash-row-stats { display: none; }
+    .dash-row .dash-meta { width: auto; flex: 1; }
+    .dash-row-stats, .dash-act-tools { display: none; }
   }
 </style>
 </head>
@@ -870,46 +914,55 @@
 </div>
 
 <section id="dashboard" aria-label="Projects dashboard" hidden>
-  <header class="dash-head">
+  <aside class="dash-side">
     <div class="dash-brand">
-      <span class="dash-logo">
-        <svg width="26" height="26" viewBox="0 0 32 32" fill="none">
-          <path d="M7.5 3 H19.5 L26.5 10 V26.5 C26.5 27.88 25.38 29 24 29 H7.5 C6.12 29 5 27.88 5 26.5 V5.5 C5 4.12 6.12 3 7.5 3 Z" fill="#0000ff"/>
-          <path d="M19.5 3 L26.5 10 H21 C20.17 10 19.5 9.33 19.5 8.5 V3 Z" fill="#9ab8ff"/>
-          <rect x="10" y="13.5" width="11.5" height="10.5" rx="1.6" stroke="#ffffff" stroke-width="2.1"/>
-          <rect x="8.6" y="12.1" width="3.6" height="3.6" rx="0.6" fill="#ffffff"/>
-          <rect x="19.3" y="21.8" width="3.6" height="3.6" rx="0.6" fill="#ffffff"/>
-        </svg>
-      </span>
-      <span>Paper-Lite</span>
-      <span class="muted">/</span>
-      <span style="font-weight:500">Projects</span>
+      <svg width="32" height="32" viewBox="0 0 32 32" fill="none" aria-hidden="true"><rect width="32" height="32" rx="8" fill="#1d1d1f"/><path d="M5.5 9h2v6h-2a1.5 1.5 0 01-1.5-1.5v-3A1.5 1.5 0 015.5 9z" fill="#d97757"/><path d="M16.5 9h10a1.5 1.5 0 011.5 1.5v3a1.5 1.5 0 01-1.5 1.5h-10z" fill="#d97757"/><path d="M5.5 17h10v6h-10a1.5 1.5 0 01-1.5-1.5v-3A1.5 1.5 0 015.5 17z" fill="#d97757"/><path d="M24.5 17h2a1.5 1.5 0 011.5 1.5v3a1.5 1.5 0 01-1.5 1.5h-2z" fill="#d97757"/><path d="M10.5 4h3A1.5 1.5 0 0115 5.5v10H9v-10A1.5 1.5 0 0110.5 4z" fill="#fafaf9"/><path d="M9 24.5h6v2a1.5 1.5 0 01-1.5 1.5h-3A1.5 1.5 0 019 26.5z" fill="#fafaf9"/><path d="M18.5 4h3A1.5 1.5 0 0123 5.5v2h-6v-2A1.5 1.5 0 0118.5 4z" fill="#fafaf9"/><path d="M17 16.5h6v10a1.5 1.5 0 01-1.5 1.5h-3a1.5 1.5 0 01-1.5-1.5z" fill="#fafaf9"/></svg>
+      <span class="dash-brand-name">weft</span>
+    </div>
+    <label class="fld dash-search">
+      <svg class="search-ic" width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14" stroke-linecap="round"/></svg>
+      <input id="dash-search" placeholder="Search projects…" autocomplete="off">
+      <span class="kbd-pill" id="dash-search-kbd">Ctrl K</span>
+      <button type="button" class="clear-btn" id="dash-search-clear" title="Clear search" aria-label="Clear search" hidden><svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
+    </label>
+    <div class="dash-nav-all">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1.2" stroke="#1d1d1f" stroke-width="1.4"/><rect x="9" y="2.5" width="4.5" height="4.5" rx="1.2" stroke="#1d1d1f" stroke-width="1.4"/><rect x="2.5" y="9" width="4.5" height="4.5" rx="1.2" stroke="#1d1d1f" stroke-width="1.4"/><rect x="9" y="9" width="4.5" height="4.5" rx="1.2" stroke="#1d1d1f" stroke-width="1.4"/></svg>
+      <span>All projects</span>
       <span class="dash-count" id="dash-count">0</span>
     </div>
-    <div class="dash-controls">
-      <label class="fld dash-search">
-        <span aria-hidden="true"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="7" cy="7" r="4.8"/><path d="m10.8 10.8 3.2 3.2" stroke-linecap="round"/></svg></span>
-        <input id="dash-search" placeholder="Search projects…" autocomplete="off">
-        <span class="kbd-pill" id="dash-search-kbd">⌘K</span>
-        <button type="button" class="icon-btn" id="dash-search-clear" title="Clear search" aria-label="Clear search" style="width:18px;height:18px" hidden><svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
-      </label>
-      <label class="fld dash-sort"><span>Sort</span><select id="dash-sort">
-        <option value="updated">Last edited</option>
-        <option value="name">Name A–Z</option>
-        <option value="layers">Most layers</option>
-      </select></label>
-      <div class="seg dash-seg" role="group" aria-label="View mode">
-        <button data-dash-view="grid" class="on" title="Grid view"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="1" width="6" height="6" rx="1"/><rect x="9" y="1" width="6" height="6" rx="1"/><rect x="1" y="9" width="6" height="6" rx="1"/><rect x="9" y="9" width="6" height="6" rx="1"/></svg></button>
-        <button data-dash-view="list" title="List view"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="2" width="14" height="2.4" rx="1"/><rect x="1" y="6.8" width="14" height="2.4" rx="1"/><rect x="1" y="11.6" width="14" height="2.4" rx="1"/></svg></button>
-      </div>
-      <button class="btn primary" id="dash-new"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span>New project</span></button>
-      <button class="btn" id="dash-back"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M13 8H3M6.5 4.5L3 8l3.5 3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span id="dash-back-label">Back to canvas</span></button>
+    <div class="dash-recent">
+      <div class="dash-recent-h">Recent</div>
+      <div id="dash-recent-list"></div>
     </div>
-  </header>
-  <div class="dash-body">
-    <div class="dash-wrap">
-      <div class="dash-bar"><strong id="dash-heading">All projects</strong><span id="dash-summary"></span></div>
-      <div id="dash-content"></div>
+    <div class="dash-mcp-card">
+      <div class="dash-mcp-top"><span class="live-dot"></span><span>MCP server</span><span class="st">Connected</span></div>
+      <div class="mono" id="dash-mcp-url"></div>
+      <button type="button" class="btn" id="dash-copy-mcp"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="5" y="5" width="8.5" height="8.5" rx="1.5"/><path d="M11 5V3.5A1 1 0 0010 2.5H3.5a1 1 0 00-1 1V10a1 1 0 001 1H5"/></svg>Copy Claude Code command</button>
+    </div>
+  </aside>
+  <div class="dash-main">
+    <header class="dash-head">
+      <strong id="dash-heading">All projects</strong>
+      <span id="dash-summary"></span>
+      <div class="dash-controls">
+        <label class="fld dash-sort"><span>Sort</span><select id="dash-sort">
+          <option value="updated">Last edited</option>
+          <option value="name">Name A–Z</option>
+          <option value="layers">Most layers</option>
+        </select></label>
+        <div class="seg dash-seg" role="group" aria-label="View mode">
+          <button data-dash-view="grid" class="on" title="Grid view" aria-label="Grid view"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="1" y="1" width="6" height="6" rx="1"/><rect x="9" y="1" width="6" height="6" rx="1"/><rect x="1" y="9" width="6" height="6" rx="1"/><rect x="9" y="9" width="6" height="6" rx="1"/></svg></button>
+          <button data-dash-view="list" title="List view" aria-label="List view"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="1" y="2" width="14" height="2.4" rx="1"/><rect x="1" y="6.8" width="14" height="2.4" rx="1"/><rect x="1" y="11.6" width="14" height="2.4" rx="1"/></svg></button>
+        </div>
+        <button class="btn" id="dash-back"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M13 8H3M6.5 4.5L3 8l3.5 3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span id="dash-back-label">Back to canvas</span></button>
+        <button class="btn primary" id="dash-new"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span>New project</span></button>
+      </div>
+    </header>
+    <div class="dash-body">
+      <div class="dash-wrap">
+        <div id="dash-content"></div>
+        <section class="dash-activity" id="dash-activity"></section>
+      </div>
     </div>
   </div>
 </section>
@@ -950,6 +1003,9 @@ let spaceDown = false;
 let inspectorDirty = false;
 let cssJsonOpen = false;      // UX #03: collapsed raw CSS JSON by default
 let agentNodes = [];          // [{ id, label }] nodes an MCP agent is working on
+let activitySessions = [];    // dashboard activity sessions
+let actFilter = "all";
+const clock = (iso) => { const d = new Date(iso); return Number.isNaN(+d) ? "" : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }); };
 
 const $ = (s, r = document) => r.querySelector(s);
 const app = $("#app"), stage = $("#stage"), world = $("#world"), layersEl = $("#layers"),
@@ -2319,12 +2375,20 @@ const dashPreviews = new Map();
 const applyDashViewSeg = () => document.querySelectorAll("[data-dash-view]").forEach((b) => b.classList.toggle("on", b.dataset.dashView === dashView));
 applyDashViewSeg();
 
+function closeDashMenu() {
+  dashMenu.hidden = true;
+  dashContent.querySelectorAll('[data-dash-menu][aria-expanded="true"]').forEach((b) => b.setAttribute("aria-expanded", "false"));
+}
+
 function openDashboard(open = dashEl.hidden) {
   dashEl.hidden = !open;
-  dashMenu.hidden = true;
+  closeDashMenu();
   if (open) {
     if (location.hash !== "#dashboard") history.replaceState(null, "", "#dashboard");
     renderDashboard();
+    api("GET", "/api/activity").then((d) => {
+      if (d?.sessions) { activitySessions = d.sessions; if (!dashEl.hidden) renderDashActivity(); }
+    });
   } else {
     if (location.hash === "#dashboard") history.replaceState(null, "", location.pathname + location.search);
     closeDashModal();
@@ -2381,38 +2445,95 @@ function thumbMarkup(p, compact = false) {
     ${empty
       ? `<div class="dash-empty-thumb">${compact ? '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="3" y="4" width="18" height="16" rx="2" stroke-dasharray="3 2"/></svg>' : '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="3" y="4" width="18" height="16" rx="2" stroke-dasharray="3 2"/></svg><span>Empty canvas</span>'}</div>`
       : `<div class="dash-thumb-world"></div>`}
-    ${!compact && p.active ? '<span class="dash-pill">Open</span>' : ""}
-    ${!compact && p.artboards ? `<span class="dash-ab-pill">${plural(p.artboards, "artboard")}</span>` : ""}
+    ${!compact && p.agentEditing ? '<span class="dash-agent-chip">Agent editing</span>' : ""}
   </div>`;
+}
+
+function renderDashSidebar() {
+  const recentEl = $("#dash-recent-list");
+  if (recentEl) {
+    const recent = [...projects].sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt))).slice(0, 4);
+    recentEl.innerHTML = recent.map((p) => `
+      <button type="button" class="dash-recent-row${p.active ? " active" : ""}" data-open-project="${esc(p.id)}">
+        <span class="dash-recent-dot" style="background:${esc(p.accentColor || "#9ad6a4")}"></span>
+        <span class="dash-recent-nm">${esc(p.name)}</span>
+        ${p.active ? '<span class="dash-open-pill">Open</span>' : `<span class="dash-recent-meta">${esc(ago(p.updatedAt).replace(" ago", ""))}</span>`}
+      </button>`).join("");
+  }
+  const mcpUrlEl = $("#dash-mcp-url");
+  if (mcpUrlEl) mcpUrlEl.textContent = `${location.origin}/mcp`;
+}
+
+function renderDashActivity() {
+  const el = $("#dash-activity");
+  if (!el) return;
+  const filtered = activitySessions.filter((s) => {
+    if (actFilter === "agent") return s.source === "mcp";
+    if (actFilter === "you") return s.source !== "mcp";
+    return true;
+  });
+  const fmtTools = (tc) => Object.entries(tc || {}).map(([k, v]) => `${k} ×${v}`).join(" · ");
+  el.innerHTML = `
+    <div class="dash-act-head">
+      <strong>Agent activity</strong>
+      <span>Every MCP write, grouped into sessions · today</span>
+      <div class="seg">
+        ${["all", "agent", "you"].map((f) => `<button type="button" data-act-filter="${f}" class="${actFilter === f ? "on" : ""}">${f === "all" ? "All" : f === "agent" ? "Agent" : "You"}</button>`).join("")}
+      </div>
+    </div>
+    ${filtered.length ? filtered.slice(0, 8).map((s) => `
+      <div class="dash-act-row">
+        <span class="dash-act-ic${s.live ? " live" : ""}"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 2l1.4 3.6L13 7l-3.6 1.4L8 12l-1.4-3.6L3 7l3.6-1.4z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg></span>
+        <div class="dash-act-info">
+          <strong>${esc(s.title || `${plural(s.editCount || 1, "edit")} on ${s.artboard || "Canvas"}`)}</strong>
+          <span>${esc(s.projectName || "Project")} · ${esc(s.artboard || "Page 1")} · ${esc(clock(s.startedAt))}</span>
+        </div>
+        <span class="dash-act-tools">${esc(fmtTools(s.toolCounts))}</span>
+        <span class="dash-act-pill${s.live ? " live" : ""}">${s.live ? "Live" : s.reverted ? "Reverted" : "Done"}</span>
+        <button type="button" class="btn" data-act-revert="${esc(s.id)}" ${s.live || s.reverted || !s.checkpointId ? "disabled" : ""}><svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4.5 6.5H10a3.5 3.5 0 010 7H7M6.5 4l-2.5 2.5L6.5 9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>Revert session</button>
+      </div>`).join("") : `<div class="dash-act-empty">No activity sessions recorded yet.</div>`}`;
 }
 
 function renderDashboard() {
   if (dashEl.hidden) return;
   $("#dash-count").textContent = String(projects.length);
-  $("#dash-back-label").textContent = S ? S.name : "Back to canvas";
+  $("#dash-back-label").textContent = "Back to canvas";
+  const totalLayers = projects.reduce((a, p) => a + (p.layers || 0), 0);
   const list = sortedProjects();
-  $("#dash-heading").textContent = dashQuery.trim() ? `Results for “${dashQuery.trim()}”` : "All projects";
-  $("#dash-summary").textContent = `Showing ${list.length} of ${plural(projects.length, "project")}`;
+  $("#dash-heading").textContent = "All projects";
+  $("#dash-summary").textContent = dashQuery.trim()
+    ? `${plural(list.length, "matching project")} · ${projects.length} total`
+    : `${plural(projects.length, "project")} · ${totalLayers.toLocaleString()} layers`;
+  renderDashSidebar();
+  renderDashActivity();
   if (!list.length) {
-    dashContent.innerHTML = `<div class="dash-empty"><p>No projects match “${esc(dashQuery.trim())}”.</p>
-      <button class="btn" id="dash-clear">Clear search</button></div>`;
+    dashContent.innerHTML = `<div class="dash-empty">
+      <span class="dash-empty-ic"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.5"/><path d="M10.5 10.5L14 14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></span>
+      <div style="display:flex;flex-direction:column;gap:4px">
+        <strong>No projects match “${esc(dashQuery.trim())}”</strong>
+        <p>Try a different project name, clear your filter, or create a new project.</p>
+      </div>
+      <div class="dash-empty-acts">
+        <button class="btn" id="dash-clear">Clear search</button>
+        <button class="btn primary" id="dash-empty-new"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span>New project</span></button>
+      </div></div>`;
     $("#dash-clear").onclick = () => { dashQuery = ""; $("#dash-search").value = ""; $("#dash-search-clear").hidden = true; $("#dash-search-kbd").hidden = false; renderDashboard(); };
+    $("#dash-empty-new").onclick = () => $("#dash-new").click();
     return;
   }
+  const menuSvg = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="3.5" cy="8" r="1.3"/><circle cx="8" cy="8" r="1.3"/><circle cx="12.5" cy="8" r="1.3"/></svg>';
   if (dashView === "list") {
     dashContent.innerHTML = `<div class="dash-list">${list.map((p) => `
       <div class="dash-row${p.active ? " active" : ""}" data-pid="${esc(p.id)}">
         ${thumbMarkup(p, true)}
         <div class="dash-meta" data-open-project="${esc(p.id)}">
-          <div class="dash-row-title"><span class="dash-name">${esc(p.name)}</span>${p.active ? '<span class="dash-inline-badge">Open</span>' : ""}</div>
+          <div class="dash-row-title"><span class="dash-name">${esc(p.name)}</span>${p.active ? '<span class="dash-inline-badge">Open</span>' : ""}${p.agentEditing ? '<span class="dash-inline-agent">Agent editing</span>' : ""}</div>
           <div class="dash-sub">Updated ${ago(p.updatedAt)}</div>
         </div>
         <div class="dash-row-stats">
-          <span>${plural(p.pages ?? 1, "page")}</span>
-          <span>${plural(p.artboards ?? 0, "artboard")}</span>
-          <span>${plural(p.layers ?? 0, "layer")}</span>
+          <span>${plural(p.pages ?? 1, "page")} · ${plural(p.artboards ?? 0, "artboard")} · ${(p.layers ?? 0).toLocaleString()} ${p.layers === 1 ? "layer" : "layers"}</span>
         </div>
-        <button class="icon-btn" data-dash-menu="${esc(p.id)}" title="Project actions" aria-label="Project actions" style="color:${p.active ? "var(--accent)" : ""}"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="3.5" cy="8" r="1.3"/><circle cx="8" cy="8" r="1.3"/><circle cx="12.5" cy="8" r="1.3"/></svg></button>
+        <button class="icon-btn" data-dash-menu="${esc(p.id)}" aria-expanded="false" title="Project actions" aria-label="Project actions">${menuSvg}</button>
       </div>`).join("")}</div>`;
   } else {
     dashContent.innerHTML = `<div class="dash-grid">${list.map((p) => `
@@ -2420,12 +2541,14 @@ function renderDashboard() {
         ${thumbMarkup(p, false)}
         <div class="dash-card-foot">
           <div class="dash-meta" data-open-project="${esc(p.id)}">
-            <div class="dash-name">${esc(p.name)}</div>
-            <div class="dash-sub">${plural(p.pages ?? 1, "page")} · ${plural(p.layers ?? 0, "layer")} · ${ago(p.updatedAt)}</div>
+            <div class="dash-name-row"><span class="dash-name">${esc(p.name)}</span>${p.active ? '<span class="dash-inline-badge">Open</span>' : ""}</div>
+            <div class="dash-sub">${plural(p.pages ?? 1, "page")} · ${plural(p.artboards ?? 0, "artboard")} · ${(p.layers ?? 0).toLocaleString()} ${p.layers === 1 ? "layer" : "layers"} · ${ago(p.updatedAt)}</div>
           </div>
-          <button class="icon-btn" data-dash-menu="${esc(p.id)}" title="Project actions" aria-label="Project actions"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="3.5" cy="8" r="1.3"/><circle cx="8" cy="8" r="1.3"/><circle cx="12.5" cy="8" r="1.3"/></svg></button>
+          <button class="icon-btn" data-dash-menu="${esc(p.id)}" aria-expanded="false" title="Project actions" aria-label="Project actions">${menuSvg}</button>
         </div>
-      </article>`).join("")}</div>`;
+      </article>`).join("")}${!dashQuery.trim() ? `<button type="button" class="dash-card-new" id="dash-grid-new"><span class="dash-card-new-ic"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 3v10M3 8h10" stroke="#1d1d1f" stroke-width="1.6" stroke-linecap="round"/></svg></span><strong>New project</strong><span>Starts empty with Page 1. Agents can also call <code>create_project</code>.</span></button>` : ""}</div>`;
+    const gn = $("#dash-grid-new");
+    if (gn) gn.onclick = () => $("#dash-new").click();
   }
   dashContent.querySelectorAll(".dash-thumb").forEach((el) => {
     const p = projects.find((x) => x.id === el.dataset.openProject);
@@ -2440,12 +2563,14 @@ function closeDashModal() {
 
 function openDashModal({ title, message = "", value = "", okText, danger = false, input = true, onOk }) {
   dashModal.innerHTML = `<div class="dash-dialog">
-    <h3>${esc(title)}</h3>
-    ${message ? `<p>${esc(message)}</p>` : ""}
+    <div class="dash-dialog-head">
+      ${danger ? `<span class="dash-dialog-ic"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 4.5h10M6 4.5V3h4v1.5M4.5 4.5l.7 8.5h5.6l.7-8.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span>` : ""}
+      <div><h3>${esc(title)}</h3>${message ? `<p>${esc(message)}</p>` : ""}</div>
+    </div>
     ${input ? `<label class="fld"><input id="dash-modal-input" value="${esc(value)}"></label>` : ""}
-    <div class="btnrow">
-      <button class="btn ${danger ? "danger-solid" : "primary"}" id="dash-modal-ok">${esc(okText)}</button>
+    <div class="dash-dialog-acts">
       <button class="btn" id="dash-modal-cancel">Cancel</button>
+      <button class="btn ${danger ? "danger-solid" : "primary"}" id="dash-modal-ok">${esc(okText)}</button>
     </div>
   </div>`;
   dashModal.hidden = false;
@@ -2514,17 +2639,19 @@ dashContent.addEventListener("click", (e) => {
     const pid = menuBtn.dataset.dashMenu;
     const p = projects.find((x) => x.id === pid);
     if (!p) return;
+    closeDashMenu();
+    menuBtn.setAttribute("aria-expanded", "true");
     dashMenu.dataset.pid = pid;
     dashMenu.innerHTML = `
-      <button data-dact="open">Open in canvas</button>
+      <button data-dact="open" class="dash-open-item">Open</button>
       <button data-dact="rename">Rename…</button>
       <button data-dact="duplicate">Duplicate</button>
-      <button data-dact="export-zip">Export project (.zip)</button>
+      <button data-dact="export-zip"><span class="pn">Export .zip</span><span class="meta">HTML · JSX</span></button>
       <div class="sep"></div>
       <button data-dact="delete" class="danger" ${projects.length < 2 ? "disabled title='The only project cannot be deleted'" : ""}>Delete…</button>`;
     const r = menuBtn.getBoundingClientRect();
     dashMenu.hidden = false;
-    dashMenu.style.left = `${Math.max(8, Math.min(window.innerWidth - 208, r.right - 196))}px`;
+    dashMenu.style.left = `${Math.max(8, Math.min(window.innerWidth - 208, r.right - 200))}px`;
     dashMenu.style.top = `${Math.min(window.innerHeight - 200, r.bottom + 4)}px`;
     return;
   }
@@ -2536,7 +2663,7 @@ dashMenu.addEventListener("click", async (e) => {
   const act = e.target.closest("[data-dact]")?.dataset.dact;
   const pid = dashMenu.dataset.pid;
   const p = projects.find((x) => x.id === pid);
-  dashMenu.hidden = true;
+  closeDashMenu();
   if (!act || !p) return;
   if (act === "open") return openProjectFromDash(pid);
   if (act === "rename") return openDashModal({
@@ -2552,8 +2679,8 @@ dashMenu.addEventListener("click", async (e) => {
   }
   if (act === "export-zip") return downloadZip(pid);
   if (act === "delete") return openDashModal({
-    title: `Delete “${p.name}”?`,
-    message: "This permanently removes the project JSON file from disk and cannot be undone.",
+    title: `Delete ${p.name}?`,
+    message: `This permanently removes ${plural(p.pages ?? 1, "page")}, ${plural(p.artboards ?? 0, "artboard")}, and ${(p.layers ?? 0).toLocaleString()} ${p.layers === 1 ? "layer" : "layers"} from disk. This action cannot be undone.`,
     okText: "Delete project",
     danger: true,
     input: false,
@@ -2561,8 +2688,25 @@ dashMenu.addEventListener("click", async (e) => {
   });
 });
 
+$("#dash-recent-list")?.addEventListener("click", (e) => {
+  const row = e.target.closest("[data-open-project]");
+  if (row) openProjectFromDash(row.dataset.openProject);
+});
+$("#dash-copy-mcp")?.addEventListener("click", () => {
+  copyText(`claude mcp add --transport http weft ${location.origin}/mcp`, "Copied MCP command");
+});
+$("#dash-activity")?.addEventListener("click", async (e) => {
+  const fb = e.target.closest("[data-act-filter]");
+  if (fb) { actFilter = fb.dataset.actFilter; return renderDashActivity(); }
+  const rb = e.target.closest("[data-act-revert]");
+  if (rb) {
+    const res = await api("POST", `/api/activity/${encodeURIComponent(rb.dataset.actRevert)}/revert`);
+    if (res?.ok) toast("Reverted session to checkpoint");
+  }
+});
+
 dashModal.addEventListener("pointerdown", (e) => { if (e.target === dashModal) closeDashModal(); });
-document.addEventListener("pointerdown", (e) => { if (!dashMenu.hidden && !e.target.closest("#dash-menu, [data-dash-menu]")) dashMenu.hidden = true; });
+document.addEventListener("pointerdown", (e) => { if (!dashMenu.hidden && !e.target.closest("#dash-menu, [data-dash-menu]")) closeDashMenu(); });
 window.addEventListener("hashchange", () => openDashboard(location.hash === "#dashboard"));
 if (location.hash === "#dashboard") openDashboard(true);
 
@@ -2693,7 +2837,6 @@ let rightTab = localStorage.getItem("weft:right-tab") || "design";
 let hist = { entries: [], cursor: -1, limit: 60, checkpoints: [] };
 let histFilter = "all", histFilterOpen = false, cpNaming = false, cpShowAll = false;
 const historyEl = $("#history-panel");
-const clock = (iso) => { const d = new Date(iso); return Number.isNaN(+d) ? "" : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); };
 const BOOKMARK = (filled) => `<svg width="12" height="12" viewBox="0 0 16 16" fill="${filled ? "#d97757" : "none"}"><path d="M4 2.5h8v11l-4-2.8-4 2.8z" stroke="${filled ? "#d97757" : "currentColor"}" stroke-width="1.5" stroke-linejoin="round"/></svg>`;
 
 function setRightTab(tab) {
@@ -2810,7 +2953,7 @@ function connect() {
     const { source, state } = JSON.parse(ev.data);
     const prevProject = S?.id, prevKey = viewKey();
     S = state;
-    if (!dashEl.hidden) $("#dash-back-label").textContent = S.name;
+    if (!dashEl.hidden) $("#dash-back-label").textContent = "Back to canvas";
     if (source === "mcp") toast("Updated by agent (MCP)");
     if (viewKey() === prevKey) return render();
     if (prevProject && prevProject !== S.id) expanded.clear();
@@ -2830,6 +2973,10 @@ function connect() {
     projects = JSON.parse(ev.data).projects || [];
     if (!projectMenu.hidden && !projectMenu.querySelector(".form")) renderProjectMenu();
     if (!dashEl.hidden) renderDashboard();
+  });
+  es.addEventListener("activity", (ev) => {
+    activitySessions = JSON.parse(ev.data).sessions || [];
+    if (!dashEl.hidden) renderDashActivity();
   });
   es.addEventListener("fonts", (ev) => {
     const { fonts, v } = JSON.parse(ev.data);
