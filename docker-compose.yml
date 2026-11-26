@@ -1,7 +1,7 @@
 services:
-  paper-lite:
+  weft:
     build: .
-    container_name: paper-lite
+    container_name: weft
     ports:
       - "127.0.0.1:3000:3000"
     environment:

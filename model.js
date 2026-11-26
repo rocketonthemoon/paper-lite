@@ -1,4 +1,4 @@
-// Canvas document model: validation of tags / styles / attributes and normalisation of project documents.
+// Canvas document model: validation of tags / styles / attributes, comments and normalisation of project documents.
 import { randomBytes } from "node:crypto";
 
 export const ALLOWED_TAGS = new Set([
@@ -19,6 +19,7 @@ const SAFE_SVG_VALUE = /^[\w\s.,#%()+-]*$/;
 const UNITLESS = new Set(["opacity", "zIndex", "flexGrow", "flexShrink", "fontWeight", "lineHeight", "order", "aspectRatio"]);
 const SAFE_URL = /^(https?:\/\/|data:image\/(png|jpe?g|gif|webp|svg\+xml);|\/|#|\.\/)/i;
 export const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+const COMMENT_STATUSES = new Set(["open", "read", "replied", "resolved"]);
 
 export class HttpError extends Error {
   constructor(status, message) {
@@ -94,10 +95,50 @@ export function emptyPage(name = "Page 1", id = newId()) {
   return { id, name: cleanName(name, "Page 1"), tag: "div", parentId: null, children: [], text: "", styles: {}, attrs: {} };
 }
 
-/** A new, empty project document: one empty page. */
+/** A new, empty project document: one empty page and an empty comments list. */
 export function emptyProject(id, name) {
   const page = emptyPage("Page 1");
-  return { version: 1, id, name: cleanName(name, "Untitled"), pages: [page.id], rootId: page.id, nodes: { [page.id]: page } };
+  return { version: 1, id, name: cleanName(name, "Untitled"), pages: [page.id], rootId: page.id, nodes: { [page.id]: page }, comments: [] };
+}
+
+function normalizeComments(rawComments) {
+  if (!Array.isArray(rawComments)) return [];
+  const out = [];
+  for (const c of rawComments) {
+    if (!c || typeof c !== "object") continue;
+    const cid = ID_RE.test(String(c.id || "")) ? String(c.id) : newId();
+    const nid = String(c.nodeId || "");
+    if (!ID_RE.test(nid)) continue;
+    const messages = Array.isArray(c.messages)
+      ? c.messages
+          .filter((m) => m && typeof m === "object" && typeof m.text === "string" && m.text.trim())
+          .map((m) => ({
+            id: ID_RE.test(String(m.id || "")) ? String(m.id) : newId(),
+            author: cleanName(m.author, "you"),
+            text: String(m.text).slice(0, 4000),
+            at: typeof m.at === "string" ? m.at : new Date().toISOString(),
+            ...(m.linkedStep && typeof m.linkedStep === "object"
+              ? {
+                  linkedStep: {
+                    historyId: String(m.linkedStep.historyId || ""),
+                    label: cleanName(m.linkedStep.label, "Edit"),
+                    nodeIds: Array.isArray(m.linkedStep.nodeIds) ? m.linkedStep.nodeIds.filter((x) => typeof x === "string").slice(0, 40) : [],
+                  },
+                }
+              : {}),
+          }))
+      : [];
+    out.push({
+      id: cid,
+      nodeId: nid,
+      status: COMMENT_STATUSES.has(c.status) ? c.status : "open",
+      agentsCanSee: c.agentsCanSee !== false,
+      messages,
+      ...(typeof c.readAt === "string" ? { readAt: c.readAt } : {}),
+      createdAt: typeof c.createdAt === "string" ? c.createdAt : (messages[0]?.at || new Date().toISOString()),
+    });
+  }
+  return out;
 }
 
 /**
@@ -141,5 +182,13 @@ export function normalizeProject(raw, { id, name, warnings = null } = {}) {
   };
   const pages = pageIds.filter((p) => walk(p, null));
   const rootId = pages.includes(raw.rootId) ? raw.rootId : pages[0];
-  return { version: Number(raw.version) || 1, id: id || raw.id, name: cleanName(name ?? raw.name, "Untitled"), pages, rootId, nodes };
+  return {
+    version: Number(raw.version) || 1,
+    id: id || raw.id,
+    name: cleanName(name ?? raw.name, "Untitled"),
+    pages,
+    rootId,
+    nodes,
+    comments: normalizeComments(raw.comments),
+  };
 }

@@ -1,0 +1,164 @@
+WEFT (formerly Paper-Lite) — TODO (from the folk-ui redesign)
+=============================================================
+Design source: paper-lite MCP project "folk-ui" (id b0e6d85f).
+  Page "Screens"
+  - "Editor"                    current features, restyled, + comment pins/tool
+  - "Projects"                  dashboard, restyled + Agent activity (new)
+  - "Editor · History (new)"    History tab, checkpoints, Follow agent
+  - "Editor · Comments (new)"   Comment tool, thread, Comments panel
+  Page "Design System"
+  - "01 · Brand"                name, woven logo mark, variants, lockups, rules
+  - "02 · Foundations"          colour tokens, type scale, spacing, radius, elevation, icons
+  - "03 · Components"           buttons, fields, tabs, badges, layer rows, menu, toast
+  - "04 · Agents & Comments"    comment flow, pin states, thread, presence rules
+
+Everything below appears in those designs but does not exist in the app yet.
+Items are ordered by value / effort.
+
+
+0. RENAME TO WEFT + NEW LOGO + DESIGN TOKENS
+--------------------------------------------
+- [ ] Product name "weft" (always lowercase in UI). Update <title>, dashboard
+      brand, README, package.json name, Docker image name, MCP server name
+      ("weft" in mcpServers config and `claude mcp add ... weft ...`).
+      Keep "paper-lite" as an alias in the MCP server for one release.
+- [ ] Logo: 2x2 woven mark (SVG on the 32-unit grid in "01 · Brand"). Ship as
+      public/logo.svg, favicon.svg (16/32), and apple-touch-icon (180).
+      Replace the blue document logo in #dashboard .dash-logo and #dash-btn.
+- [ ] Replace the CSS variables in public/index.html with the tokens from
+      "02 · Foundations": ink #1d1d1f, text-2 #4a4a48, muted #8a8a87,
+      faint #b0b0ad, line #ebebea, fill #f4f4f2, surface-2 #fafaf9,
+      canvas #eef2f6, agent #d97757 / #9a4a2e / #fbe3d9 / #fdf1ec,
+      select #4c7dff / #2f5bd3 / #e7f0ff. Drop the #0000ff accent from the
+      app chrome (artboard content is the user's and stays as authored).
+- [ ] UI font Inter (already in the font library) + Geist Mono for code, keys
+      and tool names. Sizes 32 (panel) / 34 (bar); radius 8 / 10 / 12 / 14.
+- [ ] Replace ⌘ ⇧ ▾ glyphs in index.html with "Ctrl"/"Shift" text and SVG
+      chevrons (Inter lacks those glyphs and renders boxes).
+
+BUG FOUND WHILE DESIGNING
+- [ ] create_artboard ignores the current page right after create_page: new
+      artboards land on the previous page unless pageId is passed. Default
+      should be state.rootId at call time (mcp-tools.js create_artboard).
+
+
+1. LABELLED UNDO HISTORY  ("History" tab in the right panel)
+------------------------------------------------------------
+Today: undoStack holds bare snapshots (server.js commit()). `source` is passed
+to commit() but dropped, so nothing can show who did what.
+- [ ] Store entries as { snapshot, source, tool, label, nodeIds, layerCount, at }.
+      source = "you" | "mcp" (MCP writes come through mcp-tools.js; browser writes
+      come through who(req) / x-client-id).
+- [ ] Derive a label per mutation: MCP tool name + target layer name,
+      e.g. "write_html · Inspector", "set_text_content · 3 layers".
+- [ ] GET /api/history  ->  { entries, cursor, limit: 60 } and an SSE "history" event.
+- [ ] UI: Design | History | Notes tabs in #right. Rows show an AI/You chip, label,
+      time and layer count. The current step is highlighted; redo-able steps are dimmed.
+- [ ] Click a row = jump to that step (repeat undo/redo to that cursor).
+- [ ] "Undo last agent run": undo back past the most recent consecutive run of
+      source="mcp" entries.
+- [ ] Filter button: All / Agent / You.
+
+2. CHECKPOINTS  (named restore points)
+---------------------------------------
+- [ ] "Save checkpoint" button: store a full project snapshot with a name in
+      DATA_DIR/projects/<id>.checkpoints.json. Unlike undo, these persist across
+      restarts and aren't capped at 60.
+- [ ] Auto checkpoints: on project creation, and before the first MCP write after
+      2+ minutes of no MCP writes (an "agent run" start).
+- [ ] Restore = one undoable mutation that replaces pages/nodes with the checkpoint.
+- [ ] Show a checkpoint divider inside the History timeline.
+- [ ] MCP tools: save_checkpoint(name), list_checkpoints(), restore_checkpoint(id),
+      so an agent can make its own safety net before a big rewrite.
+
+3. COMMENTS  (pinned to layers; how you talk to your agents)
+------------------------------------------------------------
+Designs: "Editor · Comments (new)" and "04 · Agents & Comments".
+- [ ] Data: project.comments = [{ id, nodeId, status: open|read|replied|resolved,
+      agentsCanSee: true, messages: [{ id, author: "you" | <agent name>,
+      text, at, linkedStep? }], readAt?, createdAt }].
+      Anchored to nodeId (not x/y) so pins follow the layer; if the layer is
+      deleted, keep the thread and show "Layer deleted" with Restore (undo).
+- [ ] Comment tool "C" in the toolbar (after Text) + "Comment" in the context bar.
+      Placing state: hover outline on the target layer, plus-pin and the hint
+      "Comment on <layer>". Click opens a new thread with the composer focused.
+- [ ] Pin (26px, teardrop, numbered) at the layer's top-left. States: open (ink),
+      read by agent (ink + dashed orange ring), agent replied (orange),
+      resolved (grey check, hidden unless "Show resolved pins on canvas").
+- [ ] Thread popover (360px, float shadow): layer name, Resolve, ⋯ menu;
+      messages with You / agent avatar + MCP badge; agent replies can carry a
+      linked change (history step) with View (jump) and Undo.
+      Composer: Ctrl+Enter to send, "Agents can see this" toggle.
+- [ ] Right panel tab "Comments (n)": Open / Resolved segments; rows show pin,
+      layer, status ("Claude replied", "Read 10:11", "Waiting · 2m"), preview,
+      message count and linked changes. Click = zoom to layer + open thread.
+- [ ] Layer tree: comment count indicator on rows (orange when an agent replied).
+- [ ] Toast when an agent replies: "Claude replied to your comment" + View.
+- [ ] MCP tools:
+        get_comments({ status?, nodeId? })  -> marks read, sets readAt
+        reply_to_comment({ id, text, linkStep?: true }) -> status "replied";
+            linkStep attaches the most recent history entry from this session
+        resolve_comment({ id })
+      get_basic_info includes "openComments: n" so agents notice them.
+- [ ] Comments are excluded from HTML/JSX/ZIP export.
+
+4. FOLLOW AGENT  (camera follows the agent)
+-------------------------------------------
+- [ ] HUD toggle "Follow agent" (left of Snap 8px), persisted in localStorage.
+- [ ] When on and a presence event arrives with nodes, zoom-to-selection on those
+      nodes, debounced to at most once every 600 ms.
+- [ ] Turn off automatically when the user pans or zooms manually; show a toast.
+
+4b. AGENT CURSOR  (live pointer for each connected agent)
+--------------------------------------------------------
+Shown in "Editor" and "Editor · History & Notes (new)": an orange pointer with a
+name tag ("Claude") and the tool it's running ("update_styles · padding").
+Agents have no real mouse, so the cursor follows the layers they touch.
+- [ ] Extend the presence SSE payload: { agents: [{ id, name, color, nodeIds,
+      tool, detail, at }] }. Fill it from the MCP handler (tool name + main
+      argument, e.g. the style keys for update_styles, the layer name for write_html).
+- [ ] Agent identity: use the MCP client name from initialize (clientInfo.name)
+      as the label. Give each session a stable colour (Claude orange #d97757
+      first, then the pastel set) so two agents get two cursors.
+- [ ] Position: the bottom-right corner of the bounding box of nodeIds, converted
+      to stage coordinates in updateOverlay(). Animate between targets with a
+      ~250 ms ease so you can see where the agent moved.
+- [ ] Read-only tools (get_screenshot, get_computed_styles, get_jsx) move the
+      cursor too, with a lighter "looking" state (outline pointer, no fill).
+- [ ] Fade the cursor out 8 s after the agent's last call; remove it when
+      finish_working_on_nodes is called.
+- [ ] Clicking the cursor tag selects the agent's current nodes (zoom-to-selection).
+- [ ] Replaces the old "Agent · <tool>" pill on the agent box.
+
+5. AGENT ACTIVITY ON THE DASHBOARD
+----------------------------------
+- [ ] Group consecutive source="mcp" history entries into sessions (break on a
+      2-minute gap). Persist a session summary per project:
+      { project, artboard, startedAt, toolCounts, live }.
+- [ ] Dashboard section "Agent activity": title, project · artboard · time, tool
+      counts (e.g. "write_html ×8 · update_styles ×1"), Live/Done pill,
+      "Revert session" (restores the auto checkpoint taken at session start).
+- [ ] Filter: All / Agent / You.
+- [ ] Session title: use the agent's own summary if one is sent (see 7), otherwise
+      "<n> edits on <artboard>".
+
+6. DASHBOARD / CHROME POLISH
+----------------------------
+- [ ] Persistent left sidebar on the dashboard: search, All projects (count),
+      Recent (last 4 by updatedAt, "Open" badge on the active project),
+      MCP server card (URL + "Copy Claude Code command"). This reuses existing
+      dashboard and page-panel features; it only moves them.
+- [ ] "Agent editing" chip on the project card thumbnail while presence is non-empty
+      for the open project.
+- [ ] Card menu: add "Export .zip (HTML · JSX)" next to Rename / Duplicate / Delete,
+      using the existing /api/export/zip?projectId=.
+- [ ] Top-bar presence chip in the editor: "Agent editing N layers" (data already
+      in the presence SSE event).
+- [ ] Replace the ⌘ / ⇧ / ▾ glyphs with SVG icons or "Ctrl"/"Shift" text. Some UI
+      fonts (e.g. Inter) lack these glyphs and render them as empty boxes.
+
+7. NICE TO HAVE
+---------------
+- [ ] MCP tool set_session_title(text) so an agent can name its run
+      ("Rebuilt Projects dashboard") for the activity feed and checkpoints.
+- [ ] Per-project accent dot colour (Recent list) stored in workspace.json.

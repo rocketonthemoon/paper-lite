@@ -63,15 +63,15 @@ jobs:
         with:
           context: .
           load: true
-          tags: paper-lite:ci
+          tags: weft:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: Verify image size & container runtime (healthcheck + headless Chromium MCP)
         run: |
-          docker image inspect paper-lite:ci --format 'Image size: {{.Size}} bytes'
-          docker run -d --name paper-lite-ci -p 127.0.0.1:3000:3000 paper-lite:ci
-          trap 'docker rm -f paper-lite-ci >/dev/null 2>&1 || true' EXIT
+          docker image inspect weft:ci --format 'Image size: {{.Size}} bytes'
+          docker run -d --name weft-ci -p 127.0.0.1:3000:3000 weft:ci
+          trap 'docker rm -f weft-ci >/dev/null 2>&1 || true' EXIT
 
           for i in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:3000/api/projects >/dev/null 2>&1; then
@@ -99,7 +99,7 @@ jobs:
             (async () => {
               await mcp("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "ci", version: "1.0.0" } }, 1);
               const ab = JSON.parse((await mcp("tools/call", { name: "create_artboard", arguments: { name: "CI Check", width: 320, height: 200 } }, 2)).content[0].text);
-              await mcp("tools/call", { name: "write_html", arguments: { parentId: ab.id, html: "<h1 style=\"color:#0000ff\">CI</h1>" } }, 3);
+              await mcp("tools/call", { name: "write_html", arguments: { parentId: ab.id, html: "<h1 style=\"color:#4c7dff\">CI</h1>" } }, 3);
               const shot = await mcp("tools/call", { name: "get_screenshot", arguments: { nodeId: ab.id, scale: 0.5 } }, 4);
               const img = shot.content.find(c => c.type === "image");
               if (!img || !img.data) throw new Error("Expected PNG screenshot from chrome-headless-shell");
@@ -140,4 +140,4 @@ jobs:
             --exit-code 1 \
             --severity HIGH,CRITICAL \
             --ignore-unfixed \
-            paper-lite:ci
+            weft:ci

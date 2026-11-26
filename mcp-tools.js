@@ -1,14 +1,13 @@
-// Paper-Lite MCP tool set. Modelled on Paper's own MCP so agents can drive the canvas end to end:
-// read (info / tree / nodes / computed styles / screenshots / code) → write (HTML, styles, text, structure)
-// → review (screenshot) → finish_working_on_nodes. Every write is one undoable step and shows live in the UI.
+// weft MCP tool set (44 tools). Modelled on Paper's MCP so agents can drive the canvas end to end:
+// read (info / tree / nodes / comments / computed styles / screenshots / code) → write (HTML, styles, text, structure)
+// → review (screenshot) → reply_to_comment / finish_working_on_nodes. Every write is one undoable step and shows live in the UI.
 import * as z from "zod";
 
-export const SERVER_INSTRUCTIONS = `Paper-Lite is a live HTML/CSS design canvas (Paper-style). Layers are real DOM nodes with camelCase inline styles.
-Start every session with get_guide (once) and get_basic_info (open project, pages, artboards, fonts). Use get_selection to see what the user is focused on.
-Write designs with write_html (inline style="" only, one visual group per call), then get_screenshot to review, and
-call finish_working_on_nodes when done so the user's canvas stops showing you as working. All writes are undoable (undo).`;
+export const SERVER_INSTRUCTIONS = `weft is a live HTML/CSS design canvas. Layers are real DOM nodes with camelCase inline styles.
+Start every session with get_guide (once) and get_basic_info (open project, pages, artboards, fonts, openComments). Use get_selection to see what the user is focused on, and get_comments to check reviewer notes.
+Write designs with write_html (inline style="" only, one visual group per call), save_checkpoint before major rewrites, set_session_title to label your run, then get_screenshot to review, reply_to_comment if responding to feedback, and call finish_working_on_nodes when done. All writes are undoable (undo).`;
 
-const GUIDE = `# Paper-Lite MCP guide
+const GUIDE = `# weft MCP guide
 
 ## Workspace
 - Projects (files) hold pages; pages hold artboards; artboards hold layers. One project is open at a time and the user's UI
@@ -19,16 +18,17 @@ const GUIDE = `# Paper-Lite MCP guide
   Use the returned cssFamily as fontFamily. add_font adds a Google family or a local .woff2/.woff/.ttf/.otf file.
 
 ## Workflow
-1. get_basic_info: project, pages, artboards on the current page (id, name, position, size), fonts, the user's selection.
-2. get_selection / get_tree_summary / find_nodes / get_node_info: read before you write. Ids are short hex strings.
-3. Create:
+1. get_basic_info: project, pages, artboards on the current page (id, name, position, size), fonts, the user's selection, openComments count.
+2. get_selection / get_tree_summary / find_nodes / get_node_info / get_comments: read before you write. Ids are short hex strings.
+3. Safety & runs: save_checkpoint before big rewrites; set_session_title("Short run summary") to name your activity session.
+4. Create:
    - create_artboard for a new screen (default 390×844; use height "fit-content" to grow with content).
    - write_html({ parentId, html }) to add content. Each call should be roughly one visual group (a header, a card, a form).
    - write_html({ targetNodeId, mode: "replace", html }) to rebuild a layer in place.
-4. Edit: update_styles (batch), set_text_content, rename_nodes, move_nodes, duplicate_nodes, delete_nodes.
-5. Review: get_screenshot({ nodeId }) after meaningful changes; get_computed_styles for exact values and boxes.
-6. Finish: finish_working_on_nodes. Use set_selection to point the user at the result.
-7. Code: get_jsx({ nodeId, format: "jsx" | "html" }).
+5. Edit: update_styles (batch), set_text_content, rename_nodes, move_nodes, duplicate_nodes, delete_nodes.
+6. Review & collaborate: get_screenshot({ nodeId }) after meaningful changes; get_computed_styles for exact values; reply_to_comment / resolve_comment on user notes.
+7. Finish: finish_working_on_nodes. Use set_selection to point the user at the result.
+8. Code: get_jsx({ nodeId, format: "jsx" | "html" }).
 
 ## HTML rules (write_html)
 - Inline styles only: <div style="display:flex; gap:12px">. class / id / <style> / scripts are ignored.
@@ -40,7 +40,7 @@ const GUIDE = `# Paper-Lite MCP guide
 - Images: <img src="https://…" alt="…">.
 
 ## Styling
-- Prefer flexbox (display:flex; flexDirection; gap; padding) over absolute positioning, as Paper does.
+- Prefer flexbox (display:flex; flexDirection; gap; padding) over absolute positioning.
 - Numbers in update_styles become px (except opacity, zIndex, fontWeight, lineHeight, flexGrow…). null removes a property.
 - Fonts: only families from list_fonts (or system-ui / serif / monospace) render. Use px for font sizes, em for letter-spacing.
 - Artboards are top-level frames placed with left/top in world space. Exported code starts them at 0,0.
@@ -59,7 +59,7 @@ const WRITE = { readOnlyHint: false, destructiveHint: false, openWorldHint: fals
 const ids = z.array(z.string()).min(1);
 const styleSchema = z
   .record(z.string(), z.union([z.string(), z.number(), z.null()]))
-  .describe('camelCase CSS, e.g. {"backgroundColor":"#0000ff","width":320}. Numbers become px; null removes.');
+  .describe('camelCase CSS, e.g. {"backgroundColor":"#4c7dff","width":320}. Numbers become px; null removes.');
 
 /**
  * @param {import("@modelcontextprotocol/sdk/server/mcp.js").McpServer} server
@@ -75,13 +75,13 @@ export function registerTools(server, ctx) {
 
   // ---------------------------------------------------------------- read
   server.registerTool("get_guide", {
-    description: "Paper-Lite MCP usage guide: workflow, write_html rules, styling and quality tips. Call once per session before other tools.",
+    description: "weft MCP usage guide: workflow, write_html rules, comments, checkpoints, styling and quality tips. Call once per session before other tools.",
     inputSchema: {},
     annotations: READ,
   }, async () => text(GUIDE));
 
   server.registerTool("get_basic_info", {
-    description: "Overview: open project, its pages (current one marked), artboards on the current page (id, name, x, y, size, child count), layer count, font library, the user's selection, and nodes agents are working on.",
+    description: "Overview: open project, its pages (current one marked), artboards on the current page (id, name, x, y, size, child count), layer count, font library, the user's selection, openComments count, and nodes agents are working on.",
     inputSchema: {},
     annotations: READ,
   }, async () => {
@@ -99,19 +99,22 @@ export function registerTools(server, ctx) {
       layers: Object.keys(s.nodes).length - s.pages.length,
       fonts: ctx.fonts.list().map((f) => f.cssFamily).filter((v, i, a) => a.indexOf(v) === i),
       selection: ctx.selection().ids,
+      openComments: ctx.comments.openCount(),
       agentWorkingOn: ctx.presence().map((p) => p.id),
       screenshots: ctx.renderer.available ? "available" : "unavailable (no Chrome/Chromium found; set CHROME_PATH)",
     });
   });
 
   server.registerTool("get_selection", {
-    description: "The layers the user currently has selected in the Paper-Lite UI (with their artboard). Empty when nothing is selected.",
+    description: "The layers the user currently has selected in the weft UI (with their artboard). Empty when nothing is selected.",
     inputSchema: {},
     annotations: READ,
   }, async () => {
     const sel = ctx.selection();
-    return text({ updatedAt: sel.at ? new Date(sel.at).toISOString() : null,
-      nodes: sel.ids.map((id) => { const sum = summary(id); return sum && !ctx.isPage(id) ? { ...sum, artboard: summary(ctx.artboardOf(id))?.name } : null; }).filter(Boolean) });
+    return text({
+      updatedAt: sel.at ? new Date(sel.at).toISOString() : null,
+      nodes: sel.ids.map((id) => { const sum = summary(id); return sum && !ctx.isPage(id) ? { ...sum, artboard: summary(ctx.artboardOf(id))?.name } : null; }).filter(Boolean),
+    });
   });
 
   server.registerTool("get_tree_summary", {
@@ -132,11 +135,14 @@ export function registerTools(server, ctx) {
     annotations: READ,
   }, async ({ nodeId }) => {
     const n = ctx.getNode(nodeId);
+    if (!ctx.isPage(n.id)) ctx.look([n.id], "get_node_info", n.name);
     const path = [];
     for (let p = S().nodes[n.parentId]; p && !ctx.isPage(p.id); p = S().nodes[p.parentId]) path.unshift(p.name);
-    return text({ id: n.id, name: n.name, tag: n.tag, text: n.text || undefined, styles: n.styles, attrs: Object.keys(n.attrs || {}).length ? n.attrs : undefined,
+    return text({
+      id: n.id, name: n.name, tag: n.tag, text: n.text || undefined, styles: n.styles, attrs: Object.keys(n.attrs || {}).length ? n.attrs : undefined,
       parentId: n.parentId, pageId: ctx.pageOf(n.id), artboardId: ctx.isPage(n.id) ? undefined : ctx.artboardOf(n.id),
-      path: path.join(" / "), children: n.children.map(summary) });
+      path: path.join(" / "), children: n.children.map(summary),
+    });
   });
 
   server.registerTool("find_nodes", {
@@ -167,6 +173,7 @@ export function registerTools(server, ctx) {
       "line-height", "letter-spacing", "text-align", "overflow"];
     const groups = new Map();
     for (const id of nodeIds) { ctx.getNode(id); const ab = ctx.artboardOf(id); groups.set(ab, [...(groups.get(ab) || []), id]); }
+    ctx.look(nodeIds, "get_computed_styles", `${nodeIds.length} layer${nodeIds.length === 1 ? "" : "s"}`);
     const out = {};
     for (const [ab, list] of groups) Object.assign(out, await ctx.renderer.computed({ artboardId: ab, nodeIds: list, ...ctx.artboardSize(ab), properties: props }));
     return text(out);
@@ -179,8 +186,9 @@ export function registerTools(server, ctx) {
   }, async ({ nodeId, scale = 1 }) => {
     const id = nodeId || ctx.selection().ids[0] || S().nodes[S().rootId].children[0];
     if (!id) throw new Error("Canvas is empty");
-    ctx.getNode(id);
+    const target = ctx.getNode(id);
     const ab = ctx.artboardOf(id);
+    ctx.look([id], "get_screenshot", target.name);
     const shot = await ctx.renderer.screenshot({ artboardId: ab, nodeId: id, ...ctx.artboardSize(ab), scale });
     return { content: [
       { type: "image", data: shot.png.toString("base64"), mimeType: "image/png" },
@@ -192,7 +200,10 @@ export function registerTools(server, ctx) {
     description: "Code for a layer/artboard (or the whole page when nodeId is omitted): jsx = React components with inline style objects, html = <style> with .layer-<id> classes + markup.",
     inputSchema: { nodeId: z.string().optional(), format: z.enum(["jsx", "html"]).optional() },
     annotations: READ,
-  }, async ({ nodeId, format = "jsx" }) => text(ctx.exportCode(format, nodeId)));
+  }, async ({ nodeId, format = "jsx" }) => {
+    if (nodeId && S().nodes[nodeId] && !ctx.isPage(nodeId)) ctx.look([nodeId], "get_jsx", S().nodes[nodeId].name);
+    return text(ctx.exportCode(format, nodeId));
+  });
 
   // ---------------------------------------------------------------- write
   server.registerTool("write_html", {
@@ -207,58 +218,79 @@ export function registerTools(server, ctx) {
     annotations: WRITE,
   }, async ({ html, parentId, targetNodeId, mode = "insert-children", index }) => {
     const res = ctx.writeHtml({ html, parentId, targetNodeId, mode, index });
-    ctx.touch(res.created.map((c) => c.id));
+    ctx.touch(res.created.map((c) => c.id), "write_html", res.created[0]?.name || "");
     return text(res);
   });
 
   server.registerTool("create_artboard", {
-    description: "Create an empty top-level artboard (screen). Placed to the right of existing artboards unless x/y are given. Height may be \"fit-content\".",
+    description: "Create an empty top-level artboard (screen) on the current page (unless pageId is passed). Placed to the right of existing artboards unless x/y are given. Height may be \"fit-content\".",
     inputSchema: {
       name: z.string().optional(),
       width: z.union([z.number(), z.string()]).optional(),
       height: z.union([z.number(), z.string()]).optional(),
       x: z.number().optional(), y: z.number().optional(),
       styles: styleSchema.optional(),
-      pageId: z.string().optional().describe("Default: the current page"),
+      pageId: z.string().optional().describe("Default: the current page at call time"),
     },
     annotations: WRITE,
   }, async ({ name = "Frame", width = 390, height = 844, x, y, styles = {}, pageId }) => {
     const node = ctx.createArtboard({ name, width, height, x, y, styles, pageId });
-    ctx.touch([node.id]);
+    ctx.touch([node.id], "create_artboard", node.name);
     return text(summary(node.id));
   });
 
   server.registerTool("create_node", {
     description: "Create a single layer (prefer write_html for anything with children).",
-    inputSchema: { parentId: z.string(), name: z.string().optional(), tag: z.string().optional(), text: z.string().optional(),
-      styles: styleSchema.optional(), attrs: z.record(z.string(), z.string()).optional(), index: z.number().int().optional() },
+    inputSchema: {
+      parentId: z.string(), name: z.string().optional(), tag: z.string().optional(), text: z.string().optional(),
+      styles: styleSchema.optional(), attrs: z.record(z.string(), z.string()).optional(), index: z.number().int().optional(),
+    },
     annotations: WRITE,
-  }, async (args) => { const n = ctx.createNode(args, "mcp"); ctx.touch([n.id]); return text(summary(n.id)); });
+  }, async (args) => { const n = ctx.createNode(args, "mcp"); ctx.touch([n.id], "create_node", n.name); return text(summary(n.id)); });
 
   server.registerTool("update_styles", {
     description: "Batch style changes in one undo step: [{ nodeIds: [...], styles: { camelCase: value | null } }].",
     inputSchema: { updates: z.array(z.object({ nodeIds: ids, styles: styleSchema })).min(1) },
     annotations: WRITE,
   }, async ({ updates }) => {
-    const touched = ctx.batch("mcp", () => updates.flatMap((u) => u.nodeIds.map((id) => ctx.updateNode(id, { styles: u.styles }, "mcp").id)));
-    ctx.touch(touched);
+    const keys = [...new Set(updates.flatMap((u) => Object.keys(u.styles || {})))].slice(0, 3).join(", ");
+    const targetIds = updates.flatMap((u) => u.nodeIds);
+    const targetName = targetIds.length === 1 ? S().nodes[targetIds[0]]?.name : `${targetIds.length} layers`;
+    const touched = ctx.batch("mcp", () => updates.flatMap((u) => u.nodeIds.map((id) => ctx.updateNode(id, { styles: u.styles }, "mcp").id)), {
+      tool: "update_styles",
+      target: targetName,
+      nodeIds: targetIds,
+    });
+    ctx.touch(touched, "update_styles", keys);
     return text({ updated: touched.length });
   });
 
   server.registerTool("update_node", {
     description: "Patch one layer: name, tag, text, styles (merged unless replaceStyles), attrs.",
-    inputSchema: { nodeId: z.string(), name: z.string().optional(), tag: z.string().optional(), text: z.string().optional(),
-      styles: styleSchema.optional(), replaceStyles: z.boolean().optional(), attrs: z.record(z.string(), z.union([z.string(), z.null()])).optional() },
+    inputSchema: {
+      nodeId: z.string(), name: z.string().optional(), tag: z.string().optional(), text: z.string().optional(),
+      styles: styleSchema.optional(), replaceStyles: z.boolean().optional(), attrs: z.record(z.string(), z.union([z.string(), z.null()])).optional(),
+    },
     annotations: WRITE,
-  }, async ({ nodeId, ...patch }) => { ctx.updateNode(nodeId, patch, "mcp"); ctx.touch([nodeId]); return text(summary(nodeId)); });
+  }, async ({ nodeId, ...patch }) => {
+    const n = ctx.updateNode(nodeId, patch, "mcp", { tool: "update_node", target: patch.name || S().nodes[nodeId]?.name, nodeIds: [nodeId] });
+    ctx.touch([nodeId], "update_node", patch.styles ? Object.keys(patch.styles).slice(0, 2).join(", ") : n.name);
+    return text(summary(nodeId));
+  });
 
   server.registerTool("set_text_content", {
     description: "Set the text of text layers in one undo step: [{ nodeId, text }].",
     inputSchema: { updates: z.array(z.object({ nodeId: z.string(), text: z.string() })).min(1) },
     annotations: WRITE,
   }, async ({ updates }) => {
-    ctx.batch("mcp", () => updates.forEach((u) => ctx.updateNode(u.nodeId, { text: u.text }, "mcp")));
-    ctx.touch(updates.map((u) => u.nodeId));
+    const targetIds = updates.map((u) => u.nodeId);
+    const targetName = targetIds.length === 1 ? S().nodes[targetIds[0]]?.name : `${targetIds.length} layers`;
+    ctx.batch("mcp", () => updates.forEach((u) => ctx.updateNode(u.nodeId, { text: u.text }, "mcp")), {
+      tool: "set_text_content",
+      target: targetName,
+      nodeIds: targetIds,
+    });
+    ctx.touch(targetIds, "set_text_content", targetName);
     return text({ updated: updates.length });
   });
 
@@ -267,7 +299,13 @@ export function registerTools(server, ctx) {
     inputSchema: { updates: z.array(z.object({ nodeId: z.string(), name: z.string().min(1) })).min(1) },
     annotations: WRITE,
   }, async ({ updates }) => {
-    ctx.batch("mcp", () => updates.forEach((u) => ctx.updateNode(u.nodeId, { name: u.name }, "mcp")));
+    const targetIds = updates.map((u) => u.nodeId);
+    const targetName = updates.length === 1 ? updates[0].name : `${updates.length} layers`;
+    ctx.batch("mcp", () => updates.forEach((u) => ctx.updateNode(u.nodeId, { name: u.name }, "mcp")), {
+      tool: "rename_nodes",
+      target: targetName,
+      nodeIds: targetIds,
+    });
     return text({ renamed: updates.length });
   });
 
@@ -276,8 +314,12 @@ export function registerTools(server, ctx) {
     inputSchema: { nodeIds: ids },
     annotations: WRITE,
   }, async ({ nodeIds }) => {
-    const created = ctx.batch("mcp", () => nodeIds.map((id) => ctx.duplicateNode(id, "mcp").id));
-    ctx.touch(created);
+    const targetName = nodeIds.length === 1 ? S().nodes[nodeIds[0]]?.name : `${nodeIds.length} layers`;
+    const created = ctx.batch("mcp", () => nodeIds.map((id) => ctx.duplicateNode(id, "mcp").id), {
+      tool: "duplicate_nodes",
+      target: targetName,
+    });
+    ctx.touch(created, "duplicate_nodes", targetName);
     return text(created.map(summary));
   });
 
@@ -286,8 +328,12 @@ export function registerTools(server, ctx) {
     inputSchema: { nodeIds: ids },
     annotations: { ...WRITE, destructiveHint: true },
   }, async ({ nodeIds }) => {
+    const targetName = nodeIds.length === 1 ? (S().nodes[nodeIds[0]]?.name || "Layer") : `${nodeIds.length} layers`;
     // Check existence as we go: an id may already be gone because an earlier id was its ancestor (or a repeat).
-    const deleted = ctx.batch("mcp", () => nodeIds.flatMap((id) => (S().nodes[id] ? ctx.deleteNode(id, "mcp").deleted : [])));
+    const deleted = ctx.batch("mcp", () => nodeIds.flatMap((id) => (S().nodes[id] ? ctx.deleteNode(id, "mcp").deleted : [])), {
+      tool: "delete_nodes",
+      target: targetName,
+    });
     return text({ deleted: deleted.length });
   });
 
@@ -296,20 +342,25 @@ export function registerTools(server, ctx) {
     inputSchema: { nodeIds: ids, parentId: z.string(), index: z.number().int().optional() },
     annotations: WRITE,
   }, async ({ nodeIds, parentId, index }) => {
-    ctx.batch("mcp", () => nodeIds.forEach((id, i) => ctx.updateNode(id, { parentId, index: index === undefined ? undefined : index + i }, "mcp")));
-    ctx.touch(nodeIds);
+    const targetName = nodeIds.length === 1 ? S().nodes[nodeIds[0]]?.name : `${nodeIds.length} layers`;
+    ctx.batch("mcp", () => nodeIds.forEach((id, i) => ctx.updateNode(id, { parentId, index: index === undefined ? undefined : index + i }, "mcp")), {
+      tool: "move_nodes",
+      target: targetName,
+      nodeIds,
+    });
+    ctx.touch(nodeIds, "move_nodes", targetName);
     return text({ moved: nodeIds.length, parentId });
   });
 
-  // ---------------------------------------------------------------- agent ↔ user
+  // ---------------------------------------------------------------- agent ↔ user & comments
   server.registerTool("finish_working_on_nodes", {
-    description: "Tell the user you are done: clears your 'agent working' outlines on the canvas (all, or just nodeIds). Call when you finish creating or editing.",
+    description: "Tell the user you are done: clears your 'agent working' outlines and live cursor on the canvas (all, or just nodeIds). Call when you finish creating or editing.",
     inputSchema: { nodeIds: z.array(z.string()).optional() },
     annotations: WRITE,
   }, async ({ nodeIds }) => { ctx.finishWorking(nodeIds); return text({ ok: true }); });
 
   server.registerTool("set_selection", {
-    description: "Select layers in the user's open Paper-Lite UI and (by default) zoom to them, e.g. to show what you made.",
+    description: "Select layers in the user's open weft UI and (by default) zoom to them, e.g. to show what you made.",
     inputSchema: { nodeIds: z.array(z.string()), zoom: z.boolean().optional() },
     annotations: WRITE,
   }, async ({ nodeIds, zoom = true }) => {
@@ -317,6 +368,49 @@ export function registerTools(server, ctx) {
     ctx.focusNodes(nodeIds, zoom);
     return text({ selected: nodeIds });
   });
+
+  server.registerTool("get_comments", {
+    description: "Read reviewer comment threads pinned to layers (excludes private comments marked hidden from agents). Marks unread threads as read.",
+    inputSchema: { status: z.enum(["open", "read", "replied", "resolved"]).optional(), nodeId: z.string().optional() },
+    annotations: WRITE,
+  }, async ({ status, nodeId }) => text(ctx.comments.list({ status, nodeId })));
+
+  server.registerTool("reply_to_comment", {
+    description: "Reply to a comment thread. By default links your most recent canvas edit step so the reviewer can inspect or undo it directly.",
+    inputSchema: { id: z.string(), text: z.string().min(1), linkStep: z.boolean().optional() },
+    annotations: WRITE,
+  }, async ({ id, text: msg, linkStep = true }) => text(ctx.comments.reply(id, msg, linkStep)));
+
+  server.registerTool("resolve_comment", {
+    description: "Mark a comment thread as resolved.",
+    inputSchema: { id: z.string() },
+    annotations: WRITE,
+  }, async ({ id }) => text(ctx.comments.resolve(id)));
+
+  server.registerTool("set_session_title", {
+    description: "Set a short summary title for your current agent activity session on the dashboard (e.g. \"Rebuilt pricing cards\").",
+    inputSchema: { text: z.string().min(1) },
+    annotations: WRITE,
+  }, async ({ text: title }) => text(ctx.session.setTitle(title)));
+
+  // ---------------------------------------------------------------- checkpoints & history
+  server.registerTool("save_checkpoint", {
+    description: "Save a named restore point of the open project that persists across restarts.",
+    inputSchema: { name: z.string().min(1) },
+    annotations: WRITE,
+  }, async ({ name }) => text(ctx.checkpoints.save(name)));
+
+  server.registerTool("list_checkpoints", {
+    description: "List saved checkpoints (manual and auto) for the open project.",
+    inputSchema: {},
+    annotations: READ,
+  }, async () => text(ctx.checkpoints.list()));
+
+  server.registerTool("restore_checkpoint", {
+    description: "Restore the open project's pages and layers to a saved checkpoint as one undoable step.",
+    inputSchema: { id: z.string() },
+    annotations: WRITE,
+  }, async ({ id }) => text(ctx.checkpoints.restore(id)));
 
   // ---------------------------------------------------------------- projects
   server.registerTool("list_projects", {

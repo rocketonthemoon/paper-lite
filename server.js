@@ -1,11 +1,13 @@
-// Paper-Lite: Paper-inspired HTML/CSS design canvas with an MCP-first API.
-// One process: static UI, projects/pages/fonts on disk, SSE live sync, Streamable HTTP MCP at /mcp.
+// weft (formerly Paper-Lite): HTML/CSS design canvas with an MCP-first API.
+// One process: static UI, projects/pages/checkpoints/sessions/fonts on disk, SSE live sync, Streamable HTTP MCP at /mcp.
 import express from "express";
 import fs from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import zlib from "node:zlib";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { randomBytes } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
@@ -31,15 +33,27 @@ const ALLOWED_HOSTS = new Set(
     .filter(Boolean),
 );
 const HISTORY_LIMIT = 60;
+const SESSION_GAP_MS = 120_000;
+const CURSOR_TTL_MS = 8_000;
+const PRESENCE_TTL = 90_000;
+const PROJECT_COLORS = ["#9ad6a4", "#7aa7ff", "#f5b971", "#f4a7c3", "#c3b5f5"];
+const AGENT_COLORS = ["#d97757", "#4c7dff", "#2c7a3f", "#9a5b12", "#7c3aed", "#c2417e"];
 const PKG_VERSION = JSON.parse(await fs.readFile(path.join(ROOT, "package.json"), "utf8")).version;
 
 // ---------------------------------------------------------------------------
 // Workspace: projects on disk, one open project in memory (`state`)
 // ---------------------------------------------------------------------------
-let workspace = { activeProjectId: null, projects: [] }; // projects: [{ id, name, createdAt, updatedAt }]
-let state; // { version, id, name, pages: [pageRootId], rootId: activePageId, nodes }
-const undoStack = [];
-const redoStack = [];
+let workspace = { activeProjectId: null, projects: [] }; // projects: [{ id, name, accentColor, createdAt, updatedAt }]
+let state; // { version, id, name, pages: [pageRootId], rootId: activePageId, nodes, comments }
+let historyTimeline = []; // [{ id, before, after, source, tool, target, label, nodeIds, layerCount, at }]
+let historyCursor = -1;
+let projectCheckpoints = []; // [{ id, name, auto, kind, at, historyId, layerCount, snapshot }]
+let projectSessions = []; // [{ id, projectId, projectName, source, agentName, title, artboard, startedAt, updatedAt, editCount, toolCounts, checkpointId, live, reverted }]
+let lastMcpWriteAt = 0;
+let lastCheckpointHistoryKey = null;
+let pendingSessionTitle = null;
+
+const mcpContextStore = new AsyncLocalStorage();
 const sseClients = new Set();
 const fonts = new FontLibrary(path.join(DATA_DIR, "fonts"));
 let diskQueue = Promise.resolve();
@@ -48,6 +62,14 @@ const projectFile = (id) => {
   if (!ID_RE.test(id)) throw new HttpError(400, "Invalid project id");
   return path.join(PROJECTS_DIR, `${id}.json`);
 };
+const checkpointFile = (id) => {
+  if (!ID_RE.test(id)) throw new HttpError(400, "Invalid project id");
+  return path.join(PROJECTS_DIR, `${id}.checkpoints.json`);
+};
+const sessionsFile = (id) => {
+  if (!ID_RE.test(id)) throw new HttpError(400, "Invalid project id");
+  return path.join(PROJECTS_DIR, `${id}.sessions.json`);
+};
 const metaOf = (id) => {
   const m = workspace.projects.find((p) => p.id === id);
   if (!m) throw new HttpError(404, `Project "${id}" not found`);
@@ -55,27 +77,48 @@ const metaOf = (id) => {
 };
 
 async function writeAtomic(file, text) {
-  const tmp = `${file}.${process.pid}.tmp`;
+  const tmp = `${file}.${process.pid}.${randomBytes(2).toString("hex")}.tmp`;
   await fs.writeFile(tmp, text, "utf8");
   await renameWithRetry(tmp, file);
 }
 
 // All disk writes are serialized so files are never written concurrently.
 function queueDisk(job) {
-  diskQueue = diskQueue.then(job).catch((err) => console.error("[paper-lite] write failed:", err.message));
+  diskQueue = diskQueue.then(job).catch((err) => console.error("[weft] write failed:", err.message));
   return diskQueue;
 }
 const saveWorkspace = () => {
   const text = JSON.stringify(workspace, null, 2);
   return queueDisk(() => writeAtomic(WORKSPACE_FILE, text));
 };
+const saveCheckpoints = (id = state.id, list = projectCheckpoints) => {
+  const text = JSON.stringify(list);
+  return queueDisk(() => writeAtomic(checkpointFile(id), text));
+};
+const saveSessions = (id = state.id, list = projectSessions) => {
+  const text = JSON.stringify(list);
+  return queueDisk(() => writeAtomic(sessionsFile(id), text));
+};
+
+async function readJsonSafe(file, fallback) {
+  try {
+    return JSON.parse(await fs.readFile(file, "utf8"));
+  } catch {
+    return fallback;
+  }
+}
 
 const previewCache = new Map(); // id -> { key, data }
+
+function layerCountOf(doc = state) {
+  if (!doc) return 0;
+  return Math.max(0, Object.keys(doc.nodes).length - doc.pages.length);
+}
 
 function projectSummary(doc) {
   const pages = doc.pages.length;
   const artboards = doc.pages.reduce((a, pid) => a + (doc.nodes[pid]?.children?.length || 0), 0);
-  const layers = Math.max(0, Object.keys(doc.nodes).length - pages);
+  const layers = layerCountOf(doc);
   const bg = doc.nodes[doc.rootId]?.styles?.backgroundColor || "#eef2f6";
   return { pages, artboards, layers, bg };
 }
@@ -121,12 +164,12 @@ async function projectPreview(id) {
   return data;
 }
 
-function persist() {
+function persist({ touchUpdatedAt = true } = {}) {
   const doc = JSON.stringify(state);
   const id = state.id;
   const meta = workspace.projects.find((p) => p.id === id);
   if (meta) {
-    meta.updatedAt = new Date().toISOString();
+    if (touchUpdatedAt) meta.updatedAt = new Date().toISOString();
     Object.assign(meta, projectSummary(state));
   }
   previewCache.delete(id);
@@ -140,9 +183,15 @@ function persist() {
 }
 
 function projectList() {
+  const hasEditing = presenceList().length > 0;
   return [...workspace.projects]
     .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
-    .map((p) => ({ ...p, active: p.id === state?.id }));
+    .map((p) => ({
+      ...p,
+      accentColor: p.accentColor || PROJECT_COLORS[0],
+      active: p.id === state?.id,
+      agentEditing: p.id === state?.id && hasEditing,
+    }));
 }
 
 async function loadWorkspace() {
@@ -157,13 +206,19 @@ async function loadWorkspace() {
       const doc = normalizeProject(JSON.parse(await fs.readFile(LEGACY_FILE, "utf8")), { id, name: "My canvas", warnings: [] });
       await writeAtomic(projectFile(id), JSON.stringify(doc));
       const now = new Date().toISOString();
-      workspace.projects.push({ id, name: doc.name, createdAt: now, updatedAt: now, ...projectSummary(doc) });
+      workspace.projects.push({ id, name: doc.name, accentColor: PROJECT_COLORS[0], createdAt: now, updatedAt: now, ...projectSummary(doc) });
       workspace.activeProjectId = id;
       await fs.rename(LEGACY_FILE, `${LEGACY_FILE}.migrated`);
     }
   }
   workspace.projects = workspace.projects.filter((p) => ID_RE.test(p.id) && existsSync(projectFile(p.id)));
   let backfilled = false;
+  workspace.projects.forEach((p, idx) => {
+    if (!p.accentColor) {
+      p.accentColor = PROJECT_COLORS[idx % PROJECT_COLORS.length];
+      backfilled = true;
+    }
+  });
   for (const p of workspace.projects) {
     if (p.artboards === undefined || p.pages === undefined || p.layers === undefined) {
       try {
@@ -184,7 +239,7 @@ async function loadWorkspace() {
       await openProject(p.id, "init");
       return;
     } catch (err) {
-      console.error(`[paper-lite] could not open project "${p.name}" (${p.id}): ${err.message}`);
+      console.error(`[weft] could not open project "${p.name}" (${p.id}): ${err.message}`);
     }
   }
   await createProject("Untitled", { open: true, source: "init" });
@@ -203,29 +258,87 @@ async function readProject(id) {
   return normalizeProject(raw, { id, name: meta.name, warnings: [] });
 }
 
+function docSnapshot(doc = state) {
+  return structuredClone({
+    version: doc.version,
+    id: doc.id,
+    name: doc.name,
+    pages: doc.pages,
+    rootId: doc.rootId,
+    nodes: doc.nodes,
+  });
+}
+
+function publicCheckpoints(list = projectCheckpoints) {
+  return list.map(({ snapshot: _snap, ...rest }) => rest);
+}
+
+function historyPayload() {
+  const entries = historyTimeline.map(({ before: _b, after: _a, ...rest }) => rest);
+  return { entries, cursor: historyCursor, limit: HISTORY_LIMIT, checkpoints: publicCheckpoints() };
+}
+
+function sendHistory() {
+  sendEvent("history", historyPayload());
+}
+
+async function loadProjectExtras(id) {
+  const cps = await readJsonSafe(checkpointFile(id), []);
+  projectCheckpoints = Array.isArray(cps) ? cps.filter((c) => c && c.id && c.snapshot) : [];
+  const sess = await readJsonSafe(sessionsFile(id), []);
+  projectSessions = Array.isArray(sess) ? sess.filter((s) => s && s.id) : [];
+}
+
 async function openProject(id, source = "api") {
   metaOf(id);
   if (state?.id === id) return state;
   const doc = await readProject(id);
   state = doc;
-  undoStack.length = 0;
-  redoStack.length = 0;
+  historyTimeline = [];
+  historyCursor = -1;
+  lastMcpWriteAt = 0;
+  lastCheckpointHistoryKey = null;
+  pendingSessionTitle = null;
+  await loadProjectExtras(id);
   presence.clear();
+  agentCursors.clear();
   uiSelection = { ids: [], at: 0 };
   workspace.activeProjectId = id;
   await saveWorkspace();
   broadcast(source);
   sendEvent("projects", { projects: projectList() });
-  sendEvent("presence", { nodes: [] });
+  sendEvent("presence", presencePayload());
+  sendEvent("comments", { comments: state.comments || [] });
+  sendHistory();
+  sendActivity();
   return state;
+}
+
+function makeCheckpointEntry(name, { auto = false, kind = auto ? "auto" : "manual", doc = state, historyId = null } = {}) {
+  return {
+    id: newId(),
+    name: cleanName(name, "Checkpoint"),
+    auto: Boolean(auto),
+    kind,
+    at: new Date().toISOString(),
+    historyId,
+    layerCount: layerCountOf(doc),
+    snapshot: docSnapshot(doc),
+  };
 }
 
 async function createProject(name, { open = true, source = "api" } = {}) {
   const id = newId();
   const doc = emptyProject(id, cleanName(name, "Untitled"));
   const now = new Date().toISOString();
-  await queueDisk(() => writeAtomic(projectFile(id), JSON.stringify(doc)));
-  workspace.projects.push({ id, name: doc.name, createdAt: now, updatedAt: now, ...projectSummary(doc) });
+  const initCp = makeCheckpointEntry("Project created", { auto: true, kind: "init", doc, historyId: null });
+  await queueDisk(async () => {
+    await writeAtomic(projectFile(id), JSON.stringify(doc));
+    await writeAtomic(checkpointFile(id), JSON.stringify([initCp]));
+    await writeAtomic(sessionsFile(id), JSON.stringify([]));
+  });
+  const accentColor = PROJECT_COLORS[workspace.projects.length % PROJECT_COLORS.length];
+  workspace.projects.push({ id, name: doc.name, accentColor, createdAt: now, updatedAt: now, ...projectSummary(doc) });
   await saveWorkspace();
   if (open) await openProject(id, source);
   else sendEvent("projects", { projects: projectList() });
@@ -247,6 +360,7 @@ async function renameProject(id, name, source = "api") {
     await saveWorkspace();
   }
   sendEvent("projects", { projects: projectList() });
+  sendActivity();
   return { id, name: meta.name };
 }
 
@@ -256,8 +370,14 @@ async function duplicateProject(id, name) {
   doc.id = copyId;
   doc.name = cleanName(name, `${metaOf(id).name} copy`);
   const now = new Date().toISOString();
-  await queueDisk(() => writeAtomic(projectFile(copyId), JSON.stringify(doc)));
-  workspace.projects.push({ id: copyId, name: doc.name, createdAt: now, updatedAt: now, ...projectSummary(doc) });
+  const initCp = makeCheckpointEntry("Project created", { auto: true, kind: "init", doc, historyId: null });
+  await queueDisk(async () => {
+    await writeAtomic(projectFile(copyId), JSON.stringify(doc));
+    await writeAtomic(checkpointFile(copyId), JSON.stringify([initCp]));
+    await writeAtomic(sessionsFile(copyId), JSON.stringify([]));
+  });
+  const accentColor = PROJECT_COLORS[workspace.projects.length % PROJECT_COLORS.length];
+  workspace.projects.push({ id: copyId, name: doc.name, accentColor, createdAt: now, updatedAt: now, ...projectSummary(doc) });
   await saveWorkspace();
   sendEvent("projects", { projects: projectList() });
   return { id: copyId, name: doc.name };
@@ -273,14 +393,19 @@ async function deleteProject(id, source = "api") {
   }
   workspace.projects = workspace.projects.filter((p) => p.id !== id);
   previewCache.delete(id);
-  await queueDisk(() => fs.rm(projectFile(id), { force: true }));
+  await queueDisk(async () => {
+    await fs.rm(projectFile(id), { force: true });
+    await fs.rm(checkpointFile(id), { force: true });
+    await fs.rm(sessionsFile(id), { force: true });
+  });
   await saveWorkspace();
   sendEvent("projects", { projects: projectList() });
+  sendActivity();
   return { deleted: id };
 }
 
 // ---------------------------------------------------------------------------
-// Live sync, undo and batching
+// Live sync, labelled undo history, checkpoints & activity sessions
 // ---------------------------------------------------------------------------
 function sendEvent(event, data) {
   const msg = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -288,81 +413,491 @@ function sendEvent(event, data) {
 }
 const broadcast = (source) => sendEvent("state", { source, state });
 
+function currentHistoryId() {
+  return historyCursor >= 0 ? historyTimeline[historyCursor]?.id || null : null;
+}
+
+function currentStateKey() {
+  return `${historyCursor}:${currentHistoryId() || "init"}:${state?.version || 0}`;
+}
+
+function createCheckpoint(name, { auto = false, kind = auto ? "auto" : "manual" } = {}) {
+  const cp = makeCheckpointEntry(name, { auto, kind, doc: state, historyId: currentHistoryId() });
+  projectCheckpoints.push(cp);
+  lastCheckpointHistoryKey = currentStateKey();
+  saveCheckpoints();
+  sendHistory();
+  return cp;
+}
+
+function ensureAgentStartCheckpoint(beforeState) {
+  const now = Date.now();
+  const isNewRun = lastMcpWriteAt === 0 || (now - lastMcpWriteAt >= SESSION_GAP_MS);
+  if (!isNewRun) return null;
+  const curKey = currentStateKey();
+  if (lastCheckpointHistoryKey === curKey && projectCheckpoints.length) {
+    return projectCheckpoints[projectCheckpoints.length - 1].id;
+  }
+  const hasInitAtZero =
+    historyTimeline.length === 0 &&
+    projectCheckpoints.length === 1 &&
+    projectCheckpoints[0].kind === "init" &&
+    projectCheckpoints[0].layerCount === layerCountOf(beforeState);
+  if (hasInitAtZero) {
+    lastCheckpointHistoryKey = curKey;
+    return projectCheckpoints[0].id;
+  }
+  const cp = makeCheckpointEntry("Before agent run", {
+    auto: true,
+    kind: "agent-start",
+    doc: beforeState,
+    historyId: currentHistoryId(),
+  });
+  projectCheckpoints.push(cp);
+  lastCheckpointHistoryKey = curKey;
+  saveCheckpoints();
+  return cp.id;
+}
+
+function diffNodeIds(before, after) {
+  const changed = [];
+  const beforeIds = new Set(Object.keys(before.nodes));
+  const afterIds = new Set(Object.keys(after.nodes));
+  for (const id of afterIds) {
+    if (after.pages.includes(id)) continue;
+    if (!beforeIds.has(id)) {
+      changed.push(id);
+      continue;
+    }
+    const a = before.nodes[id], b = after.nodes[id];
+    if (
+      a.name !== b.name ||
+      a.tag !== b.tag ||
+      a.text !== b.text ||
+      a.parentId !== b.parentId ||
+      JSON.stringify(a.styles) !== JSON.stringify(b.styles) ||
+      JSON.stringify(a.attrs) !== JSON.stringify(b.attrs) ||
+      JSON.stringify(a.children) !== JSON.stringify(b.children)
+    ) {
+      changed.push(id);
+    }
+  }
+  for (const id of beforeIds) {
+    if (!afterIds.has(id) && !before.pages.includes(id)) changed.push(id);
+  }
+  return changed.slice(0, 60);
+}
+
+function artboardNameForNodes(nodeIds, doc = state, prevDoc = null) {
+  for (const id of nodeIds) {
+    const src = doc.nodes[id] ? doc : (prevDoc?.nodes[id] ? prevDoc : null);
+    if (!src) continue;
+    let cur = src.nodes[id];
+    if (src.pages.includes(cur.id)) continue;
+    while (cur && cur.parentId && !src.pages.includes(cur.parentId)) {
+      cur = src.nodes[cur.parentId];
+    }
+    if (cur && src.pages.includes(cur.parentId)) return cur.name;
+  }
+  const activePage = doc.nodes[doc.rootId];
+  const firstBoard = activePage?.children?.[0];
+  if (firstBoard && doc.nodes[firstBoard]) return doc.nodes[firstBoard].name;
+  return activePage?.name || "Page 1";
+}
+
+function targetSummary(nodeIds, before, after, meta) {
+  if (meta?.target) return meta.target;
+  const store = mcpContextStore.getStore();
+  if (store?.target) return store.target;
+  const nonPages = nodeIds.filter((id) => !after.pages.includes(id) && !before.pages.includes(id));
+  const idsToUse = nonPages.length ? nonPages : nodeIds;
+  // Filter to top-most roots in this edit when write_html/delete inserts a tree.
+  const idSet = new Set(idsToUse);
+  const topRoots = idsToUse.filter((id) => {
+    const n = after.nodes[id] || before.nodes[id];
+    return n && !idSet.has(n.parentId);
+  });
+  const roots = topRoots.length ? topRoots : idsToUse;
+  if (roots.length === 1) {
+    const n = after.nodes[roots[0]] || before.nodes[roots[0]];
+    return cleanName(n?.name, "Layer").slice(0, 36);
+  }
+  if (roots.length > 1) return `${roots.length} layers`;
+  const page = after.nodes[after.rootId] || before.nodes[before.rootId];
+  return cleanName(page?.name, "Canvas").slice(0, 36);
+}
+
+function recordSessionActivity({ histSource, tool, artboard, checkpointId, at }) {
+  const nowMs = Date.parse(at);
+  const store = mcpContextStore.getStore();
+  const agentName = histSource === "mcp" ? (store?.agent?.name || "Claude") : "You";
+  const last = projectSessions[projectSessions.length - 1];
+  const canAppend =
+    last &&
+    !last.reverted &&
+    last.source === histSource &&
+    last.projectId === state.id &&
+    (nowMs - Date.parse(last.updatedAt)) < SESSION_GAP_MS;
+
+  if (canAppend) {
+    last.updatedAt = at;
+    last.editCount += 1;
+    last.toolCounts[tool] = (last.toolCounts[tool] || 0) + 1;
+    if (artboard) last.artboard = artboard;
+    if (histSource === "mcp") {
+      last.live = true;
+      last.agentName = agentName;
+      if (pendingSessionTitle && !last.title) {
+        last.title = pendingSessionTitle;
+        pendingSessionTitle = null;
+      }
+    }
+  } else {
+    projectSessions.push({
+      id: newId(),
+      projectId: state.id,
+      projectName: state.name,
+      source: histSource,
+      agentName,
+      title: histSource === "mcp" ? (pendingSessionTitle || null) : null,
+      artboard: artboard || "Page 1",
+      startedAt: at,
+      updatedAt: at,
+      editCount: 1,
+      toolCounts: { [tool]: 1 },
+      checkpointId: checkpointId || null,
+      live: histSource === "mcp",
+      reverted: false,
+    });
+    if (histSource === "mcp") pendingSessionTitle = null;
+    if (projectSessions.length > 60) projectSessions.splice(0, projectSessions.length - 60);
+  }
+  saveSessions();
+  sendActivity();
+}
+
+async function allActivitySessions() {
+  const nameById = new Map(workspace.projects.map((p) => [p.id, p.name]));
+  const colorById = new Map(workspace.projects.map((p) => [p.id, p.accentColor || PROJECT_COLORS[0]]));
+  const now = Date.now();
+  const all = [];
+  for (const p of workspace.projects) {
+    const list = p.id === state?.id ? projectSessions : await readJsonSafe(sessionsFile(p.id), []);
+    for (const s of list) {
+      if (!s || !s.id) continue;
+      const isLive = Boolean(
+        s.source === "mcp" &&
+        s.live &&
+        !s.reverted &&
+        s.projectId === state?.id &&
+        (presence.size > 0 || now - Date.parse(s.updatedAt) < SESSION_GAP_MS),
+      );
+      all.push({
+        ...s,
+        projectName: nameById.get(s.projectId) || s.projectName || "Project",
+        accentColor: colorById.get(s.projectId) || PROJECT_COLORS[0],
+        live: isLive,
+      });
+    }
+  }
+  all.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+  return all.slice(0, 50);
+}
+
+function sendActivity() {
+  allActivitySessions()
+    .then((sessions) => sendEvent("activity", { sessions }))
+    .catch(() => {});
+}
+
 // Every edit goes through here: snapshot for undo, apply, bump version, save, push to browsers.
 // Inside batch() edits apply directly and the batch records a single undo step.
 let batchDepth = 0;
-function mutate(source, fn) {
+let batchStartCheckpointId = null;
+
+function mutate(source, fn, meta = null) {
   if (batchDepth) return fn(state);
-  const before = structuredClone(state);
-  const result = fn(state);
-  commit(source, before);
+  const histSource = source === "mcp" ? "mcp" : "you";
+  const before = docSnapshot(state);
+  const startCpId = histSource === "mcp" ? ensureAgentStartCheckpoint(before) : null;
+  let result;
+  try {
+    result = fn(state);
+  } catch (err) {
+    applySnapshotRaw(before);
+    throw err;
+  }
+  commit(source, before, meta, startCpId);
   return result;
 }
 
-function batch(source, fn) {
+function batch(source, fn, meta = null) {
   if (batchDepth) return fn();
-  const before = structuredClone(state);
+  const histSource = source === "mcp" ? "mcp" : "you";
+  const before = docSnapshot(state);
+  batchStartCheckpointId = histSource === "mcp" ? ensureAgentStartCheckpoint(before) : null;
   batchDepth += 1;
   let result;
   try {
     result = fn();
   } catch (err) {
-    state = before; // all-or-nothing
+    applySnapshotRaw(before); // all-or-nothing
     throw err;
   } finally {
     batchDepth -= 1;
   }
-  commit(source, before);
+  const cpId = batchStartCheckpointId;
+  batchStartCheckpointId = null;
+  commit(source, before, meta, cpId);
   return result;
 }
 
-function commit(source, before) {
-  undoStack.push(before);
-  if (undoStack.length > HISTORY_LIMIT) undoStack.shift();
-  redoStack.length = 0;
-  state.version += 1;
-  persist();
-  broadcast(source);
+function applySnapshotRaw(snap) {
+  const comments = state?.comments || [];
+  state = { ...structuredClone(snap), comments };
 }
 
-function stepHistory(source, from, to) {
-  if (!from.length) return false;
-  to.push(structuredClone(state));
-  const { version, rootId } = state;
-  state = from.pop();
-  state.version = version + 1;
-  if (state.pages.includes(rootId)) state.rootId = rootId; // undo never flips the page you're looking at
+function commit(source, before, meta = null, startCpId = null) {
+  if (historyCursor < historyTimeline.length - 1) {
+    historyTimeline.length = historyCursor + 1;
+  }
+  state.version += 1;
+  const histSource = source === "mcp" ? "mcp" : "you";
+  const store = histSource === "mcp" ? mcpContextStore.getStore() : null;
+  const tool = meta?.tool || store?.tool || (histSource === "mcp" ? "mcp_edit" : "Edit");
+  const nodeIds = meta?.nodeIds?.length ? meta.nodeIds : diffNodeIds(before, state);
+  const target = targetSummary(nodeIds, before, state, meta);
+  const label = meta?.label || `${tool} · ${target}`;
+  const at = new Date().toISOString();
+  const entry = {
+    id: newId(),
+    before,
+    after: docSnapshot(state),
+    source: histSource,
+    tool,
+    target,
+    label,
+    nodeIds,
+    layerCount: layerCountOf(state),
+    at,
+  };
+  historyTimeline.push(entry);
+  if (historyTimeline.length > HISTORY_LIMIT) historyTimeline.shift();
+  historyCursor = historyTimeline.length - 1;
+
+  if (histSource === "mcp") lastMcpWriteAt = Date.now();
+  const artboard = meta?.artboard || artboardNameForNodes(nodeIds, state, before);
+  recordSessionActivity({ histSource, tool, artboard, checkpointId: startCpId, at });
+
   persist();
   broadcast(source);
+  sendHistory();
+}
+
+function applyHistoryEntry(snap) {
+  const { version, rootId, comments } = state;
+  const cloned = structuredClone(snap);
+  state = {
+    ...cloned,
+    version: version + 1,
+    rootId: cloned.pages.includes(rootId) ? rootId : cloned.pages[0],
+    comments: comments || [],
+  };
+}
+
+function stepHistory(source, direction) {
+  if (direction === "undo") {
+    if (historyCursor < 0) return false;
+    const entry = historyTimeline[historyCursor];
+    historyCursor -= 1;
+    applyHistoryEntry(entry.before);
+  } else {
+    if (historyCursor >= historyTimeline.length - 1) return false;
+    historyCursor += 1;
+    const entry = historyTimeline[historyCursor];
+    applyHistoryEntry(entry.after);
+  }
+  persist();
+  broadcast(source);
+  sendHistory();
   return true;
 }
 
+function jumpHistory(source, targetIndex) {
+  if (!Number.isInteger(targetIndex) || targetIndex < -1 || targetIndex >= historyTimeline.length) {
+    throw new HttpError(400, "Invalid history index");
+  }
+  if (targetIndex === historyCursor) return { cursor: historyCursor, moved: 0 };
+  const moved = Math.abs(targetIndex - historyCursor);
+  if (targetIndex < historyCursor) {
+    historyCursor = targetIndex;
+    const snap = targetIndex >= 0 ? historyTimeline[targetIndex].after : historyTimeline[0].before;
+    applyHistoryEntry(snap);
+  } else {
+    historyCursor = targetIndex;
+    applyHistoryEntry(historyTimeline[targetIndex].after);
+  }
+  persist();
+  broadcast(source);
+  sendHistory();
+  return { cursor: historyCursor, moved };
+}
+
+function undoLastAgentRun(source) {
+  let lastMcp = -1;
+  for (let i = historyCursor; i >= 0; i--) {
+    if (historyTimeline[i].source === "mcp") { lastMcp = i; break; }
+  }
+  if (lastMcp === -1) return { ok: false, undone: 0, cursor: historyCursor };
+  let firstMcp = lastMcp;
+  while (firstMcp > 0 && historyTimeline[firstMcp - 1].source === "mcp") firstMcp -= 1;
+  const res = jumpHistory(source, firstMcp - 1);
+  return { ok: true, undone: res.moved, cursor: res.cursor };
+}
+
+function restoreCheckpointById(id, source = "api") {
+  const cp = projectCheckpoints.find((c) => c.id === id);
+  if (!cp) throw new HttpError(404, `Checkpoint "${id}" not found`);
+  mutate(source, (s) => {
+    const snap = structuredClone(cp.snapshot);
+    s.pages = snap.pages;
+    s.rootId = snap.pages.includes(s.rootId) ? s.rootId : snap.rootId;
+    s.nodes = snap.nodes;
+    return cp;
+  }, { tool: "Restore checkpoint", target: cp.name, label: `Restore checkpoint · ${cp.name}` });
+  return { id: cp.id, name: cp.name };
+}
+
 // ---------------------------------------------------------------------------
-// Agent presence + UI selection (agents and the user see each other)
+// Agent presence, live agent cursors & UI selection
 // ---------------------------------------------------------------------------
-const PRESENCE_TTL = 90_000;
 const presence = new Map(); // nodeId -> { label, at }
+const agentSessions = new Map(); // sessionKey -> { id, name, color }
+const agentCursors = new Map(); // agentId -> { id, name, color, nodeIds, tool, detail, mode, at }
 let uiSelection = { ids: [], at: 0 };
+
+function friendlyAgentName(raw) {
+  const s = String(raw || "").trim();
+  if (!s) return "Claude";
+  if (/^claude([_-]?code)?$/i.test(s)) return "Claude";
+  return s.slice(0, 32);
+}
+
+function agentFromRequest(req, initClientName = null) {
+  const key = req.get("x-weft-client") || req.get("mcp-session-id") || req.get("user-agent") || "mcp-default";
+  let sess = agentSessions.get(key);
+  if (!sess) {
+    const idx = agentSessions.size;
+    sess = {
+      id: newId(),
+      name: friendlyAgentName(initClientName),
+      color: AGENT_COLORS[idx % AGENT_COLORS.length],
+    };
+    agentSessions.set(key, sess);
+  } else if (initClientName) {
+    sess.name = friendlyAgentName(initClientName);
+  }
+  return sess;
+}
 
 function presenceList() {
   const now = Date.now();
   for (const [id, p] of presence) if (now - p.at > PRESENCE_TTL || !state?.nodes[id]) presence.delete(id);
   return [...presence].map(([id, p]) => ({ id, label: p.label }));
 }
-function touch(nodeIds, label = "Agent") {
+
+function agentCursorList() {
+  const now = Date.now();
+  const out = [];
+  for (const [id, c] of agentCursors) {
+    if (now - c.at > CURSOR_TTL_MS) {
+      agentCursors.delete(id);
+      continue;
+    }
+    const validIds = (c.nodeIds || []).filter((nid) => state?.nodes[nid]);
+    if (!validIds.length) {
+      agentCursors.delete(id);
+      continue;
+    }
+    out.push({ id: c.id, name: c.name, color: c.color, nodeIds: validIds, tool: c.tool, detail: c.detail, mode: c.mode || "edit", at: c.at });
+  }
+  return out;
+}
+
+function presencePayload() {
+  return { nodes: presenceList(), agents: agentCursorList() };
+}
+
+function emitPresence(projectsMaybeChanged = false) {
+  sendEvent("presence", presencePayload());
+  if (projectsMaybeChanged) sendEvent("projects", { projects: projectList() });
+}
+
+function setAgentCursor({ nodeIds, tool, detail, mode = "edit" }) {
+  const store = mcpContextStore.getStore();
+  const agent = store?.agent || { id: "default", name: "Claude", color: AGENT_COLORS[0] };
+  const validIds = (nodeIds || []).filter((id) => state.nodes[id] && !isPage(id));
+  if (!validIds.length) return;
+  agentCursors.set(agent.id, {
+    id: agent.id,
+    name: agent.name,
+    color: agent.color,
+    nodeIds: validIds,
+    tool: tool || store?.tool || "edit",
+    detail: detail || store?.detail || "",
+    mode,
+    at: Date.now(),
+  });
+}
+
+function touch(nodeIds, toolName = null, detail = null) {
+  const store = mcpContextStore.getStore();
+  const label = store?.agent?.name || "Agent";
+  const wasEmpty = presenceList().length === 0;
   const now = Date.now();
   for (const id of nodeIds) if (state.nodes[id] && !isPage(id)) presence.set(id, { label, at: now });
-  sendEvent("presence", { nodes: presenceList() });
+  setAgentCursor({ nodeIds, tool: toolName || store?.tool, detail: detail || store?.detail, mode: "edit" });
+  const nowNonEmpty = presenceList().length > 0;
+  emitPresence(wasEmpty !== nowNonEmpty);
 }
+
+function look(nodeIds, toolName = null, detail = null) {
+  const store = mcpContextStore.getStore();
+  setAgentCursor({ nodeIds, tool: toolName || store?.tool, detail: detail || store?.detail, mode: "look" });
+  emitPresence(false);
+}
+
 function finishWorking(nodeIds) {
-  if (!nodeIds?.length) presence.clear();
-  else nodeIds.forEach((id) => presence.delete(id));
-  sendEvent("presence", { nodes: presenceList() });
+  const wasNonEmpty = presenceList().length > 0;
+  const store = mcpContextStore.getStore();
+  if (!nodeIds?.length) {
+    presence.clear();
+    if (store?.agent?.id) agentCursors.delete(store.agent.id);
+    else agentCursors.clear();
+  } else {
+    nodeIds.forEach((id) => presence.delete(id));
+    if (store?.agent?.id) agentCursors.delete(store.agent.id);
+  }
+  const nowEmpty = presenceList().length === 0;
+  if (nowEmpty) {
+    let updated = false;
+    for (const s of projectSessions) {
+      if (s.source === "mcp" && s.live) { s.live = false; updated = true; }
+    }
+    if (updated) { saveSessions(); sendActivity(); }
+  }
+  emitPresence(wasNonEmpty && nowEmpty);
 }
+
 setInterval(() => {
-  const before = presence.size;
-  if (presenceList().length !== before) sendEvent("presence", { nodes: presenceList() });
-}, 10_000).unref();
+  const pBefore = presence.size;
+  const cBefore = agentCursors.size;
+  const pAfter = presenceList().length;
+  const cAfter = agentCursorList().length;
+  if (pAfter !== pBefore || cAfter !== cBefore) {
+    emitPresence(pBefore > 0 && pAfter === 0);
+  }
+}, 1000).unref();
 
 // ---------------------------------------------------------------------------
 // Pages
@@ -384,13 +919,14 @@ function pageOf(id) {
 }
 
 function createPage(name, source = "api") {
+  const nextName = cleanName(name, `Page ${state.pages.length + 1}`);
   return mutate(source, (s) => {
-    const page = emptyPage(cleanName(name, `Page ${s.pages.length + 1}`));
+    const page = emptyPage(nextName);
     s.nodes[page.id] = page;
     s.pages.push(page.id);
     s.rootId = page.id;
     return page;
-  });
+  }, { tool: source === "mcp" ? "create_page" : "New page", target: nextName });
 }
 
 function switchPage(id, source = "api") {
@@ -398,14 +934,14 @@ function switchPage(id, source = "api") {
   if (state.rootId !== id) {
     state.rootId = id;
     uiSelection = { ids: [], at: 0 };
-    persist();
+    persist({ touchUpdatedAt: false });
     broadcast(source);
   }
   return state.nodes[id];
 }
 
 function updatePage(id, { name, index }, source = "api") {
-  getPage(id);
+  const page = getPage(id);
   return mutate(source, (s) => {
     if (name !== undefined) s.nodes[id].name = cleanName(name, s.nodes[id].name);
     if (Number.isInteger(index)) {
@@ -413,11 +949,11 @@ function updatePage(id, { name, index }, source = "api") {
       s.pages.splice(Math.max(0, Math.min(index, s.pages.length)), 0, id);
     }
     return s.nodes[id];
-  });
+  }, { tool: source === "mcp" ? "update_page" : "Update page", target: name !== undefined ? cleanName(name, page.name) : page.name });
 }
 
 function deletePage(id, source = "api") {
-  getPage(id);
+  const page = getPage(id);
   if (state.pages.length === 1) throw new HttpError(400, "A project needs at least one page");
   return mutate(source, (s) => {
     const drop = (nid) => { for (const c of s.nodes[nid].children) drop(c); delete s.nodes[nid]; };
@@ -425,7 +961,7 @@ function deletePage(id, source = "api") {
     s.pages = s.pages.filter((p) => p !== id);
     if (s.rootId === id) s.rootId = s.pages[0];
     return { deleted: id };
-  });
+  }, { tool: source === "mcp" ? "delete_page" : "Delete page", target: page.name });
 }
 
 // ---------------------------------------------------------------------------
@@ -449,22 +985,24 @@ function insertChild(parent, id, index) {
 
 const ARTBOARD_DEFAULTS = { position: "absolute", left: "0px", top: "0px", width: "390px", height: "844px", backgroundColor: "#ffffff", overflow: "hidden" };
 
-function createNode(input, source = "api") {
+function createNode(input, source = "api", meta = null) {
   const parent = getNode(input.parentId || state.rootId);
   const tag = cleanTag(input.tag);
   let styles = mergeStyles({}, input.styles);
   // Top-level nodes on a page are artboards placed in world space, like Paper frames.
   if (isPage(parent.id)) styles = mergeStyles(ARTBOARD_DEFAULTS, styles);
   const attrs = mergeAttrs({}, input.attrs, tag);
+  const nodeName = cleanName(input.name, tag);
+  const toolFallback = isPage(parent.id) ? "Draw Frame" : (tag === "p" && input.text !== undefined ? "Create Text" : "Draw Rect");
   return mutate(source, (s) => {
     const id = newId();
-    s.nodes[id] = { id, name: cleanName(input.name, tag), tag, parentId: parent.id, children: [], text: String(input.text ?? ""), styles, attrs };
+    s.nodes[id] = { id, name: nodeName, tag, parentId: parent.id, children: [], text: String(input.text ?? ""), styles, attrs };
     insertChild(s.nodes[parent.id], id, input.index);
     return s.nodes[id];
-  });
+  }, meta || { tool: source === "mcp" ? "create_node" : toolFallback, target: nodeName });
 }
 
-function updateNode(id, patch, source = "api") {
+function updateNode(id, patch, source = "api", meta = null) {
   const node = getNode(id);
   const next = {};
   if (patch.name !== undefined) next.name = cleanName(patch.name, node.name);
@@ -486,6 +1024,12 @@ function updateNode(id, patch, source = "api") {
     const target = getNode(patch.parentId ?? node.parentId);
     if (isAncestor(id, target.id)) throw new HttpError(400, "Cannot move a node inside itself");
   }
+  let uiTool = "Edit layer";
+  if (moving) uiTool = "Move layer";
+  else if (patch.text !== undefined && patch.styles === undefined) uiTool = "Edit text";
+  else if (patch.name !== undefined && patch.styles === undefined) uiTool = "Rename";
+  else if (patch.styles !== undefined) uiTool = "Edit styles";
+  else if (patch.tag !== undefined) uiTool = "Change tag";
   return mutate(source, (s) => {
     const n = s.nodes[id];
     Object.assign(n, next);
@@ -498,7 +1042,7 @@ function updateNode(id, patch, source = "api") {
       if (isPage(n.parentId) && n.styles.position !== "absolute") n.styles = mergeStyles(n.styles, { position: "absolute", left: 0, top: 0 });
     }
     return n;
-  });
+  }, meta || (source === "mcp" ? null : { tool: uiTool, target: next.name || node.name, nodeIds: [id] }));
 }
 
 function deleteNode(id, source = "api") {
@@ -514,7 +1058,7 @@ function deleteNode(id, source = "api") {
     s.nodes[node.parentId].children = s.nodes[node.parentId].children.filter((c) => c !== id);
     drop(id);
     return { deleted: removed };
-  });
+  }, source === "mcp" ? null : { tool: "Delete", target: node.name, nodeIds: [id] });
 }
 
 function duplicateNode(id, source = "api") {
@@ -538,7 +1082,7 @@ function duplicateNode(id, source = "api") {
     }
     insertChild(s.nodes[node.parentId], nid, s.nodes[node.parentId].children.indexOf(id) + 1);
     return dup;
-  });
+  }, source === "mcp" ? null : { tool: "Duplicate", target: node.name });
 }
 
 function artboardOf(id) {
@@ -567,9 +1111,14 @@ function nextArtboardPosition(pageId = state.rootId) {
 }
 
 function createArtboard({ name = "Frame", width = 390, height = 844, x, y, styles = {}, pageId }, source = "mcp") {
-  const page = pageId ? getPage(pageId).id : state.rootId;
+  const trimmedPage = typeof pageId === "string" ? pageId.trim() : "";
+  const page = trimmedPage ? getPage(trimmedPage).id : state.rootId;
   const pos = x === undefined || y === undefined ? nextArtboardPosition(page) : { x, y };
-  return createNode({ parentId: page, tag: "div", name, styles: { ...styles, width, height, left: x ?? pos.x, top: y ?? pos.y } }, source);
+  return createNode(
+    { parentId: page, tag: "div", name, styles: { ...styles, width, height, left: x ?? pos.x, top: y ?? pos.y } },
+    source,
+    { tool: source === "mcp" ? "create_artboard" : "Draw Frame", target: cleanName(name, "Frame"), artboard: cleanName(name, "Frame") },
+  );
 }
 
 // Insert a parsed HTML spec tree (lenient: bad tags/styles/attrs are dropped with warnings). Call inside mutate/batch.
@@ -600,21 +1149,27 @@ function addSubtree(spec, parentId, index, warnings) {
 function writeHtml({ html, parentId, targetNodeId, mode = "insert-children", index }, source = "mcp") {
   const { specs, warnings } = htmlToSpecs(html);
   if (!specs.length) throw new HttpError(400, "No elements found in html");
-  let parent = parentId || state.rootId;
+  let parent = (typeof parentId === "string" ? parentId.trim() : "") || state.rootId;
   let at = index;
+  let replaceTargetName = null;
   if (mode === "replace") {
     if (!targetNodeId) throw new HttpError(400, "targetNodeId is required for mode=replace");
     const target = getNode(targetNodeId);
     if (isPage(target.id)) throw new HttpError(400, "A page cannot be replaced");
+    replaceTargetName = target.name;
     parent = target.parentId;
     at = state.nodes[parent].children.indexOf(target.id);
     if (isPage(parent)) for (const sp of specs) sp.styles = { left: target.styles.left, top: target.styles.top, ...sp.styles };
   }
-  getNode(parent);
+  const parentNode = getNode(parent);
+  const firstLabel = cleanName(specs[0].name, specs[0].tag);
+  const targetLabel = mode === "replace"
+    ? (specs.length === 1 ? firstLabel : replaceTargetName)
+    : (specs.length === 1 ? firstLabel : (isPage(parent) ? `${specs.length} artboards` : parentNode.name));
   const created = batch(source, () => {
     if (mode === "replace") deleteNode(targetNodeId, source);
     return specs.map((sp, i) => addSubtree(sp, parent, at === undefined ? undefined : at + i, warnings));
-  });
+  }, { tool: "write_html", target: targetLabel });
   const countAll = (id) => 1 + state.nodes[id].children.reduce((a, c) => a + countAll(c), 0);
   return {
     created: created.map((id) => ({ id, name: state.nodes[id].name, tag: state.nodes[id].tag })),
@@ -622,6 +1177,126 @@ function writeHtml({ html, parentId, targetNodeId, mode = "insert-children", ind
     parentId: parent,
     warnings,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Comments (pinned to nodeId; persisted in project JSON, excluded from exports)
+// ---------------------------------------------------------------------------
+function latestMcpStep() {
+  for (let i = historyCursor; i >= 0; i--) {
+    if (historyTimeline[i].source === "mcp") {
+      const e = historyTimeline[i];
+      return { historyId: e.id, label: e.label, nodeIds: e.nodeIds || [] };
+    }
+  }
+  return null;
+}
+
+function listComments({ status, nodeId, agentView = false } = {}) {
+  const list = state.comments || [];
+  return list.filter((c) => {
+    if (agentView && c.agentsCanSee === false) return false;
+    if (nodeId && c.nodeId !== nodeId) return false;
+    if (status && c.status !== status) return false;
+    return true;
+  });
+}
+
+function addComment({ nodeId, text, agentsCanSee = true }) {
+  getNode(nodeId);
+  if (isPage(nodeId)) throw new HttpError(400, "Comments must attach to a layer or artboard");
+  const cleanText = String(text ?? "").trim().slice(0, 4000);
+  if (!cleanText) throw new HttpError(400, "Comment text cannot be empty");
+  const now = new Date().toISOString();
+  const thread = {
+    id: newId(),
+    nodeId,
+    status: "open",
+    agentsCanSee: agentsCanSee !== false,
+    messages: [{ id: newId(), author: "you", text: cleanText, at: now }],
+    createdAt: now,
+  };
+  if (!state.comments) state.comments = [];
+  state.comments.push(thread);
+  persist({ touchUpdatedAt: false });
+  sendEvent("comments", { comments: state.comments });
+  return thread;
+}
+
+function replyComment(id, { text, author = "you", linkStep = false, agentsCanSee } = {}) {
+  const thread = (state.comments || []).find((c) => c.id === id);
+  if (!thread) throw new HttpError(404, `Comment "${id}" not found`);
+  const cleanText = String(text ?? "").trim().slice(0, 4000);
+  if (!cleanText) throw new HttpError(400, "Reply text cannot be empty");
+  const now = new Date().toISOString();
+  const isAgent = author !== "you";
+  const linkedStep = isAgent && linkStep ? latestMcpStep() : null;
+  thread.messages.push({
+    id: newId(),
+    author: cleanName(author, "you"),
+    text: cleanText,
+    at: now,
+    ...(linkedStep ? { linkedStep } : {}),
+  });
+  if (agentsCanSee !== undefined && !isAgent) thread.agentsCanSee = Boolean(agentsCanSee);
+  thread.status = isAgent ? "replied" : "open";
+  persist({ touchUpdatedAt: false });
+  sendEvent("comments", {
+    comments: state.comments,
+    ...(isAgent ? { replyNotification: { commentId: thread.id, nodeId: thread.nodeId, author: cleanName(author, "Claude"), text: cleanText } } : {}),
+  });
+  return thread;
+}
+
+function updateComment(id, { status, agentsCanSee } = {}) {
+  const thread = (state.comments || []).find((c) => c.id === id);
+  if (!thread) throw new HttpError(404, `Comment "${id}" not found`);
+  if (status !== undefined) {
+    if (!["open", "read", "replied", "resolved"].includes(status)) throw new HttpError(400, "Invalid comment status");
+    thread.status = status;
+  }
+  if (agentsCanSee !== undefined) thread.agentsCanSee = Boolean(agentsCanSee);
+  persist({ touchUpdatedAt: false });
+  sendEvent("comments", { comments: state.comments });
+  return thread;
+}
+
+function deleteComment(id) {
+  const before = (state.comments || []).length;
+  state.comments = (state.comments || []).filter((c) => c.id !== id);
+  if (state.comments.length === before) throw new HttpError(404, `Comment "${id}" not found`);
+  persist({ touchUpdatedAt: false });
+  sendEvent("comments", { comments: state.comments });
+  return { deleted: id };
+}
+
+function mcpGetComments({ status, nodeId } = {}) {
+  const list = listComments({ status, nodeId, agentView: true });
+  const now = new Date().toISOString();
+  let changed = false;
+  for (const c of list) {
+    if (c.status === "open") {
+      c.status = "read";
+      c.readAt = now;
+      changed = true;
+    } else if (!c.readAt && c.status !== "resolved") {
+      c.readAt = now;
+      changed = true;
+    }
+  }
+  if (changed) {
+    persist({ touchUpdatedAt: false });
+    sendEvent("comments", { comments: state.comments });
+  }
+  return list.map((c) => ({
+    ...c,
+    layerName: state.nodes[c.nodeId]?.name || null,
+    layerDeleted: !state.nodes[c.nodeId],
+  }));
+}
+
+function openCommentCount() {
+  return (state.comments || []).filter((c) => c.agentsCanSee !== false && c.status !== "resolved").length;
 }
 
 // ---------------------------------------------------------------------------
@@ -861,7 +1536,7 @@ async function exportProjectZip(projectId, format = "html") {
   </section>`).join("\n");
   entries.unshift({
     name: "index.html",
-    data: `<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n<title>${escHtml(doc.name)} — Export</title>\n<style>body{font:14px/1.5 system-ui,sans-serif;max-width:860px;margin:40px auto;padding:0 20px;color:#0a0b0d;background:#fff}h1{margin:0 0 6px;font-size:24px}h2{margin:28px 0 10px;font-size:16px;border-bottom:1px solid #dde3e9;padding-bottom:6px}h2 small{color:#787878;font-weight:400;font-family:ui-monospace,monospace;font-size:12px}ul{list-style:none;padding:0;margin:0;display:grid;gap:6px}li{display:flex;align-items:center;gap:10px;padding:8px 12px;border:1px solid #dde3e9;border-radius:8px}a{color:#0000ff;text-decoration:none;font-weight:500}a:hover{text-decoration:underline}a.jsx{font-family:ui-monospace,monospace;font-size:12px;background:#f4f6f8;padding:2px 6px;border-radius:4px}li span{margin-left:auto;color:#787878;font-family:ui-monospace,monospace;font-size:12px}.empty{color:#787878}</style>\n</head>\n<body>\n<h1>${escHtml(doc.name)}</h1>\n<p style="color:#787878;margin:0">${manifest.length} page${manifest.length === 1 ? "" : "s"} exported</p>\n${indexSections}\n</body>\n</html>\n`,
+    data: `<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n<title>${escHtml(doc.name)} — Export</title>\n<style>body{font:14px/1.5 system-ui,sans-serif;max-width:860px;margin:40px auto;padding:0 20px;color:#1d1d1f;background:#fff}h1{margin:0 0 6px;font-size:24px}h2{margin:28px 0 10px;font-size:16px;border-bottom:1px solid #ebebea;padding-bottom:6px}h2 small{color:#8a8a87;font-weight:400;font-family:ui-monospace,monospace;font-size:12px}ul{list-style:none;padding:0;margin:0;display:grid;gap:6px}li{display:flex;align-items:center;gap:10px;padding:8px 12px;border:1px solid #ebebea;border-radius:8px}a{color:#2f5bd3;text-decoration:none;font-weight:500}a:hover{text-decoration:underline}a.jsx{font-family:ui-monospace,monospace;font-size:12px;background:#f4f4f2;padding:2px 6px;border-radius:4px}li span{margin-left:auto;color:#8a8a87;font-family:ui-monospace,monospace;font-size:12px}.empty{color:#8a8a87}</style>\n</head>\n<body>\n<h1>${escHtml(doc.name)}</h1>\n<p style="color:#8a8a87;margin:0">${manifest.length} page${manifest.length === 1 ? "" : "s"} exported</p>\n${indexSections}\n</body>\n</html>\n`,
   });
 
   return { fileName: `${slugName(doc.name, "project")}.zip`, buffer: buildZip(entries) };
@@ -899,6 +1574,21 @@ async function removeFont(id) {
   return { removed: f.family };
 }
 
+function setSessionTitle(text) {
+  const title = cleanName(text, "");
+  if (!title) throw new HttpError(400, "Session title cannot be empty");
+  const last = projectSessions[projectSessions.length - 1];
+  const now = Date.now();
+  if (last && last.source === "mcp" && !last.reverted && (last.live || now - Date.parse(last.updatedAt) < SESSION_GAP_MS * 2)) {
+    last.title = title;
+    saveSessions();
+    sendActivity();
+    return { title, sessionId: last.id };
+  }
+  pendingSessionTitle = title;
+  return { title, pending: true };
+}
+
 // ---------------------------------------------------------------------------
 // MCP (tools live in mcp-tools.js)
 // ---------------------------------------------------------------------------
@@ -908,11 +1598,14 @@ const mcpContext = {
   urls: { ui: PUBLIC_URL, mcp: `${PUBLIC_URL}/mcp` },
   getNode, isPage, pageOf, artboardOf, artboardSize, outline, exportCode, renderer,
   createNode, updateNode, deleteNode, duplicateNode, createArtboard, writeHtml,
-  batch: (source, fn) => batch(source, fn),
-  undo: (source) => stepHistory(source, undoStack, redoStack),
-  redo: (source) => stepHistory(source, redoStack, undoStack),
+  batch: (source, fn, meta) => batch(source, fn, meta),
+  undo: (source) => stepHistory(source, "undo"),
+  redo: (source) => stepHistory(source, "redo"),
   selection: () => ({ ...uiSelection, ids: uiSelection.ids.filter((id) => state.nodes[id]) }),
-  presence: presenceList, touch, finishWorking,
+  presence: presenceList,
+  touch,
+  look,
+  finishWorking,
   focusNodes: (ids, zoom) => {
     if (!ids?.length) { sendEvent("focus", { ids: [], zoom: false }); return; }
     const page = pageOf(ids[0]);
@@ -922,10 +1615,30 @@ const mcpContext = {
   projects: { list: projectList, create: createProject, open: openProject, rename: renameProject, duplicate: duplicateProject, remove: deleteProject },
   pages: { create: createPage, open: switchPage, update: updatePage, remove: deletePage },
   fonts: { list: () => fonts.list().map((f) => ({ ...f, cssFamily: fonts.stack(f.family) })), add: addFont, remove: removeFont },
+  checkpoints: {
+    list: () => publicCheckpoints(),
+    save: (name) => {
+      const cp = createCheckpoint(name || "Manual checkpoint", { auto: false, kind: "manual" });
+      return { id: cp.id, name: cp.name, at: cp.at, layerCount: cp.layerCount };
+    },
+    restore: (id) => restoreCheckpointById(id, "mcp"),
+  },
+  comments: {
+    openCount: openCommentCount,
+    list: mcpGetComments,
+    reply: (id, text, linkStep = true) => {
+      const store = mcpContextStore.getStore();
+      return replyComment(id, { text, author: store?.agent?.name || "Claude", linkStep });
+    },
+    resolve: (id) => updateComment(id, { status: "resolved" }),
+  },
+  session: {
+    setTitle: setSessionTitle,
+  },
 };
 
 function buildMcpServer() {
-  const server = new McpServer({ name: "paper-lite", version: PKG_VERSION }, { instructions: SERVER_INSTRUCTIONS });
+  const server = new McpServer({ name: "weft", version: PKG_VERSION }, { instructions: SERVER_INSTRUCTIONS });
   registerTools(server, mcpContext);
   return server;
 }
@@ -959,17 +1672,23 @@ const wrap = (fn) => async (req, res) => {
     const out = await fn(req, res);
     if (out !== undefined && !res.headersSent) res.json(out);
   } catch (err) {
-    if (!err.status) console.error("[paper-lite]", err);
+    if (!err.status) console.error("[weft]", err);
     res.status(err.status || 500).json({ error: err.message });
   }
 };
 
-app.get("/events", (req, res) => {
+app.get("/events", async (req, res) => {
   res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
   res.write(`event: state\ndata: ${JSON.stringify({ source: "init", state })}\n\n`);
   res.write(`event: projects\ndata: ${JSON.stringify({ projects: projectList() })}\n\n`);
   res.write(`event: fonts\ndata: ${JSON.stringify({ fonts: fonts.list(), v: 0 })}\n\n`);
-  res.write(`event: presence\ndata: ${JSON.stringify({ nodes: presenceList() })}\n\n`);
+  res.write(`event: presence\ndata: ${JSON.stringify(presencePayload())}\n\n`);
+  res.write(`event: history\ndata: ${JSON.stringify(historyPayload())}\n\n`);
+  res.write(`event: comments\ndata: ${JSON.stringify({ comments: state.comments || [] })}\n\n`);
+  const sessions = await allActivitySessions().catch(() => []);
+  if (!res.destroyed && !res.closed) {
+    res.write(`event: activity\ndata: ${JSON.stringify({ sessions })}\n\n`);
+  }
   sseClients.add(res);
   const ping = setInterval(() => res.write(": ping\n\n"), 25000);
   req.on("close", () => { clearInterval(ping); sseClients.delete(res); });
@@ -979,7 +1698,7 @@ app.get("/events", (req, res) => {
 app.get("/api/state", wrap(() => state));
 app.post("/api/state", wrap((req) => {
   const next = normalizeProject(req.body, { id: state.id, name: state.name, warnings: [] });
-  mutate(who(req), (s) => { s.pages = next.pages; s.rootId = next.rootId; s.nodes = next.nodes; });
+  mutate(who(req), (s) => { s.pages = next.pages; s.rootId = next.rootId; s.nodes = next.nodes; }, { tool: "Replace state", target: state.name });
   return state;
 }));
 
@@ -988,12 +1707,70 @@ app.post("/api/nodes", wrap((req) => createNode(req.body || {}, who(req))));
 app.patch("/api/nodes/:id", wrap((req) => updateNode(req.params.id, req.body || {}, who(req))));
 app.delete("/api/nodes/:id", wrap((req) => deleteNode(req.params.id, who(req))));
 app.post("/api/nodes/:id/duplicate", wrap((req) => duplicateNode(req.params.id, who(req))));
-app.post("/api/undo", wrap((req) => ({ ok: stepHistory(who(req), undoStack, redoStack) })));
-app.post("/api/redo", wrap((req) => ({ ok: stepHistory(who(req), redoStack, undoStack) })));
+app.post("/api/undo", wrap((req) => ({ ok: stepHistory(who(req), "undo") })));
+app.post("/api/redo", wrap((req) => ({ ok: stepHistory(who(req), "redo") })));
 app.post("/api/selection", wrap((req) => {
   const list = Array.isArray(req.body?.ids) ? req.body.ids.filter((id) => typeof id === "string" && state.nodes[id]).slice(0, 200) : [];
   uiSelection = { ids: list, at: Date.now() };
   return { ok: true };
+}));
+
+// History (§1) & Checkpoints (§2)
+app.get("/api/history", wrap(() => historyPayload()));
+app.post("/api/history/jump", wrap((req) => {
+  let idx = req.body?.index;
+  if (idx === undefined && req.body?.id) {
+    idx = historyTimeline.findIndex((e) => e.id === req.body.id);
+    if (idx === -1) throw new HttpError(404, `History entry "${req.body.id}" not found`);
+  }
+  return jumpHistory(who(req), idx);
+}));
+app.post("/api/history/undo-agent-run", wrap((req) => undoLastAgentRun(who(req))));
+
+app.get("/api/checkpoints", wrap(() => publicCheckpoints()));
+app.post("/api/checkpoints", wrap((req) => {
+  const cp = createCheckpoint(req.body?.name || "Checkpoint", { auto: false, kind: "manual" });
+  return { id: cp.id, name: cp.name, auto: cp.auto, kind: cp.kind, at: cp.at, historyId: cp.historyId, layerCount: cp.layerCount };
+}));
+app.post("/api/checkpoints/:id/restore", wrap((req) => restoreCheckpointById(req.params.id, who(req))));
+
+// Comments (§3)
+app.get("/api/comments", wrap((req) => listComments({
+  status: req.query.status ? String(req.query.status) : undefined,
+  nodeId: req.query.nodeId ? String(req.query.nodeId) : undefined,
+})));
+app.post("/api/comments", wrap((req) => addComment(req.body || {})));
+app.post("/api/comments/:id/reply", wrap((req) => replyComment(req.params.id, {
+  text: req.body?.text,
+  author: "you",
+  agentsCanSee: req.body?.agentsCanSee,
+})));
+app.patch("/api/comments/:id", wrap((req) => updateComment(req.params.id, req.body || {})));
+app.delete("/api/comments/:id", wrap((req) => deleteComment(req.params.id)));
+
+// Activity (§5)
+app.get("/api/activity", wrap(async () => ({ sessions: await allActivitySessions() })));
+app.post("/api/activity/:id/revert", wrap(async (req) => {
+  const sid = req.params.id;
+  let targetProject = null;
+  let targetSession = null;
+  for (const p of workspace.projects) {
+    const list = p.id === state.id ? projectSessions : await readJsonSafe(sessionsFile(p.id), []);
+    const found = list.find((s) => s.id === sid);
+    if (found) { targetProject = p.id; targetSession = found; break; }
+  }
+  if (!targetSession) throw new HttpError(404, `Session "${sid}" not found`);
+  if (!targetSession.checkpointId) throw new HttpError(400, "No checkpoint recorded for this session");
+  if (state.id !== targetProject) await openProject(targetProject, who(req));
+  const restored = restoreCheckpointById(targetSession.checkpointId, who(req));
+  const activeSession = projectSessions.find((s) => s.id === sid);
+  if (activeSession) {
+    activeSession.reverted = true;
+    activeSession.live = false;
+    saveSessions();
+    sendActivity();
+  }
+  return { ok: true, restored };
 }));
 
 // Pages
@@ -1044,29 +1821,50 @@ app.get("/api/export/zip", wrap(async (req, res) => {
   }).send(buffer);
 }));
 
-// Stateless Streamable HTTP MCP: a fresh server/transport per request, sharing the same workspace.
-app.post("/mcp", async (req, res) => {
+// Stateless Streamable HTTP MCP (/mcp + legacy /paper-lite/mcp alias): fresh server/transport per request, sharing workspace & session context.
+function mcpToolDetail(toolName, args) {
+  if (!args || typeof args !== "object") return "";
+  if (toolName === "update_styles" && Array.isArray(args.updates)) {
+    const keys = [...new Set(args.updates.flatMap((u) => Object.keys(u.styles || {})))];
+    return keys.slice(0, 3).join(", ");
+  }
+  if (toolName === "update_node" && args.styles) return Object.keys(args.styles).slice(0, 3).join(", ");
+  if (toolName === "write_html") return args.mode === "replace" ? "replace" : "";
+  if (toolName === "create_artboard" && args.name) return String(args.name).slice(0, 28);
+  if (toolName === "get_screenshot" && args.scale) return `${args.scale}x`;
+  if (toolName === "get_jsx" && args.format) return String(args.format);
+  return "";
+}
+
+app.post(["/mcp", "/paper-lite/mcp"], async (req, res) => {
+  const msgs = Array.isArray(req.body) ? req.body : [req.body];
+  const initMsg = msgs.find((m) => m?.method === "initialize");
+  const agent = agentFromRequest(req, initMsg?.params?.clientInfo?.name || null);
+  const callMsg = msgs.find((m) => m?.method === "tools/call");
+  const tool = callMsg?.params?.name || "";
+  const detail = tool ? mcpToolDetail(tool, callMsg?.params?.arguments) : "";
+
   const server = buildMcpServer();
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
   res.on("close", () => { transport.close(); server.close(); });
   try {
     await server.connect(transport);
-    await transport.handleRequest(req, res, req.body);
+    await mcpContextStore.run({ agent, tool, detail }, () => transport.handleRequest(req, res, req.body));
   } catch (err) {
-    console.error("[paper-lite] MCP error:", err);
+    console.error("[weft] MCP error:", err);
     if (!res.headersSent) res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: "Internal server error" }, id: null });
   }
 });
 const methodNotAllowed = (req, res) =>
   res.status(405).json({ jsonrpc: "2.0", error: { code: -32000, message: "Method not allowed (stateless server)" }, id: null });
-app.get("/mcp", methodNotAllowed);
-app.delete("/mcp", methodNotAllowed);
+app.get(["/mcp", "/paper-lite/mcp"], methodNotAllowed);
+app.delete(["/mcp", "/paper-lite/mcp"], methodNotAllowed);
 
 for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => { renderer.stop(); setTimeout(() => process.exit(0), 1200); });
 
 await fonts.load();
 await loadWorkspace();
 app.listen(PORT, HOST, () => {
-  console.log(`Paper-Lite UI   ${PUBLIC_URL}`);
-  console.log(`Paper-Lite MCP  ${PUBLIC_URL}/mcp`);
+  console.log(`weft UI   ${PUBLIC_URL}`);
+  console.log(`weft MCP  ${PUBLIC_URL}/mcp`);
 });
