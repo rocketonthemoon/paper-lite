@@ -5,6 +5,8 @@ import { parseFragment } from "parse5";
 const TAG_ALIASES = { b: "strong", i: "em", u: "span", code: "span", mark: "span", time: "span", sub: "small", sup: "small",
   blockquote: "div", form: "div", fieldset: "div", table: "div", thead: "div", tbody: "div", tr: "div", td: "div", th: "div",
   input: "div", textarea: "div", select: "div", option: "span", picture: "figure", body: "div", html: "div", defs: "g", text: "g" };
+// Same-meaning swaps (b→strong, i→em, …) stay silent; these lose structure or behaviour, so the agent is told once per tag.
+const LOSSY = new Set(["form", "fieldset", "table", "thead", "tbody", "tr", "td", "th", "input", "textarea", "select", "option", "text"]);
 const SKIP = new Set(["#comment", "script", "style", "template", "noscript", "head", "meta", "link", "title"]);
 
 const camel = (prop) => {
@@ -46,12 +48,19 @@ const squash = (t) => t.replace(/\s+/g, " ");
 export function htmlToSpecs(html) {
   const warnings = [];
   const frag = parseFragment(String(html || ""));
+  const mapped = new Set();
 
   const convert = (el) => {
     const raw = el.tagName || el.nodeName;
     const svgNs = el.namespaceURI === "http://www.w3.org/2000/svg";
     let tag = svgNs ? raw : raw.toLowerCase();
-    if (TAG_ALIASES[tag]) tag = TAG_ALIASES[tag];
+    if (TAG_ALIASES[tag]) {
+      if (LOSSY.has(tag) && !mapped.has(tag) && warnings.length < 50) {
+        mapped.add(tag);
+        warnings.push(`<${tag}> isn't supported on the canvas; built as <${TAG_ALIASES[tag]}> (layout and behaviour may differ)`);
+      }
+      tag = TAG_ALIASES[tag];
+    }
     const spec = { tag, name: "", text: "", styles: {}, attrs: {}, children: [] };
     for (const { name, value } of el.attrs || []) {
       if (name === "style") Object.assign(spec.styles, parseInlineStyle(value));

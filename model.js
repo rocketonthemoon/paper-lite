@@ -131,10 +131,14 @@ function normalizeComments(rawComments) {
     out.push({
       id: cid,
       nodeId: nid,
+      // pageId and layerName let the UI place and label a thread whose layer was later deleted.
+      ...(ID_RE.test(String(c.pageId || "")) ? { pageId: String(c.pageId) } : {}),
+      ...(typeof c.layerName === "string" && c.layerName.trim() ? { layerName: cleanName(c.layerName, "Layer") } : {}),
       status: COMMENT_STATUSES.has(c.status) ? c.status : "open",
       agentsCanSee: c.agentsCanSee !== false,
       messages,
       ...(typeof c.readAt === "string" ? { readAt: c.readAt } : {}),
+      ...(typeof c.resolvedAt === "string" ? { resolvedAt: c.resolvedAt } : {}),
       createdAt: typeof c.createdAt === "string" ? c.createdAt : (messages[0]?.at || new Date().toISOString()),
     });
   }

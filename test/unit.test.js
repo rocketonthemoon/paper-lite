@@ -104,6 +104,23 @@ test("model: cleanName, emptyProject, and normalizeProject handle legacy & malfo
   assert.throws(() => normalizeProject(null), /nodes object/);
 });
 
+test("model: normalizeProject keeps comment page, layer name and resolved time across reloads", () => {
+  const doc = {
+    rootId: "root",
+    nodes: { root: { id: "root", name: "Main", tag: "div", children: [] } },
+    comments: [
+      { id: "c1", nodeId: "gone1", pageId: "root", layerName: "Deleted card", status: "resolved", resolvedAt: "2026-01-02T00:00:00.000Z", messages: [{ text: "hi" }] },
+      { id: "c2", nodeId: "n2", pageId: "../../x", layerName: 42, messages: [{ text: "yo" }] },
+    ],
+  };
+  const [kept, cleaned] = normalizeProject(doc, { id: "p1" }).comments;
+  assert.equal(kept.pageId, "root");
+  assert.equal(kept.layerName, "Deleted card");
+  assert.equal(kept.resolvedAt, "2026-01-02T00:00:00.000Z");
+  assert.equal(cleaned.pageId, undefined, "invalid page ids are dropped");
+  assert.equal(cleaned.layerName, undefined, "non-string layer names are dropped");
+});
+
 test("html-import: parseInlineStyle handles urls, quotes, vendor prefixes, and custom props", () => {
   const styles = parseInlineStyle(
     "color: #0000ff !important; background-image: url('data:image/svg+xml;utf8,<svg/>'); -webkit-backdrop-filter: blur(8px); --token: 4px; font-size: 16px;"
@@ -152,6 +169,16 @@ test("html-import: htmlToSpecs parses layout, aliases, SVG namespace, mixed text
   const img = root.children[2];
   assert.equal(img.tag, "img");
   assert.equal(img.attrs.alt, "Preview");
+});
+
+test("html-import: lossy tag mappings warn once per tag; same-meaning swaps stay quiet", () => {
+  const { specs, warnings } = htmlToSpecs(`<b>x</b><i>y</i><table><tr><td>a</td><td>b</td></tr></table><table></table><input>`);
+  assert.deepEqual(specs.map((s) => s.tag), ["strong", "em", "div", "div", "div"]);
+  assert.equal(warnings.filter((w) => /<table>/.test(w)).length, 1, "one warning per tag, not per element");
+  assert.equal(warnings.filter((w) => /<td>/.test(w)).length, 1);
+  assert.ok(warnings.some((w) => /<tr>/.test(w)) && warnings.some((w) => /<input>/.test(w)));
+  assert.ok(!warnings.some((w) => /<b>|<i>/.test(w)), "b/i map silently");
+  assert.deepEqual(htmlToSpecs("<b>bold</b><em>e</em>").warnings, []);
 });
 
 test("fonts: parseFontFileName, familiesIn, and FontLibrary manage Google and uploaded fonts", async () => {
