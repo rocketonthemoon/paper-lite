@@ -271,7 +271,7 @@ test("UI interactions: drawing, editing, shortcuts, panels, projects and live sy
   const pick = async (id) => { await settle(); await ui.evalJs(`select(${JSON.stringify(id)})`); await waitFor(async () => (await uiSel()) === id, `select ${id}`); };
 
   await waitFor(() => ui.evalJs(`Boolean(document.getElementById("live-text")?.textContent.includes("Live"))`), "live sync");
-  await waitFor(() => ui.evalJs("Boolean(window.interact)"), "interact.js loaded");
+  await waitFor(() => ui.evalJs("Boolean(window.interact)"), "editor started (interact.js set up)");
 
   // ---------------------------------------------------------------- drawing tools
   let board, rectId, textId;

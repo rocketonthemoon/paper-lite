@@ -1,7 +1,8 @@
-// Drag and resize of the selected layer, with interact.js (a classic script on the page). The preview moves the
+// Drag and resize of the selected layer, with interact.js (bundled from npm). The preview moves the
 // element directly; the server gets one patch when the gesture ends.
+import interact from "interactjs";
 import { ed } from "./state.js";
-import { GRID, elOf, num, patchStyles, snapInput, toast } from "./core.js";
+import { GRID, elOf, num, patchStyles, snapInput } from "./core.js";
 import { markStale, render, updateOverlay } from "./render.js";
 import { select } from "./selection.js";
 
@@ -68,7 +69,6 @@ function resizeEnd() {
 }
 
 export function setupInteract() {
-  if (!window.interact) { toast("interact.js did not load — drag & resize disabled"); return; }
   interact("#world .is-selected")
     .draggable({ listeners: { start: (e) => dragStart(e, e.target.dataset.nodeId), move: dragMove, end: dragEnd } })
     .resizable({ edges: { left: true, right: true, top: true, bottom: true }, margin: 6,
