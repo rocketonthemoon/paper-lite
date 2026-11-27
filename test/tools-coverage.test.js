@@ -835,6 +835,17 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
 
     const small = await call(B, "get_screenshot", { nodeId: board, scale: 0.5 });
     assert.match(small.text, /at scale 0\.5/);
+
+    // Multi-viewport responsive screenshot captures on one artboard without duplicating DOM.
+    const multi = await call(B, "get_screenshot", { nodeId: board, widths: [390, 834], scale: 1 });
+    assert.equal(multi.isError, false, multi.text);
+    const imgs = multi.result.content.filter((c) => c.type === "image");
+    const caps = multi.result.content.filter((c) => c.type === "text");
+    assert.equal(imgs.length, 2, "one PNG per requested viewport width");
+    assert.match(caps[0].text, /@ 390px · 390×\d+px/);
+    assert.match(caps[1].text, /@ 834px · 834×\d+px/);
+    assert.equal((await ok(B, "get_node_info", { nodeId: board })).styles.width, "800px", "saved artboard width unchanged");
+
     const batchShots = await call(B, "get_screenshot", { nodeIds: [board, section], scale: 0.5 });
     assert.equal(batchShots.isError, false, batchShots.text);
     const images = batchShots.result.content.filter((c) => c.type === "image");

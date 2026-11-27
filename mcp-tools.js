@@ -229,14 +229,16 @@ export function registerTools(server, ctx) {
   });
 
   server.registerTool("get_screenshot", {
-    description: "PNG screenshot of one or more layers/artboards rendered exactly like the canvas/export (headless Chrome). Pass nodeId for one, nodeIds for batch capture, or omit for the user's selection / first artboard.",
+    description: "PNG screenshot of one or more layers/artboards rendered exactly like the canvas/export (headless Chrome). Pass nodeId for one, nodeIds for batch capture, or omit for the user's selection / first artboard. Pass width or widths ([390, 834, 1440]) to test @media breakpoints at multiple viewports without duplicating layers.",
     inputSchema: {
       nodeId: z.string().optional(),
       nodeIds: z.array(z.string()).min(1).max(12).optional().describe("Batch capture multiple layers/artboards in one call"),
       scale: z.number().min(0.1).max(3).optional().describe("Default 1; large frames are capped at 1600px on the long edge"),
+      width: z.number().int().min(200).max(4096).optional().describe("Viewport/artboard width override in px"),
+      widths: z.array(z.number().int().min(200).max(4096)).min(1).max(6).optional().describe("Capture each target across multiple widths, e.g. [390, 834, 1440]"),
     },
     annotations: READ,
-  }, async ({ nodeId, nodeIds, scale = 1 }) => {
+  }, async ({ nodeId, nodeIds, scale = 1, width, widths }) => {
     let targets;
     if (nodeIds?.length) {
       targets = [...new Set([...(nodeId ? [nodeId] : []), ...nodeIds])];
@@ -247,13 +249,19 @@ export function registerTools(server, ctx) {
     }
     const items = targets.map((id) => ({ id, target: ctx.getNode(id), ab: ctx.artboardOf(id) }));
     ctx.look(targets, "get_screenshot", items.length === 1 ? items[0].target.name : `${items.length} targets`);
+    const widthList = widths?.length ? [...new Set(widths)] : (width !== undefined ? [width] : [null]);
     const content = [];
     for (const { id, ab } of items) {
-      const shot = await ctx.renderer.screenshot({ artboardId: ab, nodeId: id, ...ctx.artboardSize(ab), scale });
-      content.push(
-        { type: "image", data: shot.png.toString("base64"), mimeType: "image/png" },
-        { type: "text", text: `${S().nodes[id].name} (${id}) · ${shot.width}×${shot.height}px at scale ${shot.scale}` },
-      );
+      const baseSize = ctx.artboardSize(ab);
+      for (const w of widthList) {
+        const size = w ? { width: w, height: baseSize.height, widthOverride: true } : baseSize;
+        const shot = await ctx.renderer.screenshot({ artboardId: ab, nodeId: id, ...size, scale });
+        const vpLabel = w ? ` @ ${w}px` : "";
+        content.push(
+          { type: "image", data: shot.png.toString("base64"), mimeType: "image/png" },
+          { type: "text", text: `${S().nodes[id].name} (${id})${vpLabel} · ${shot.width}×${shot.height}px at scale ${shot.scale}` },
+        );
+      }
     }
     return { content };
   });
