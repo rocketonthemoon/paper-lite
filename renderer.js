@@ -216,9 +216,9 @@ export class Renderer {
     return next;
   }
 
-  async load(artboardId, width, height) {
-    const url = `${this.baseUrl}/render/${encodeURIComponent(artboardId)}`;
+  async load(artboardId, width, height, { widthOverride = false } = {}) {
     const w = Math.max(1, Math.ceil(width)), h = Math.max(1, Math.ceil(height));
+    const url = `${this.baseUrl}/render/${encodeURIComponent(artboardId)}${widthOverride ? `?width=${w}` : ""}`;
     const key = this.contentKey?.() ?? null;
     const prev = this.shown;
     // Same artboard, same size, nothing changed since it loaded: the page already shows it.
@@ -237,9 +237,9 @@ export class Renderer {
   }
 
   /** Screenshot a node (rendered inside its artboard). Returns { png: Buffer, width, height, scale }. */
-  screenshot({ artboardId, nodeId, width, height, scale = 1, maxSize = 1600 }) {
+  screenshot({ artboardId, nodeId, width, height, scale = 1, maxSize = 1600, widthOverride = false }) {
     return this.run(async () => {
-      await this.load(artboardId, width, height);
+      await this.load(artboardId, width, height, { widthOverride });
       const rect = await this.evaluate(`(() => { const el = document.querySelector('[data-layer="${nodeId}"], .layer-${nodeId}'); if (!el) return null;
         const r = el.getBoundingClientRect(); return { x: r.left + scrollX, y: r.top + scrollY, w: r.width, h: r.height }; })()`);
       if (!rect || rect.w < 1 || rect.h < 1) throw new Error("Node has no visible box to capture");

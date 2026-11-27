@@ -517,3 +517,35 @@ test("design-tokens: analyzeDesignLint catches spacing, radii, font-size, shorth
   assert.ok(hints.some((h) => /backgroundColor: #ff00ff doesn't use a color token/.test(h)), hints.join("\n"));
   assert.deepEqual(analyzeDesignLint(["n1"], doc, { lint: false }), []);
 });
+
+test("htmlToSpecs captures data-component and data-slot, and normalizeProject preserves components", () => {
+  const { specs } = htmlToSpecs('<div data-component="hero-card"><span data-slot="title">Hi</span></div>');
+  assert.equal(specs[0].component, "hero-card");
+  assert.equal(specs[0].children[0].slot, "title");
+
+  const doc = normalizeProject({
+    pages: ["p"],
+    rootId: "p",
+    nodes: {
+      p: { name: "Page", tag: "div", children: ["c1"] },
+      c1: {
+        name: "Card", tag: "div", children: [],
+        componentId: "hero-card", componentKey: "root",
+        componentOverrides: { text: true, styles: ["width", "bad-style!"] },
+      },
+    },
+    components: {
+      "hero-card": {
+        id: "hero-card",
+        name: "hero-card",
+        tree: { key: "root", tag: "div", name: "Card", text: "", styles: { padding: 12 }, attrs: {}, children: [] },
+      },
+      "bad name": { id: "bad name", tree: { key: "root", tag: "div", children: [] } },
+    },
+  }, { warnings: [] });
+
+  assert.ok(doc.components["hero-card"]);
+  assert.equal(doc.components["bad name"], undefined);
+  assert.equal(doc.components["hero-card"].tree.styles.padding, "12px");
+  assert.deepEqual(doc.nodes.c1.componentOverrides, { text: true, styles: ["width"] });
+});

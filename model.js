@@ -20,6 +20,8 @@ const SAFE_SVG_VALUE = /^[\w\s.,#%()+-]*$/;
 const UNITLESS = new Set(["opacity", "zIndex", "flexGrow", "flexShrink", "fontWeight", "lineHeight", "order", "aspectRatio"]);
 const SAFE_URL = /^(https?:\/\/|data:image\/(png|jpe?g|gif|webp|svg\+xml);|\/|#|\.\/)/i;
 export const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+export const COMPONENT_NAME_RE = /^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/;
+export const SLOT_NAME_RE = /^[a-zA-Z0-9_-]{1,64}$/;
 const COMMENT_STATUSES = new Set(["open", "read", "replied", "resolved"]);
 
 export class HttpError extends Error {
@@ -332,7 +334,7 @@ export function emptyPage(name = "Page 1", id = newId()) {
 /** A new, empty project document: one empty page and an empty comments list. */
 export function emptyProject(id, name) {
   const page = emptyPage("Page 1");
-  return { version: 1, id, name: cleanName(name, "Untitled"), pages: [page.id], rootId: page.id, nodes: { [page.id]: page }, rootCss: emptyRootCss(), comments: [] };
+  return { version: 1, id, name: cleanName(name, "Untitled"), pages: [page.id], rootId: page.id, nodes: { [page.id]: page }, rootCss: emptyRootCss(), components: {}, comments: [] };
 }
 
 function normalizeComments(rawComments) {
@@ -426,6 +428,11 @@ export function normalizeProject(raw, { id, name, warnings = null } = {}) {
       }
       if (classes.length) nodes[nid].classes = classes;
     }
+    if (typeof n.componentId === "string" && COMPONENT_NAME_RE.test(n.componentId)) nodes[nid].componentId = n.componentId;
+    if (typeof n.componentRootId === "string" && ID_RE.test(n.componentRootId)) nodes[nid].componentRootId = n.componentRootId;
+    if (typeof n.componentKey === "string" && SLOT_NAME_RE.test(n.componentKey)) nodes[nid].componentKey = n.componentKey;
+    const ov = normalizeOverrides(n.componentOverrides);
+    if (ov) nodes[nid].componentOverrides = ov;
     for (const cid of Array.isArray(n.children) ? n.children : []) if (walk(cid, nid)) nodes[nid].children.push(cid);
     return nodes[nid];
   };
@@ -439,6 +446,7 @@ export function normalizeProject(raw, { id, name, warnings = null } = {}) {
     rootId,
     nodes,
     rootCss: normalizeRootCss(raw.rootCss, warnings),
+    components: normalizeComponents(raw.components, warnings),
     comments: normalizeComments(raw.comments),
   };
 }
@@ -459,6 +467,92 @@ function normalizeRootCss(raw, warnings) {
       const rule = cleanRule(r);
       if (Object.keys(rule.styles).length) out.rules.push(rule);
     } catch (err) { report(String(r.selector ?? "rule").slice(0, 60), err); }
+  }
+  return out;
+}
+
+function normalizeOverrides(raw) {
+  if (!raw || typeof raw !== "object") return undefined;
+  const out = {};
+  if (raw.text) out.text = true;
+  if (raw.tag) out.tag = true;
+  if (raw.name) out.name = true;
+  if (raw.classes) out.classes = true;
+  if (Array.isArray(raw.styles)) {
+    const s = [...new Set(raw.styles.filter((k) => typeof k === "string" && /^[a-zA-Z][a-zA-Z0-9]*$/.test(k)))];
+    if (s.length) out.styles = s;
+  }
+  if (Array.isArray(raw.attrs)) {
+    const a = [...new Set(raw.attrs.filter((k) => typeof k === "string" && /^[a-zA-Z][a-zA-Z0-9-]*$/.test(k)))];
+    if (a.length) out.attrs = a;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+export function normalizeComponentTree(raw, { warnings = null, depth = 0, usedKeys = new Set(), counter = { n: 0 } } = {}) {
+  if (!raw || typeof raw !== "object" || depth > 50) throw new HttpError(400, "Invalid component tree node");
+  const label = cleanName(raw.name, String(raw.tag || "Frame"));
+  let tag;
+  try {
+    tag = cleanTag(raw.tag);
+  } catch (err) {
+    if (!warnings) throw err;
+    warnings.push(`${label}: ${err.message}; using div`);
+    tag = "div";
+  }
+  let key = typeof raw.key === "string" && SLOT_NAME_RE.test(raw.key) ? raw.key : "";
+  if (!key || usedKeys.has(key)) {
+    do { counter.n += 1; key = `k${counter.n}`; } while (usedKeys.has(key));
+  }
+  usedKeys.add(key);
+  const slot = typeof raw.slot === "string" && SLOT_NAME_RE.test(raw.slot) ? raw.slot : undefined;
+  const noText = SVG_TAGS.has(tag) || VOID_TAGS.has(tag);
+  const styles = warnings ? lenientMerge(mergeStyles, raw.styles, warnings, label) : mergeStyles({}, raw.styles);
+  const attrs = warnings ? lenientMerge((b, p) => mergeAttrs(b, p, tag), raw.attrs, warnings, label) : mergeAttrs({}, raw.attrs, tag);
+  let classes = [];
+  if (raw.classes !== undefined) {
+    if (!warnings) classes = cleanClassList(raw.classes);
+    else {
+      for (const c of Array.isArray(raw.classes) ? raw.classes : String(raw.classes ?? "").split(/\s+/)) {
+        try { classes = cleanClassList([...classes, c]); } catch (err) { warnings.push(`${label}: ${err.message}`); }
+      }
+    }
+  }
+  const children = [];
+  if (!VOID_TAGS.has(tag) && Array.isArray(raw.children)) {
+    for (const child of raw.children) {
+      if (!child || typeof child !== "object") continue;
+      children.push(normalizeComponentTree(child, { warnings, depth: depth + 1, usedKeys, counter }));
+    }
+  }
+  return {
+    key,
+    ...(slot ? { slot } : {}),
+    tag,
+    name: label,
+    text: noText ? "" : String(raw.text ?? ""),
+    styles,
+    attrs,
+    ...(classes.length ? { classes } : {}),
+    children,
+  };
+}
+
+function normalizeComponents(raw, warnings) {
+  if (!raw || typeof raw !== "object") return {};
+  const out = {};
+  for (const [compId, def] of Object.entries(raw)) {
+    if (!COMPONENT_NAME_RE.test(compId) || !def || typeof def !== "object" || !def.tree) continue;
+    try {
+      out[compId] = {
+        id: compId,
+        name: cleanName(def.name, compId),
+        tree: normalizeComponentTree(def.tree, { warnings }),
+      };
+    } catch (err) {
+      if (!warnings) throw err;
+      warnings.push(`Component "${compId}": ${err.message}`);
+    }
   }
   return out;
 }

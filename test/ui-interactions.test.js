@@ -562,6 +562,14 @@ test("UI interactions: drawing, editing, shortcuts, panels, projects and live sy
     await waitFor(async () => (await cs(phoneTile.id, "paddingTop")) === "2px", "breakpoint applies inside the 390px artboard");
     assert.equal(await cs(tile.id, "paddingTop"), "10px", "but not inside the wider artboard");
 
+    // Canvas viewport preset toggle previews the 400px artboard at 390px without mutating saved styles.
+    const savedBoardWidth = (await state()).nodes[board].styles.width;
+    await ui.evalJs(`document.querySelector('#labels .ab-label[data-id="${board}"] .ab-vp-btn[data-vp="390"]').click()`);
+    await waitFor(async () => (await cs(tile.id, "paddingTop")) === "2px", "390px viewport toggle triggers @media breakpoint");
+    assert.equal((await state()).nodes[board].styles.width, savedBoardWidth, "viewport preview does not mutate saved width");
+    await ui.evalJs(`document.querySelector('#labels .ab-label[data-id="${board}"] .ab-vp-btn[data-vp="390"]').click()`);
+    await waitFor(async () => (await cs(tile.id, "paddingTop")) === "10px", "toggling off restores 400px layout");
+
     // Editing one variable restyles the layers.
     await waitFor(() => ui.evalJs(`Boolean(document.getElementById("root-css"))`), "editor");
     await applyRoot(css1.replace("--pad: 10px", "--pad: 14px").replace("#0000ff", "#00aa00"));
