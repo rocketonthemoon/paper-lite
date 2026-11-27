@@ -14,12 +14,12 @@ const PAPER_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const EXPECTED_TOOLS = [
-  "add_font", "create_artboard", "create_node", "create_page", "create_project", "delete_nodes", "delete_page",
+  "add_font", "create_artboard", "create_component", "create_node", "create_page", "create_project", "delete_component", "delete_nodes", "delete_page",
   "delete_project", "duplicate_nodes", "duplicate_project", "find_nodes", "finish_working_on_nodes", "get_basic_info",
   "get_children", "get_comments", "get_computed_styles", "get_guide", "get_jsx", "get_node_info", "get_root_css",
-  "get_screenshot", "get_selection", "get_tree_summary", "git_pull", "git_push", "git_status", "list_checkpoints", "list_fonts", "list_projects", "move_nodes", "open_project",
+  "get_screenshot", "get_selection", "get_tree_summary", "git_pull", "git_push", "git_status", "instantiate_component", "list_checkpoints", "list_components", "list_fonts", "list_projects", "move_nodes", "open_project",
   "redo", "remove_font", "rename_nodes", "rename_project", "reply_to_comment", "resolve_comment", "restore_checkpoint",
-  "save_checkpoint", "set_selection", "set_session_title", "set_text_content", "switch_page", "undo", "update_node",
+  "save_checkpoint", "set_selection", "set_session_title", "set_text_content", "switch_page", "undo", "update_component", "update_node",
   "update_page", "update_root_css", "update_styles", "write_html",
 ];
 
@@ -762,6 +762,93 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
   });
 
   // ---------------------------------------------------------------- fonts
+
+  await t.test("reusable components: create, instantiate, override, update propagation and undo", async () => {
+    await ok(B, "update_root_css", { css: ".nf-card { padding: 12px; } .nf-card-lg { border-radius: 16px; } .nf-badge { background: #0000ff; color: #fff; }" });
+    const mobileBoard = await ok(B, "create_artboard", { name: "Mobile", width: 390, height: 844 });
+    const desktopBoard = await ok(B, "create_artboard", { name: "Desktop", width: 1280, height: 800 });
+
+    const created = await ok(B, "create_component", {
+      name: "nf-card",
+      html: `<div class="nf-card" data-name="Show Card"><img data-slot="poster" src="https://example.com/default.jpg" alt="Poster"><h3 data-slot="title">Default Show</h3></div>`,
+    });
+    assert.equal(created.id, "nf-card");
+    assert.ok(created.slots.some((s) => s.slot === "poster") && created.slots.some((s) => s.slot === "title"));
+
+    // Instantiate via MCP tool with slot overrides on Desktop
+    const inst1 = await ok(B, "instantiate_component", {
+      component: "nf-card",
+      parentId: desktopBoard.id,
+      overrides: {
+        title: "Stranger Things",
+        poster: { attrs: { src: "https://example.com/st.jpg", alt: "ST" } },
+      },
+    });
+    assert.equal(inst1.component, "nf-card");
+
+    // Instantiate via write_html data-component + data-slot on Mobile
+    const wRes = await ok(B, "write_html", {
+      parentId: mobileBoard.id,
+      html: `<div data-component="nf-card"><h3 data-slot="title">Dark</h3></div>`,
+    });
+    const inst2Id = wRes.created[0].id;
+    const inst1Children = await ok(B, "get_children", { nodeId: inst1.id });
+    const inst2Children = await ok(B, "get_children", { nodeId: inst2Id });
+    const inst1TitleId = inst1Children[1].id;
+    const inst2TitleId = inst2Children[1].id;
+    assert.equal((await ok(B, "get_node_info", { nodeId: inst1TitleId })).text, "Stranger Things");
+    assert.equal((await ok(B, "get_node_info", { nodeId: inst2TitleId })).text, "Dark");
+
+    // Manual edit via set_text_content tracks override too
+    await ok(B, "set_text_content", { updates: [{ nodeId: inst2TitleId, text: "Dark (S3)" }] });
+
+    // Duplicate an instance -> also stays linked
+    const [dupInst] = await ok(B, "duplicate_nodes", { nodeIds: [inst1.id] });
+    assert.equal((await ok(B, "list_components")).find((c) => c.id === "nf-card").instanceCount, 3);
+
+    // Master update propagates class, tag, and a newly appended badge slot across ALL 3 instances while preserving overrides!
+    const up = await ok(B, "update_component", {
+      component: "nf-card",
+      patch: { tag: "article", addClasses: ["nf-card-lg"] },
+      appendHtml: { html: `<span data-slot="badge" class="nf-badge">TOP 10</span>` },
+    });
+    assert.equal(up.updatedInstances, 3);
+    assert.equal(up.createdNodes, 3);
+
+    const inst1Info = await ok(B, "get_node_info", { nodeId: inst1.id });
+    assert.equal(inst1Info.tag, "article");
+    assert.deepEqual(inst1Info.classes, ["nf-card", "nf-card-lg"]);
+    assert.equal(inst1Info.children.length, 3, "new badge slot added to instance");
+    assert.equal((await ok(B, "get_node_info", { nodeId: inst1TitleId })).text, "Stranger Things", "override preserved after master update");
+    assert.equal((await ok(B, "get_node_info", { nodeId: inst1Children[0].id })).attrs.src, "https://example.com/st.jpg", "poster override preserved");
+    assert.equal((await ok(B, "get_node_info", { nodeId: inst2TitleId })).text, "Dark (S3)", "manual edit override preserved");
+
+    const dupInfo = await ok(B, "get_node_info", { nodeId: dupInst.id });
+    assert.equal(dupInfo.tag, "article");
+    assert.equal(dupInfo.children.length, 3, "duplicated instance also received new badge slot");
+
+    // Undo restores previous master & removes added badge slots atomically
+    await ok(B, "undo");
+    assert.equal((await ok(B, "get_node_info", { nodeId: inst1.id })).tag, "div");
+    assert.equal((await ok(B, "get_node_info", { nodeId: inst1.id })).children.length, 2);
+    await ok(B, "redo");
+    assert.equal((await ok(B, "get_node_info", { nodeId: inst1.id })).children.length, 3);
+
+    // Create component from existing node + detach + delete component
+    const customBox = await ok(B, "create_node", { parentId: desktopBoard.id, name: "Banner", tag: "div", styles: { padding: 8 } });
+    const compFromNode = await ok(B, "create_component", { name: "banner-box", nodeId: customBox.id });
+    assert.equal(compFromNode.linkedSource, true);
+    assert.equal((await ok(B, "get_node_info", { nodeId: customBox.id })).component.id, "banner-box");
+
+    const delComp = await ok(B, "delete_component", { component: "nf-card" });
+    assert.equal(delComp.detachedInstances, 3);
+    assert.equal((await ok(B, "get_node_info", { nodeId: inst1.id })).component, undefined, "layers stay on canvas detached");
+
+    await ok(B, "delete_component", { component: "banner-box" });
+    await ok(B, "delete_nodes", { nodeIds: [mobileBoard.id, desktopBoard.id] });
+    await ok(B, "update_root_css", { classes: { "nf-card": null, "nf-card-lg": null, "nf-badge": null } });
+  });
+
   await t.test("fonts: list, add (Google + file), remove", async () => {
     const fontsBefore = await ok(B, "list_fonts");
     assert.ok(fontsBefore.some((f) => f.id === "builtin-geist" && f.cssFamily.startsWith("'Geist'")));
