@@ -165,7 +165,7 @@ async function startBrowser(bin) {
       runtimeErrors.push(msg.params.exceptionDetails?.exception?.description || msg.params.exceptionDetails?.text || "Runtime exception");
     } else if (msg.method === "Runtime.consoleAPICalled" && msg.params.type === "error") {
       const txt = (msg.params.args || []).map((a) => a.value ?? a.description ?? "").join(" ");
-      if (!/fonts\.googleapis|fonts\.gstatic|interactjs/i.test(txt)) runtimeErrors.push(txt);
+      if (!/fonts\.googleapis|fonts\.gstatic/i.test(txt)) runtimeErrors.push(txt);
     }
   });
 
@@ -1154,8 +1154,7 @@ test("browser: toast and dashboard dialog / card menu (Svelte)", { timeout: 120_
     assert.fail(`timed out waiting for ${label}`);
   };
   await cdp.send("Page.navigate", { url: `${srv.baseUrl}/#dashboard` });
-  // Wait for the load event too: the editor may toast then (e.g. when interact.js can't be fetched), which would
-  // replace the toast this test shows.
+  // Wait for the page to finish loading, so no toast from startup can replace the one this test shows.
   await waitFor(`document.readyState === "complete" && document.querySelector("#live.live") && document.querySelector("#dash-content [data-dash-menu]")`, "dashboard");
 
   // Toast: text is escaped, the action runs its callback and hides the toast.

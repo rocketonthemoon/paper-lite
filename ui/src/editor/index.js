@@ -4,7 +4,7 @@
 // by one module only is kept in that module.
 //
 // Each module's setup() registers its listeners and initial state, in the order the editor has always started up.
-// interact.js (drag and resize) and WeftRootCss (/root-css.js, shared with the server) are classic scripts on the page.
+// WeftRootCss (/root-css.js, shared with the server) is a classic script on the page.
 import { setup as coreSetup } from "./core.js";
 import { setup as inspectorSetup } from "./inspector.js";
 import { setup as viewSetup } from "./view.js";

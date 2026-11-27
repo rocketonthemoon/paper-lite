@@ -68,7 +68,7 @@ export default [
     },
   },
   {
-    // The editor engine: browser APIs, plus the classic scripts on the page (interact.js, /root-css.js).
+    // The editor engine: browser APIs, plus WeftRootCss (/root-css.js, a classic script on the page).
     files: ["ui/src/editor/**/*.js"],
     languageOptions: {
       ecmaVersion: 2024,
@@ -104,7 +104,6 @@ export default [
         getComputedStyle: "readonly",
         getSelection: "readonly",
         history: "readonly",
-        interact: "readonly",
         localStorage: "readonly",
         location: "readonly",
         navigator: "readonly",
