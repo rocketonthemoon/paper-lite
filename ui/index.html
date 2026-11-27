@@ -1244,7 +1244,6 @@ let followAgent = localStorage.getItem("weft:follow-agent") === "1";
 let followTimer = 0;
 let activeThreadId = null, draftCommentNodeId = null, showResolvedPins = false;
 let activitySessions = [];    // dashboard activity sessions
-let actFilter = "all";
 const clock = (iso) => { const d = new Date(iso); return Number.isNaN(+d) ? "" : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }); };
 
 const $ = (s, r = document) => r.querySelector(s);
@@ -2469,52 +2468,17 @@ async function uploadFonts(files) {
 // ---------------------------------------------------------------------------
 // Pages
 // ---------------------------------------------------------------------------
+// The page list is ui/src/components/PagesList.svelte (switch, rename, delete); this keeps the title in sync and
+// hands it the pages.
 function renderPages() {
   $("#project-name").textContent = S.name;
   document.title = `${S.name} · weft`;
-  if ($("#pages input")) return; // a rename is in progress; it re-renders when it finishes
-  $("#pages").innerHTML = S.pages.map((id) => {
-    const p = S.nodes[id];
-    const cnt = p.children ? p.children.length : 0;
-    return `<div class="page-row${id === S.rootId ? " cur" : ""}" data-page="${esc(id)}">
-      <span class="nm">${esc(p.name)}</span>
-      <span class="pg-cnt">${cnt}</span>
-      ${S.pages.length > 1 ? `<button class="icon-btn del" data-del-page="${esc(id)}" title="Delete page" aria-label="Delete page"><svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>` : ""}
-    </div>`;
-  }).join("");
+  window.weft.events.dispatchEvent(new Event("pages"));
 }
-
-$("#pages").addEventListener("click", async (e) => {
-  const del = e.target.closest("[data-del-page]");
-  if (del) {
-    const page = S.nodes[del.dataset.delPage];
-    if (confirm(`Delete page "${page.name}" and its ${page.children.length} artboard(s)? You can undo this.`)) await api("DELETE", `/api/pages/${encodeURIComponent(page.id)}`);
-    return;
-  }
-  const row = e.target.closest(".page-row");
-  if (row && row.dataset.page !== S.rootId && !row.querySelector("input")) api("POST", `/api/pages/${encodeURIComponent(row.dataset.page)}/open`);
-});
-$("#pages").addEventListener("dblclick", (e) => {
-  const row = e.target.closest(".page-row");
-  if (!row || e.target.closest("[data-del-page]")) return;
-  const id = row.dataset.page;
-  const nm = row.querySelector(".nm");
-  const input = Object.assign(document.createElement("input"), { value: S.nodes[id].name });
-  nm.replaceWith(input);
-  input.focus(); input.select();
-  let done = false;
-  const finish = (save) => {
-    if (done) return;
-    done = true;
-    const name = input.value.trim();
-    const changed = save && name && S.nodes[id] && name !== S.nodes[id].name;
-    input.replaceWith(nm); // restore the row first so live re-renders aren't held back
-    if (changed) { nm.textContent = name; api("PATCH", `/api/pages/${encodeURIComponent(id)}`, { name }).then(() => renderPages()); }
-    else renderPages();
-  };
-  input.addEventListener("keydown", (k) => { k.stopPropagation(); if (k.key === "Enter") finish(true); if (k.key === "Escape") finish(false); });
-  input.addEventListener("blur", () => finish(true));
-});
+function pagesModel() {
+  if (!S) return [];
+  return S.pages.map((id) => ({ id, name: S.nodes[id].name, artboards: S.nodes[id].children?.length || 0, current: id === S.rootId }));
+}
 $("#add-page").addEventListener("click", () => api("POST", "/api/pages", {}));
 
 // ---------------------------------------------------------------------------
@@ -2530,66 +2494,18 @@ function ago(iso) {
   return new Date(iso).toLocaleDateString();
 }
 
+// The menu's contents (project list, actions, the new / rename / delete forms) are
+// ui/src/components/ProjectMenu.svelte. This opens and closes it; "project-menu" tells it to start from the list.
 function openProjectMenu(open = projectMenu.hidden) {
   projectMenu.hidden = !open;
   $("#project-btn").setAttribute("aria-expanded", String(open));
-  if (open) renderProjectMenu();
+  if (open) window.weft.events.dispatchEvent(new Event("project-menu"));
 }
-
-function renderProjectMenu() {
-  projectMenu.innerHTML =
-    projects.map((p) => `<button data-open="${esc(p.id)}"${p.active ? ' class="cur"' : ""}><span class="dot" style="background:${esc(p.accentColor || "#9ad6a4")}"></span>` +
-      `<span class="pn">${esc(p.name)}</span>${p.active ? `<span class="check-slot"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M2.5 6.2l2.3 2.3 4.7-5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span>` : `<span class="meta">${p.artboards ?? 0}</span>`}</button>`).join("") +
-    `<div class="sep"></div>
-     <button data-act="new"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="pn">New project…</span></button>
-     <button data-act="dashboard"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1" stroke="currentColor" stroke-width="1.4"/><rect x="9" y="2.5" width="4.5" height="4.5" rx="1" stroke="currentColor" stroke-width="1.4"/><rect x="2.5" y="9" width="4.5" height="4.5" rx="1" stroke="currentColor" stroke-width="1.4"/><rect x="9" y="9" width="4.5" height="4.5" rx="1" stroke="currentColor" stroke-width="1.4"/></svg><span class="pn">All projects…</span><span class="meta">Ctrl P</span></button>
-     <div class="sep"></div>
-     <button data-act="rename">Rename “${esc(S.name)}”…</button>
-     <button data-act="duplicate">Duplicate “${esc(S.name)}”</button>
-     <button data-act="export-zip">Export “${esc(S.name)}” (.zip)</button>
-     <button data-act="delete" class="danger" ${projects.length < 2 ? "disabled title='The only project cannot be deleted'" : ""}>Delete “${esc(S.name)}”…</button>`;
-}
-
-function menuForm({ label, value = "", okText, danger = false, input = true, onOk }) {
-  projectMenu.innerHTML = `<div class="form"><div class="label" style="padding:0">${esc(label)}</div>
-    ${input ? `<label class="fld"><input id="menu-input" value="${esc(value)}"></label>` : ""}
-    <div class="btnrow"><button class="btn ${danger ? "danger-solid" : "primary"}" data-ok>${esc(okText)}</button><button class="btn" data-cancel>Cancel</button></div></div>`;
-  const field = $("#menu-input");
-  const submit = async () => {
-    const v = field ? field.value.trim() : true;
-    if (field && !v) return field.focus();
-    openProjectMenu(false);
-    await onOk(v);
-  };
-  projectMenu.querySelector("[data-ok]").onclick = submit;
-  projectMenu.querySelector("[data-cancel]").onclick = () => renderProjectMenu();
-  if (field) {
-    field.focus(); field.select();
-    field.addEventListener("keydown", (k) => { k.stopPropagation(); if (k.key === "Enter") submit(); if (k.key === "Escape") renderProjectMenu(); });
-  }
+function projectMenuModel() {
+  return { projects, current: S ? { id: S.id, name: S.name } : null };
 }
 
 $("#project-btn").addEventListener("click", () => openProjectMenu());
-projectMenu.addEventListener("click", async (e) => {
-  const open = e.target.closest("[data-open]");
-  if (open) {
-    openProjectMenu(false);
-    if (open.dataset.open !== S.id) await api("POST", `/api/projects/${encodeURIComponent(open.dataset.open)}/open`);
-    return;
-  }
-  const act = e.target.closest("[data-act]")?.dataset.act;
-  if (act === "dashboard") { openProjectMenu(false); return openDashboard(true); }
-  if (act === "new") menuForm({ label: "New project name", value: "Untitled", okText: "Create", onOk: (name) => api("POST", "/api/projects", { name }) });
-  if (act === "rename") menuForm({ label: "Rename project", value: S.name, okText: "Rename", onOk: (name) => api("PATCH", `/api/projects/${encodeURIComponent(S.id)}`, { name }) });
-  if (act === "duplicate") {
-    openProjectMenu(false);
-    const copy = await api("POST", `/api/projects/${encodeURIComponent(S.id)}/duplicate`, {});
-    if (copy) toast(`Created “${copy.name}”`);
-  }
-  if (act === "export-zip") { openProjectMenu(false); return downloadZip(S.id); }
-  if (act === "delete") menuForm({ label: `Delete “${S.name}” permanently? This cannot be undone.`, okText: "Delete project", danger: true, input: false,
-    onOk: () => api("DELETE", `/api/projects/${encodeURIComponent(S.id)}`) });
-});
 document.addEventListener("pointerdown", (e) => { if (!projectMenu.hidden && !e.target.closest("#project-menu, #project-btn")) openProjectMenu(false); });
 
 // ---------------------------------------------------------------------------
@@ -2795,60 +2711,25 @@ function sortedProjects() {
 
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
-function thumbMarkup(p, compact = false) {
-  const bg = p.bg || "#eef2f6";
-  const empty = !p.artboards;
-  return `<div class="dash-thumb" data-open-project="${esc(p.id)}" style="background:${esc(bg)}">
-    ${empty
-      ? `<div class="dash-empty-thumb">${compact ? '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="3" y="4" width="18" height="16" rx="2" stroke-dasharray="3 2"/></svg>' : '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="3" y="4" width="18" height="16" rx="2" stroke-dasharray="3 2"/></svg><span>Empty canvas</span>'}</div>`
-      : `<div class="dash-thumb-world"></div>`}
-    ${!compact && p.agentEditing ? '<span class="dash-agent-chip">Agent editing</span>' : ""}
-  </div>`;
+// The dashboard's project grid / list, recent projects and activity feed are ui/src/components/dashboard/*.svelte.
+// This keeps the header (counts, search, sort, view), the card menu, the dialog and thumbnail drawing (loadThumb),
+// and its delegated click listeners still handle the cards (data-open-project, data-dash-menu, data-act-revert).
+function dashModel() {
+  return {
+    list: sortedProjects(),
+    view: dashView,
+    query: dashQuery.trim(),
+    recent: [...projects].sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt))).slice(0, 4),
+    sessions: activitySessions,
+  };
 }
-
-function renderDashSidebar() {
-  const recentEl = $("#dash-recent-list");
-  if (recentEl) {
-    const recent = [...projects].sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt))).slice(0, 4);
-    recentEl.innerHTML = recent.map((p) => `
-      <button type="button" class="dash-recent-row${p.active ? " active" : ""}" data-open-project="${esc(p.id)}">
-        <span class="dash-recent-dot" style="background:${esc(p.accentColor || "#9ad6a4")}"></span>
-        <span class="dash-recent-nm">${esc(p.name)}</span>
-        ${p.active ? '<span class="dash-open-pill">Open</span>' : `<span class="dash-recent-meta">${esc(ago(p.updatedAt).replace(" ago", ""))}</span>`}
-      </button>`).join("");
-  }
-  const mcpUrlEl = $("#dash-mcp-url");
-  if (mcpUrlEl) mcpUrlEl.textContent = `${location.origin}/mcp`;
-}
-
 function renderDashActivity() {
-  const el = $("#dash-activity");
-  if (!el) return;
-  const filtered = activitySessions.filter((s) => {
-    if (actFilter === "agent") return s.source === "mcp";
-    if (actFilter === "you") return s.source !== "mcp";
-    return true;
-  });
-  const fmtTools = (tc) => Object.entries(tc || {}).map(([k, v]) => `${k} ×${v}`).join(" · ");
-  el.innerHTML = `
-    <div class="dash-act-head">
-      <strong>Agent activity</strong>
-      <span>Every MCP write, grouped into sessions · today</span>
-      <div class="seg">
-        ${["all", "agent", "you"].map((f) => `<button type="button" data-act-filter="${f}" class="${actFilter === f ? "on" : ""}">${f === "all" ? "All" : f === "agent" ? "Agent" : "You"}</button>`).join("")}
-      </div>
-    </div>
-    ${filtered.length ? filtered.slice(0, 8).map((s) => `
-      <div class="dash-act-row">
-        <span class="dash-act-ic${s.live ? " live" : ""}"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 2l1.4 3.6L13 7l-3.6 1.4L8 12l-1.4-3.6L3 7l3.6-1.4z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg></span>
-        <div class="dash-act-info">
-          <strong>${esc(s.title || `${plural(s.editCount || 1, "edit")} on ${s.artboard || "Canvas"}`)}</strong>
-          <span>${esc(s.projectName || "Project")} · ${esc(s.artboard || "Page 1")} · ${esc(clock(s.startedAt))}</span>
-        </div>
-        <span class="dash-act-tools">${esc(fmtTools(s.toolCounts))}</span>
-        <span class="dash-act-pill${s.live ? " live" : ""}">${s.live ? "Live" : s.reverted ? "Reverted" : "Done"}</span>
-        <button type="button" class="btn" data-act-revert="${esc(s.id)}" ${s.live || s.reverted || !s.checkpointId ? "disabled" : ""}><svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4.5 6.5H10a3.5 3.5 0 010 7H7M6.5 4l-2.5 2.5L6.5 9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>Revert session</button>
-      </div>`).join("") : `<div class="dash-act-empty">No activity sessions recorded yet.</div>`}`;
+  window.weft.events.dispatchEvent(new Event("dashboard"));
+}
+function clearDashSearch() {
+  dashQuery = ""; $("#dash-search").value = "";
+  $("#dash-search-clear").hidden = true; $("#dash-search-kbd").hidden = false;
+  renderDashboard();
 }
 
 function renderDashboard() {
@@ -2861,56 +2742,9 @@ function renderDashboard() {
   $("#dash-summary").textContent = dashQuery.trim()
     ? `${plural(list.length, "matching project")} · ${projects.length} total`
     : `${plural(projects.length, "project")} · ${totalLayers.toLocaleString()} layers`;
-  renderDashSidebar();
-  renderDashActivity();
-  if (!list.length) {
-    dashContent.innerHTML = `<div class="dash-empty">
-      <span class="dash-empty-ic"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.5"/><path d="M10.5 10.5L14 14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></span>
-      <div style="display:flex;flex-direction:column;gap:4px">
-        <strong>No projects match “${esc(dashQuery.trim())}”</strong>
-        <p>Try a different project name, clear your filter, or create a new project.</p>
-      </div>
-      <div class="dash-empty-acts">
-        <button class="btn" id="dash-clear">Clear search</button>
-        <button class="btn primary" id="dash-empty-new"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span>New project</span></button>
-      </div></div>`;
-    $("#dash-clear").onclick = () => { dashQuery = ""; $("#dash-search").value = ""; $("#dash-search-clear").hidden = true; $("#dash-search-kbd").hidden = false; renderDashboard(); };
-    $("#dash-empty-new").onclick = () => $("#dash-new").click();
-    return;
-  }
-  const menuSvg = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="3.5" cy="8" r="1.3"/><circle cx="8" cy="8" r="1.3"/><circle cx="12.5" cy="8" r="1.3"/></svg>';
-  if (dashView === "list") {
-    dashContent.innerHTML = `<div class="dash-list">${list.map((p) => `
-      <div class="dash-row${p.active ? " active" : ""}" data-pid="${esc(p.id)}">
-        ${thumbMarkup(p, true)}
-        <div class="dash-meta" data-open-project="${esc(p.id)}">
-          <div class="dash-row-title"><span class="dash-name">${esc(p.name)}</span>${p.active ? '<span class="dash-inline-badge">Open</span>' : ""}${p.agentEditing ? '<span class="dash-inline-agent">Agent editing</span>' : ""}</div>
-          <div class="dash-sub">Updated ${ago(p.updatedAt)}</div>
-        </div>
-        <div class="dash-row-stats">
-          <span>${plural(p.pages ?? 1, "page")} · ${plural(p.artboards ?? 0, "artboard")} · ${(p.layers ?? 0).toLocaleString()} ${p.layers === 1 ? "layer" : "layers"}</span>
-        </div>
-        <button class="icon-btn" data-dash-menu="${esc(p.id)}" aria-expanded="false" title="Project actions" aria-label="Project actions">${menuSvg}</button>
-      </div>`).join("")}</div>`;
-  } else {
-    dashContent.innerHTML = `<div class="dash-grid">${list.map((p) => `
-      <article class="dash-card${p.active ? " active" : ""}" data-pid="${esc(p.id)}">
-        ${thumbMarkup(p, false)}
-        <div class="dash-card-foot">
-          <div class="dash-meta" data-open-project="${esc(p.id)}">
-            <div class="dash-name-row"><span class="dash-name">${esc(p.name)}</span>${p.active ? '<span class="dash-inline-badge">Open</span>' : ""}</div>
-            <div class="dash-sub">${plural(p.pages ?? 1, "page")} · ${plural(p.artboards ?? 0, "artboard")} · ${(p.layers ?? 0).toLocaleString()} ${p.layers === 1 ? "layer" : "layers"} · ${ago(p.updatedAt)}</div>
-          </div>
-          <button class="icon-btn" data-dash-menu="${esc(p.id)}" aria-expanded="false" title="Project actions" aria-label="Project actions">${menuSvg}</button>
-        </div>
-      </article>`).join("")}${!dashQuery.trim() ? `<button type="button" class="dash-card-new" id="dash-grid-new"><span class="dash-card-new-ic"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 3v10M3 8h10" stroke="#1d1d1f" stroke-width="1.6" stroke-linecap="round"/></svg></span><strong>New project</strong><span>Starts empty with Page 1. Agents can also call <code>create_project</code>.</span></button>` : ""}</div>`;
-    const gn = $("#dash-grid-new");
-    if (gn) gn.onclick = () => $("#dash-new").click();
-  }
-  dashContent.querySelectorAll(".dash-thumb").forEach((el) => {
-    const p = projects.find((x) => x.id === el.dataset.openProject);
-    if (p && p.artboards) loadThumb(el, p);
-  });
+  const mcpUrlEl = $("#dash-mcp-url");
+  if (mcpUrlEl) mcpUrlEl.textContent = `${location.origin}/mcp`;
+  window.weft.events.dispatchEvent(new Event("dashboard"));
 }
 
 function closeDashModal() {
@@ -2966,11 +2800,7 @@ $("#dash-search").addEventListener("keydown", (e) => {
     else { $("#dash-search").blur(); openDashboard(false); }
   }
 });
-$("#dash-search-clear").addEventListener("click", () => {
-  dashQuery = ""; $("#dash-search").value = "";
-  $("#dash-search-clear").hidden = true; $("#dash-search-kbd").hidden = false;
-  renderDashboard(); $("#dash-search").focus();
-});
+$("#dash-search-clear").addEventListener("click", () => { clearDashSearch(); $("#dash-search").focus(); });
 $("#dash-sort").addEventListener("change", (e) => { dashSort = e.target.value; renderDashboard(); });
 document.querySelectorAll("[data-dash-view]").forEach((b) => b.addEventListener("click", () => {
   dashView = b.dataset.dashView;
@@ -3053,8 +2883,6 @@ $("#dash-copy-mcp")?.addEventListener("click", () => {
   copyText(`claude mcp add --transport http weft ${location.origin}/mcp`, "Copied MCP command");
 });
 $("#dash-activity")?.addEventListener("click", async (e) => {
-  const fb = e.target.closest("[data-act-filter]");
-  if (fb) { actFilter = fb.dataset.actFilter; return renderDashActivity(); }
   const rb = e.target.closest("[data-act-revert]");
   if (rb) {
     const res = await api("POST", `/api/activity/${encodeURIComponent(rb.dataset.actRevert)}/revert`);
@@ -3065,7 +2893,6 @@ $("#dash-activity")?.addEventListener("click", async (e) => {
 dashModal.addEventListener("pointerdown", (e) => { if (e.target === dashModal) closeDashModal(); });
 document.addEventListener("pointerdown", (e) => { if (!dashMenu.hidden && !e.target.closest("#dash-menu, [data-dash-menu]")) closeDashMenu(); });
 window.addEventListener("hashchange", () => openDashboard(location.hash === "#dashboard"));
-if (location.hash === "#dashboard") openDashboard(true);
 
 // ---------------------------------------------------------------------------
 // Keyboard
@@ -3305,6 +3132,19 @@ window.weft = {
   h: { px, num, hex6, resolveVars, baseStylesOf, rulesUsing, kebabCss, fontStack, classableStyles, TAGS, TEXT_TAGS, VOID_TAGS, SVG_TAGS },
   // Inspector header (RightHead.svelte)
   rightHeadModel: () => rightHeadModel(),
+  // Project menu (ProjectMenu.svelte)
+  projectMenu: () => projectMenuModel(),
+  closeProjectMenu: () => openProjectMenu(false),
+  openDashboard: () => openDashboard(true),
+  downloadZip: (id) => downloadZip(id),
+  // Dashboard (dashboard/*.svelte)
+  dashboard: () => dashModel(),
+  loadThumb: (el, p) => loadThumb(el, p),
+  clearDashSearch: () => clearDashSearch(),
+  ago: (iso) => ago(iso),
+  plural: (n, word) => plural(n, word),
+  // Pages (PagesList.svelte)
+  pages: () => pagesModel(),
   // Layers tree (LayersPanel.svelte)
   layerRows: () => layerRows(),
   select: (id) => select(id),
@@ -3389,7 +3229,7 @@ function connect() {
   });
   es.addEventListener("projects", (ev) => {
     projects = JSON.parse(ev.data).projects || [];
-    if (!projectMenu.hidden && !projectMenu.querySelector(".form")) renderProjectMenu();
+    window.weft.events.dispatchEvent(new Event("projects"));
     if (!dashEl.hidden) renderDashboard();
   });
   es.addEventListener("activity", (ev) => {
@@ -3751,6 +3591,8 @@ setTool("select");
 applyView();
 setRightTab(rightTab);
 connect();
+// Opened at /#dashboard: show it once everything above (including window.weft) is set up.
+if (location.hash === "#dashboard") openDashboard(true);
 document.fonts?.ready.then(updateOverlay);
 window.addEventListener("load", setupInteract);
 </script>

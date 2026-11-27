@@ -905,3 +905,139 @@ test("browser: Inspector (Svelte): updates held while typing, Escape cancels, En
   await cdp.evalJs("select(null)");
   await waitFor(`document.getElementById("root-css")?.value.includes(".card")`, "page panel with root CSS");
 });
+
+test("browser: pages list (Svelte): rename survives live updates, Escape cancels, click switches page", { timeout: 120_000 }, async (t) => {
+  const browserBin = findBrowser();
+  if (!browserBin) {
+    t.skip("No headless Chromium/Chrome binary found");
+    return;
+  }
+  const srv = await startTestServer();
+  t.after(() => srv.stop());
+  const cdp = await startBrowser(browserBin);
+  t.after(() => cdp.stop());
+  const rest = async (method, url, body) => {
+    const res = await fetch(srv.baseUrl + url, { method, headers: { "content-type": "application/json" }, body: body && JSON.stringify(body) });
+    assert.ok(res.ok, `${method} ${url} → ${res.status}`);
+    return res.json();
+  };
+  const waitFor = async (expr, label) => {
+    for (let i = 0; i < 100; i++) { if (await cdp.evalJs(expr)) return; await sleep(50); }
+    assert.fail(`timed out waiting for ${label}`);
+  };
+  const s0 = await rest("GET", "/api/state");
+  const p2 = await rest("POST", "/api/pages", { name: "Second" });
+  await rest("POST", `/api/pages/${s0.rootId}/open`);
+  await cdp.send("Page.navigate", { url: srv.baseUrl });
+  await waitFor(`document.querySelectorAll("#pages .page-row").length === 2`, "page rows");
+  const row = (id) => `document.querySelector('#pages .page-row[data-page="${id}"]')`;
+  assert.equal(await cdp.evalJs(`${row(s0.rootId)}.classList.contains("cur")`), true);
+
+  // Rename: the box keeps what was typed through a live update; Escape cancels.
+  await cdp.evalJs(`${row(p2.id)}.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }))`);
+  await waitFor(`document.activeElement === document.querySelector("#pages input")`, "rename box");
+  await cdp.evalJs(`(() => { const i = document.querySelector("#pages input"); i.value = "Half"; i.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+  await rest("POST", "/api/pages", { name: "Third" });
+  await waitFor(`document.querySelectorAll("#pages .page-row").length === 3`, "live update");
+  assert.equal(await cdp.evalJs(`document.querySelector("#pages input").value`), "Half");
+  await cdp.evalJs(`document.querySelector("#pages input").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))`);
+  await waitFor(`!document.querySelector("#pages input") && ${row(p2.id)}.querySelector(".nm").textContent === "Second"`, "cancelled");
+  assert.equal((await rest("GET", "/api/state")).nodes[p2.id].name, "Second");
+  // Clicking a row switches page.
+  await cdp.evalJs(`${row(p2.id)}.click()`);
+  await waitFor(`${row(p2.id)}.classList.contains("cur")`, "switched page");
+});
+
+test("browser: project menu (Svelte): forms, Cancel / Escape back to the list, live list, outside click closes", { timeout: 120_000 }, async (t) => {
+  const browserBin = findBrowser();
+  if (!browserBin) {
+    t.skip("No headless Chromium/Chrome binary found");
+    return;
+  }
+  const srv = await startTestServer();
+  t.after(() => srv.stop());
+  const cdp = await startBrowser(browserBin);
+  t.after(() => cdp.stop());
+  const rest = async (method, url, body) => {
+    const res = await fetch(srv.baseUrl + url, { method, headers: { "content-type": "application/json" }, body: body && JSON.stringify(body) });
+    assert.ok(res.ok, `${method} ${url} → ${res.status}`);
+    return res.json();
+  };
+  const waitFor = async (expr, label) => {
+    for (let i = 0; i < 100; i++) { if (await cdp.evalJs(expr)) return; await sleep(50); }
+    assert.fail(`timed out waiting for ${label}`);
+  };
+  await cdp.send("Page.navigate", { url: srv.baseUrl });
+  await waitFor(`document.querySelector("#live.live") && document.getElementById("project-name").textContent`, "app");
+  // Project menu: rename form, Cancel / Escape back to the list; the list updates live, and an open form survives it.
+  await cdp.evalJs(`document.getElementById("project-btn").click()`);
+  await waitFor(`!document.getElementById("project-menu").hidden && document.querySelector('#project-menu [data-act="rename"]')`, "menu open");
+  await cdp.evalJs(`document.querySelector('#project-menu [data-act="rename"]').click()`);
+  await waitFor(`document.activeElement?.id === "menu-input"`, "rename form");
+  await cdp.evalJs(`document.querySelector("#project-menu [data-cancel]").click()`);
+  await waitFor(`document.querySelector('#project-menu [data-act="rename"]')`, "back to the list");
+  await rest("POST", "/api/projects", { name: "Made elsewhere" });
+  await waitFor(`[...document.querySelectorAll("#project-menu .pn")].some((e) => e.textContent === "Made elsewhere")`, "list updates live");
+  await cdp.evalJs(`document.querySelector('#project-menu [data-act="new"]').click()`);
+  await waitFor(`document.activeElement?.id === "menu-input"`, "new form");
+  await cdp.evalJs(`(() => { const i = document.getElementById("menu-input"); i.value = "Typed name"; i.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+  await rest("POST", "/api/projects", { name: "Another" });
+  await sleep(300);
+  assert.equal(await cdp.evalJs(`document.getElementById("menu-input")?.value`), "Typed name", "form survives live updates");
+  await cdp.evalJs(`document.getElementById("menu-input").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))`);
+  await waitFor(`!document.getElementById("menu-input") && !document.getElementById("project-menu").hidden`, "Escape returns to the list, menu stays open");
+  // Clicking outside closes it.
+  await cdp.evalJs(`document.getElementById("stage").dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }))`);
+  assert.equal(await cdp.evalJs(`document.getElementById("project-menu").hidden`), true);
+});
+
+test("browser: dashboard (Svelte): thumbnails kept across unrelated updates, activity filter, clear search, new-project card", { timeout: 120_000 }, async (t) => {
+  const browserBin = findBrowser();
+  if (!browserBin) {
+    t.skip("No headless Chromium/Chrome binary found");
+    return;
+  }
+  const srv = await startTestServer();
+  t.after(() => srv.stop());
+  const cdp = await startBrowser(browserBin);
+  t.after(() => cdp.stop());
+  const rest = async (method, url, body) => {
+    const res = await fetch(srv.baseUrl + url, { method, headers: { "content-type": "application/json" }, body: body && JSON.stringify(body) });
+    assert.ok(res.ok, `${method} ${url} → ${res.status}`);
+    return res.json();
+  };
+  const waitFor = async (expr, label) => {
+    for (let i = 0; i < 100; i++) { if (await cdp.evalJs(expr)) return; await sleep(50); }
+    assert.fail(`timed out waiting for ${label}`);
+  };
+  const a = await rest("GET", "/api/state");
+  const other = await rest("POST", "/api/projects", { name: "Other" });
+  await rest("POST", `/api/projects/${a.id}/open`);
+  await rest("POST", "/api/nodes", { parentId: a.rootId, tag: "div", name: "Board", styles: { width: "300px", height: "200px" } });
+  await cdp.send("Page.navigate", { url: `${srv.baseUrl}/#dashboard` });
+  const card = (id) => `document.querySelector('#dash-content [data-pid="${id}"]')`;
+  await waitFor(`${card(a.id)}?.querySelector(".dash-thumb-world")?.children.length > 0`, "A's thumbnail drawn");
+
+  // An update to another project leaves A's drawn thumbnail alone.
+  await cdp.evalJs(`${card(a.id)}.querySelector(".dash-thumb-world").firstElementChild.__probe = 1`);
+  await rest("PATCH", `/api/projects/${other.id}`, { name: "Other renamed" });
+  await waitFor(`${card(other.id)}?.querySelector(".dash-name").textContent === "Other renamed"`, "rename shown");
+  assert.equal(await cdp.evalJs(`${card(a.id)}.querySelector(".dash-thumb-world").firstElementChild.__probe`), 1, "thumbnail not redrawn");
+
+  // Activity filter.
+  await waitFor(`document.querySelectorAll("#dash-activity .dash-act-row").length === 1`, "one session (from You)");
+  await cdp.evalJs(`document.querySelector('#dash-activity [data-act-filter="agent"]').click()`);
+  await waitFor(`document.querySelector("#dash-activity .dash-act-empty")`, "agent filter: none");
+  await cdp.evalJs(`document.querySelector('#dash-activity [data-act-filter="you"]').click()`);
+  await waitFor(`document.querySelectorAll("#dash-activity .dash-act-row").length === 1`, "you filter");
+
+  // Search with no match → empty state → Clear search brings the cards back.
+  await cdp.evalJs(`(() => { const i = document.getElementById("dash-search"); i.value = "nothing like this"; i.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+  await waitFor(`document.querySelector("#dash-content .dash-empty strong")?.textContent === "No projects match “nothing like this”"`, "empty state");
+  await cdp.evalJs(`document.getElementById("dash-clear").click()`);
+  await waitFor(`document.querySelectorAll("#dash-content .dash-card").length === 2 && document.getElementById("dash-search").value === ""`, "cleared");
+
+  // The "New project" card opens the dialog.
+  await cdp.evalJs(`document.getElementById("dash-grid-new").click()`);
+  await waitFor(`!document.getElementById("dash-modal").hidden && document.getElementById("dash-modal-input")`, "new project dialog");
+});

@@ -106,3 +106,22 @@ test("throttled saves reach disk, and pending saves are flushed on shutdown", { 
   assert.equal((await readDoc(s0.id)).nodes[node.id].name, "Saved on switch");
   await srv.stop("SIGKILL");
 });
+
+test("activity sessions stay with their project when another project is created or opened", { timeout: 60_000 }, async (t) => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "weft-sessions-"));
+  const srv = await startServer(dataDir);
+  t.after(async () => { await srv.stop(); await fs.rm(dataDir, { recursive: true, force: true }); });
+  const call = api(srv.baseUrl);
+  const a = await call("GET", "/api/state");
+  await call("POST", "/api/nodes", { parentId: a.rootId, tag: "div", name: "Edit in A" });
+  const b = await call("POST", "/api/projects", { name: "B" }); // creates and opens B
+  const ids = (list) => list.map((s) => s.id);
+  let sessions = (await call("GET", "/api/activity")).sessions;
+  assert.equal(new Set(ids(sessions)).size, sessions.length, "no session listed twice");
+  assert.deepEqual(sessions.map((s) => s.projectId), [a.id], "A's session belongs to A only");
+  await call("POST", "/api/nodes", { parentId: (await call("GET", "/api/state")).rootId, tag: "div", name: "Edit in B" });
+  await call("POST", `/api/projects/${a.id}/open`);
+  sessions = (await call("GET", "/api/activity")).sessions;
+  assert.equal(new Set(ids(sessions)).size, sessions.length, "no session listed twice after switching back");
+  assert.deepEqual(sessions.map((s) => s.projectId).sort(), [a.id, b.id].sort());
+});
