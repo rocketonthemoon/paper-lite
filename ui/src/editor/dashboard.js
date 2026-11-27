@@ -125,9 +125,57 @@ function openDashModal({ title, message = "", value = "", okText, danger = false
   window.weft.events.dispatchEvent(new Event("dash-modal"));
 }
 
-async function openProjectFromDash(id) {
+export async function openProjectFromDash(id) {
   if (id !== ed.S?.id) await api("POST", `/api/projects/${encodeURIComponent(id)}/open`);
   openDashboard(false);
+}
+
+// A card's menu button (../components/dashboard/DashContent.svelte): open the menu (DashMenu.svelte) below it.
+export function openDashMenu(pid, btn) {
+  if (!ed.projects.some((x) => x.id === pid)) return;
+  closeDashMenu();
+  btn.setAttribute("aria-expanded", "true");
+  dashMenu.dataset.pid = pid;
+  window.weft.events.dispatchEvent(new Event("dash-menu")); // DashMenu.svelte
+  const r = btn.getBoundingClientRect();
+  dashMenu.hidden = false;
+  dashMenu.style.left = `${Math.max(8, Math.min(window.innerWidth - 208, r.right - 200))}px`;
+  dashMenu.style.top = `${Math.min(window.innerHeight - 200, r.bottom + 4)}px`;
+}
+
+// The card menu's items, on the project it was opened for.
+export async function dashMenuAction(act) {
+  const pid = dashMenu.dataset.pid;
+  const p = ed.projects.find((x) => x.id === pid);
+  closeDashMenu();
+  if (!p) return;
+  if (act === "open") return openProjectFromDash(pid);
+  if (act === "rename") return openDashModal({
+    title: "Rename project",
+    value: p.name,
+    okText: "Rename",
+    onOk: (name) => api("PATCH", `/api/projects/${encodeURIComponent(pid)}`, { name }),
+  });
+  if (act === "duplicate") {
+    const copy = await api("POST", `/api/projects/${encodeURIComponent(pid)}/duplicate`, {});
+    if (copy) toast(`Created “${copy.name}”`);
+    return;
+  }
+  if (act === "export-zip") return downloadZip(pid);
+  if (act === "delete") return openDashModal({
+    title: `Delete ${p.name}?`,
+    message: `This permanently removes ${plural(p.pages ?? 1, "page")}, ${plural(p.artboards ?? 0, "artboard")}, and ${(p.layers ?? 0).toLocaleString()} ${p.layers === 1 ? "layer" : "layers"} from disk. This action cannot be undone.`,
+    okText: "Delete project",
+    danger: true,
+    input: false,
+    onOk: () => api("DELETE", `/api/projects/${encodeURIComponent(pid)}`),
+  });
+}
+
+// "Revert session" in the activity feed (DashActivity.svelte).
+export async function revertSession(id) {
+  const res = await api("POST", `/api/activity/${encodeURIComponent(id)}/revert`);
+  if (res?.ok) toast("Reverted session to checkpoint");
 }
 
 // Listeners and initial state; ./index.js runs each module's setup() once, in startup order.
@@ -168,71 +216,9 @@ export function setup() {
     },
   }));
 
-  dashContent.addEventListener("click", (e) => {
-    const menuBtn = e.target.closest("[data-dash-menu]");
-    if (menuBtn) {
-      e.stopPropagation();
-      const pid = menuBtn.dataset.dashMenu;
-      const p = ed.projects.find((x) => x.id === pid);
-      if (!p) return;
-      closeDashMenu();
-      menuBtn.setAttribute("aria-expanded", "true");
-      dashMenu.dataset.pid = pid;
-      window.weft.events.dispatchEvent(new Event("dash-menu")); // DashMenu.svelte
-      const r = menuBtn.getBoundingClientRect();
-      dashMenu.hidden = false;
-      dashMenu.style.left = `${Math.max(8, Math.min(window.innerWidth - 208, r.right - 200))}px`;
-      dashMenu.style.top = `${Math.min(window.innerHeight - 200, r.bottom + 4)}px`;
-      return;
-    }
-    const openEl = e.target.closest("[data-open-project]");
-    if (openEl) openProjectFromDash(openEl.dataset.openProject);
-  });
-
-  dashMenu.addEventListener("click", async (e) => {
-    const act = e.target.closest("[data-dact]")?.dataset.dact;
-    const pid = dashMenu.dataset.pid;
-    const p = ed.projects.find((x) => x.id === pid);
-    closeDashMenu();
-    if (!act || !p) return;
-    if (act === "open") return openProjectFromDash(pid);
-    if (act === "rename") return openDashModal({
-      title: "Rename project",
-      value: p.name,
-      okText: "Rename",
-      onOk: (name) => api("PATCH", `/api/projects/${encodeURIComponent(pid)}`, { name }),
-    });
-    if (act === "duplicate") {
-      const copy = await api("POST", `/api/projects/${encodeURIComponent(pid)}/duplicate`, {});
-      if (copy) toast(`Created “${copy.name}”`);
-      return;
-    }
-    if (act === "export-zip") return downloadZip(pid);
-    if (act === "delete") return openDashModal({
-      title: `Delete ${p.name}?`,
-      message: `This permanently removes ${plural(p.pages ?? 1, "page")}, ${plural(p.artboards ?? 0, "artboard")}, and ${(p.layers ?? 0).toLocaleString()} ${p.layers === 1 ? "layer" : "layers"} from disk. This action cannot be undone.`,
-      okText: "Delete project",
-      danger: true,
-      input: false,
-      onOk: () => api("DELETE", `/api/projects/${encodeURIComponent(pid)}`),
-    });
-  });
-
-  $("#dash-recent-list")?.addEventListener("click", (e) => {
-    const row = e.target.closest("[data-open-project]");
-    if (row) openProjectFromDash(row.dataset.openProject);
-  });
   $("#dash-copy-mcp")?.addEventListener("click", () => {
     copyText(`claude mcp add --transport http weft ${location.origin}/mcp`, "Copied MCP command");
   });
-  $("#dash-activity")?.addEventListener("click", async (e) => {
-    const rb = e.target.closest("[data-act-revert]");
-    if (rb) {
-      const res = await api("POST", `/api/activity/${encodeURIComponent(rb.dataset.actRevert)}/revert`);
-      if (res?.ok) toast("Reverted session to checkpoint");
-    }
-  });
-
   dashModal.addEventListener("pointerdown", (e) => { if (e.target === dashModal) closeDashModal(); });
   document.addEventListener("pointerdown", (e) => { if (!dashMenu.hidden && !e.target.closest("#dash-menu, [data-dash-menu]")) closeDashMenu(); });
   window.addEventListener("hashchange", () => openDashboard(location.hash === "#dashboard"));

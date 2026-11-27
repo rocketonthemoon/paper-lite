@@ -1191,4 +1191,14 @@ test("browser: toast and dashboard dialog / card menu (Svelte)", { timeout: 120_
   await cdp.evalJs(`document.querySelector('#dash-menu [data-dact="delete"]').click()`);
   assert.equal(await cdp.evalJs(`document.getElementById("dash-modal-input")`), null);
   assert.match(await cdp.evalJs(`document.querySelector(".dash-dialog h3").textContent`), /^Delete /);
+  await cdp.evalJs(`document.getElementById("dash-modal-cancel").click()`);
+
+  // A recent-projects row and a card's thumbnail open their project and close the dashboard.
+  const other = await cdp.evalJs(`[...document.querySelectorAll("#dash-recent-list .dash-recent-row")].find((r) => !r.classList.contains("active")).dataset.openProject`);
+  await cdp.evalJs(`document.querySelector('#dash-recent-list [data-open-project="${other}"]').click()`);
+  await waitFor(`S?.id === ${JSON.stringify(other)} && document.getElementById("dashboard").hidden`, "opened from the recent list");
+  await cdp.evalJs(`openDashboard(true)`);
+  const back = await cdp.evalJs(`document.querySelector(".dash-card:not(.active)").dataset.pid`);
+  await cdp.evalJs(`document.querySelector('.dash-card[data-pid="${back}"] .dash-thumb').click()`);
+  await waitFor(`S?.id === ${JSON.stringify(back)} && document.getElementById("dashboard").hidden`, "opened from a thumbnail");
 });

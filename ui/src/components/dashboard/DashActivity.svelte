@@ -1,6 +1,6 @@
 <script>
-  // Dashboard → Agent activity: recent edit sessions, filtered by who made them. "Revert session" is handled by the
-  // editor engine's listener on #dash-activity (data-act-revert).
+  // Dashboard → Agent activity: recent edit sessions, filtered by who made them. "Revert session" restores the
+  // checkpoint taken when the session started.
   import { weft, clock } from "../../lib/bridge.svelte.js";
   import { dash } from "../../lib/dashboard.svelte.js";
 
@@ -25,7 +25,7 @@
     </div>
     <span class="dash-act-tools">{tools(s.toolCounts)}</span>
     <span class="dash-act-pill" class:live={s.live}>{s.live ? "Live" : s.reverted ? "Reverted" : "Done"}</span>
-    <button type="button" class="btn" data-act-revert={s.id} disabled={s.live || s.reverted || !s.checkpointId}><svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4.5 6.5H10a3.5 3.5 0 010 7H7M6.5 4l-2.5 2.5L6.5 9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" /></svg>Revert session</button>
+    <button type="button" class="btn" data-act-revert={s.id} onclick={() => weft.revertSession(s.id)} disabled={s.live || s.reverted || !s.checkpointId}><svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4.5 6.5H10a3.5 3.5 0 010 7H7M6.5 4l-2.5 2.5L6.5 9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" /></svg>Revert session</button>
   </div>
 {:else}
   <div class="dash-act-empty">No activity sessions recorded yet.</div>

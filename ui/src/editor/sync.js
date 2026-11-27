@@ -12,7 +12,7 @@ import { fontStack, renderFontList } from "./fonts.js";
 import { pagesModel } from "./pages.js";
 import { openProjectMenu, projectMenuModel } from "./projects.js";
 import { buildCmdkEntries, openCmdk } from "./cmdk.js";
-import { clearDashSearch, closeDashModal, dashEl, dashModel, loadThumb, openDashboard, renderDashActivity, renderDashboard } from "./dashboard.js";
+import { clearDashSearch, closeDashModal, dashEl, dashMenuAction, dashModel, loadThumb, openDashMenu, openDashboard, openProjectFromDash, renderDashActivity, renderDashboard, revertSession } from "./dashboard.js";
 import { exportAction, exportMenuModel, openExportMenu } from "./chrome.js";
 import { closeCommentThread, commentPins, commentRows, commentThread, focusAgentNode, openCommentThread, renderCommentPins, renderCommentThread, renderCommentsPanel, submitComment, updateCommentsBadge } from "./comments.js";
 
@@ -216,6 +216,10 @@ export function setup() {
     dashMenuModel: () => ({ onlyProject: ed.projects.length < 2 }),
     overlay: { labels: [], ctx: null, agents: { boxes: [], cursors: [] }, crumbs: { page: "Page 1", artboard: "" } },
     ctxAction: (act) => ctxAction(act),
+    openProject: (id) => openProjectFromDash(id),
+    openDashMenu: (pid, btn) => openDashMenu(pid, btn),
+    dashMenuAction: (act) => dashMenuAction(act),
+    revertSession: (id) => revertSession(id),
     focusAgentNode: (id) => focusAgentNode(id),
     labelPointerDown: (e, id) => labelPointerDown(e, id),
     renameRow: (id) => renameRow(id),
