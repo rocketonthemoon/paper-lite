@@ -86,6 +86,7 @@ If your client only supports stdio, start the server first, then use the relay:
 | [`model.js`](model.js) | Project/node/comment normalization, CSS and attribute validation |
 | [`html-import.js`](html-import.js) | `parse5`-based HTML → node converter used by `write_html` |
 | [`renderer.js`](renderer.js) | Chrome DevTools Protocol client for screenshots and computed styles |
+| [`renderer-blitz.js`](renderer-blitz.js), [`weft-render/`](weft-render/) | Experimental Blitz renderer (Rust sidecar) with headless Chrome as fallback (`RENDERER=blitz`) |
 | [`checkpoint-store.js`](checkpoint-store.js) | Checkpoints as commits in a per-project bare git repo ([isomorphic-git](https://isomorphic-git.org)) |
 | [`fonts.js`](fonts.js) | Uploaded fonts (WOFF2/WOFF/TTF/OTF), Google Fonts, and `/fonts.css` |
 | [`ui/`](ui/) | Browser canvas UI source (Vite + Svelte 5; `npm run build` writes `public/`). [`ui/index.html`](ui/index.html) is the page (markup and CSS); [`ui/src/editor/`](ui/src/editor/) is the canvas engine and editor state, and panels and menus are Svelte components in [`ui/src/components/`](ui/src/components/) |
@@ -132,10 +133,48 @@ Each project's checkpoints are commits in a git repo (`DATA_DIR/projects/<id>.gi
 | `ALLOWED_HOSTS` | `localhost,127.0.0.1,[::1]` | Extra allowed `Host`/`Origin` hostnames, comma-separated (e.g. `host.docker.internal`) |
 | `CHROME_PATH` | auto-detected | Chrome/Chromium/`chrome-headless-shell` binary |
 | `RENDER_IDLE_MS` | `900000` (15 min) | How long headless Chrome stays running after the last screenshot / computed-styles call; starting it again takes ~0.5–1 s |
+| `RENDERER` | `chrome` | `blitz` renders screenshots and computed styles with the Blitz sidecar (`weft-render`, experimental) and uses headless Chrome only for what it can't do. See [Blitz renderer](#blitz-renderer-experimental) |
+| `WEFT_RENDER_PATH` | `weft-render/target/release/weft-render` | The `weft-render` binary, for `RENDERER=blitz` |
 | `CHROME_FLAGS` | empty (`--no-sandbox --disable-dev-shm-usage --disable-gpu` in Docker) | Extra Chrome flags, space-separated |
 | `TAB_MEASURE_MS` | `500` | `get_computed_styles` first asks open editor tabs, which already have the artboard laid out (a few ms, and no headless Chrome start). A tab answers only if it shows that artboard at the current version; otherwise, or after this long, headless Chrome measures. `0` always uses headless Chrome |
 | `PERSIST_THROTTLE_MS` | `300` | Edits apply in memory at once; disk writes are coalesced to at most one per this interval (`0` writes immediately). Pending writes are flushed on shutdown |
 | `WEFT_URL` (or `PAPER_LITE_URL`) | `http://localhost:3000/mcp` | Server URL used by `mcp-stdio.js` |
+
+## Blitz renderer (experimental)
+
+`get_screenshot` and `get_computed_styles` render artboards in headless Chrome. [`weft-render/`](weft-render/) is a small
+Rust sidecar that renders them with [Blitz](https://github.com/DioxusLabs/blitz), an HTML/CSS engine without a browser or
+JavaScript, instead. To try it, install Rust (and on Linux the fontconfig headers, e.g. `libfontconfig1-dev` and
+`pkg-config`), then:
+
+```bash
+npm run build:blitz          # cargo build --release in weft-render/ (a few minutes the first time)
+RENDERER=blitz npm start
+```
+
+- **Fallback:** headless Chrome still answers anything Blitz can't:
+  - artboards whose layers or root CSS use CSS Blitz doesn't draw yet: `filter`, `backdrop-filter`, `clip-path`,
+    multi-column layout, `writing-mode`, `text-overflow`, `line-clamp`;
+  - calls where the sidecar is missing or fails.
+
+  Chrome only starts if one of these happens.
+- **Measured against headless Chrome** on four 800×520 test artboards with 8–33 layers each:
+
+  | | Blitz | Headless Chrome |
+  | --- | --- | --- |
+  | Memory | ~30 MB | ~460 MB |
+  | Screenshot, warm | 30–45 ms | 60–80 ms |
+  | Computed styles, warm | 20–30 ms | 26–32 ms |
+  | First call | ~20 ms (+ one fetch of web fonts) | ~0.5–1 s to start Chrome |
+- **Known differences:**
+  - Layout, text, gradients, shadows, borders, outlines, transforms, blend modes, masks and CSS variables match closely.
+  - Generic font names (`serif`, `sans-serif`) can resolve to a different system font than Chrome's, so text that doesn't
+    set a font may wrap differently.
+  - Computed values are formatted slightly differently in places: Chrome writes `0px none rgb(0, 0, 0)` for an unset
+    border, Blitz `0px rgb(0, 0, 0)`; lengths can differ below 1/64 px.
+
+The CI job "Blitz Renderer (weft-render) vs Headless Chrome" builds the sidecar and checks layer boxes, styles and
+screenshots against Chrome (`test/renderer-blitz.test.js`).
 
 ## Development
 

@@ -11,6 +11,7 @@
     "prestart": "node scripts/ensure-ui-build.mjs",
     "build": "vite build --config ui/vite.config.js",
     "dev:ui": "vite --config ui/vite.config.js",
+    "build:blitz": "cargo build --release --locked --manifest-path weft-render/Cargo.toml",
     "lint": "node test/lint.mjs",
     "pretest": "npm run build",
     "test": "node --test --test-force-exit test/*.test.js"

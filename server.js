@@ -18,6 +18,7 @@ import {
 import { FontLibrary, familiesIn, renameWithRetry } from "./fonts.js";
 import { htmlToSpecs } from "./html-import.js";
 import { Renderer } from "./renderer.js";
+import { BlitzRenderer, PreferBlitz } from "./renderer-blitz.js";
 import { registerTools, SERVER_INSTRUCTIONS } from "./mcp-tools.js";
 import { CheckpointRepo } from "./checkpoint-store.js";
 
@@ -2291,7 +2292,39 @@ function setSessionTitle(text) {
 // ---------------------------------------------------------------------------
 // MCP (tools live in mcp-tools.js)
 // ---------------------------------------------------------------------------
-const renderer = new Renderer(`http://127.0.0.1:${PORT}`, { contentKey: () => `${state.id}:${state.version}:${fontsRev}` });
+// Screenshots and computed styles: headless Chrome, or with RENDERER=blitz the Blitz sidecar (weft-render/) first,
+// falling back to Chrome for any call it can't answer.
+const renderKey = () => `${state.id}:${state.version}:${fontsRev}`;
+const chromeRenderer = new Renderer(`http://127.0.0.1:${PORT}`, { contentKey: renderKey });
+const blitzFallbacks = new Set();
+// CSS Blitz (0.3 beta) doesn't draw yet, found by comparing it with headless Chrome: artboards that use any of these,
+// on a layer or in the root CSS, go to Chrome.
+const BLITZ_UNSUPPORTED = ["filter", "backdropFilter", "clipPath", "columns", "columnCount", "columnWidth", "writingMode",
+  "textOverflow", "lineClamp", "WebkitLineClamp"];
+function blitzUnsupported(artboardId) {
+  const uses = (styles) => BLITZ_UNSUPPORTED.find((k) => styles && styles[k] != null && styles[k] !== "" && styles[k] !== "none");
+  for (const r of (state.rootCss || emptyRootCss()).rules) { const k = uses(r.styles); if (k) return `root CSS uses ${k}`; }
+  const stack = [artboardId];
+  while (stack.length) {
+    const n = state.nodes[stack.pop()];
+    if (!n) continue;
+    const k = uses(n.styles);
+    if (k) return `"${n.name}" uses ${k}`;
+    stack.push(...n.children);
+  }
+  return null;
+}
+const renderer = process.env.RENDERER === "blitz"
+  ? new PreferBlitz(new BlitzRenderer(`http://127.0.0.1:${PORT}`, { contentKey: renderKey, assetsKey: () => fontsRev }), chromeRenderer, {
+    unsupported: ({ artboardId }) => blitzUnsupported(artboardId),
+    onFallback: (method, err) => {
+      const why = err.message.split("\n")[0];
+      if (blitzFallbacks.has(why)) return;
+      blitzFallbacks.add(why);
+      console.warn(`[weft] Blitz couldn't ${method === "screenshot" ? "take a screenshot" : "measure"} (${why}); using headless Chrome.`);
+    },
+  })
+  : chromeRenderer;
 
 // Computed styles from an open editor tab. The canvas already has the page laid out with the same CSS as the
 // render page, so a tab that shows this artboard at the current version answers in a few ms, where headless Chrome
