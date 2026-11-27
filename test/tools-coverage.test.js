@@ -20,7 +20,7 @@ const EXPECTED_TOOLS = [
   "get_screenshot", "get_selection", "get_tree_summary", "git_pull", "git_push", "git_status", "list_checkpoints", "list_fonts", "list_projects", "move_nodes", "open_project",
   "redo", "remove_font", "rename_nodes", "rename_project", "reply_to_comment", "resolve_comment", "restore_checkpoint",
   "save_checkpoint", "set_selection", "set_session_title", "set_text_content", "switch_page", "undo", "update_node",
-  "update_page", "update_root_css", "update_styles", "write_html",
+  "update_nodes_matching", "update_page", "update_root_css", "update_styles", "write_html",
 ];
 
 // Markup an attacker could put in layer names / text to break out of exported or rendered HTML.
@@ -161,7 +161,7 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
   t.after(() => srv.stop());
   const B = srv.baseUrl;
 
-  await t.test("tools/list exposes exactly the 49 documented tools with schemas", async () => {
+  await t.test("tools/list exposes exactly the 50 documented tools with schemas", async () => {
     const { tools } = await rpc(B, "tools/list");
     assert.deepEqual(tools.map((x) => x.name).sort(), EXPECTED_TOOLS);
     for (const tool of tools) {
@@ -368,6 +368,42 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
     assert.equal((await ok(B, "get_node_info", { nodeId: button })).text, "Start now");
     assert.deepEqual(await ok(B, "rename_nodes", { updates: [{ nodeId: button, name: "CTA" }] }), { renamed: 1 });
     assert.equal((await ok(B, "get_node_info", { nodeId: button })).name, "CTA");
+
+    // Batch update_node + addClasses/removeClasses + update_nodes_matching in single undo steps.
+    await ok(B, "update_root_css", { classes: { "p1-badge": { padding: "4px" }, "p1-active": { opacity: "0.9" }, "p1-extra": { gap: "6px" } } });
+    await ok(B, "update_node", { nodeId: button, addClasses: ["p1-badge"] });
+    assert.deepEqual((await ok(B, "get_node_info", { nodeId: button })).classes, ["p1-badge"]);
+    await ok(B, "update_node", { nodeId: button, addClasses: ["p1-active"], removeClasses: ["p1-badge"] });
+    assert.deepEqual((await ok(B, "get_node_info", { nodeId: button })).classes, ["p1-active"]);
+
+    const batchRes = await ok(B, "update_node", {
+      updates: [
+        { nodeId: title, addClasses: ["p1-badge"], styles: { letterSpacing: "-0.03em" } },
+        { nodeId: button, addClasses: ["p1-extra"], text: "Launch" },
+      ],
+    });
+    assert.equal(batchRes.updated, 2);
+    assert.deepEqual((await ok(B, "get_node_info", { nodeId: title })).classes, ["p1-badge"]);
+    assert.deepEqual((await ok(B, "get_node_info", { nodeId: button })).classes, ["p1-active", "p1-extra"]);
+    assert.equal((await ok(B, "get_node_info", { nodeId: button })).text, "Launch");
+    await ok(B, "undo");
+    assert.equal((await ok(B, "get_node_info", { nodeId: title })).classes, undefined, "batch update_node is one undo step");
+    assert.equal((await ok(B, "get_node_info", { nodeId: button })).text, "Start now");
+
+    const matchRes = await ok(B, "update_nodes_matching", {
+      artboardIds: [board],
+      hasClass: "p1-active",
+      addClasses: ["p1-extra"],
+      removeClasses: ["p1-active"],
+    });
+    assert.deepEqual(matchRes, { matched: 1, updated: 1, nodeIds: [button] });
+    assert.deepEqual((await ok(B, "get_node_info", { nodeId: button })).classes, ["p1-extra"]);
+    await ok(B, "undo");
+    assert.deepEqual((await ok(B, "get_node_info", { nodeId: button })).classes, ["p1-active"]);
+    await fails(B, "update_nodes_matching", { addClasses: ["p1-badge"] }, /Provide at least one filter/);
+
+    await ok(B, "update_node", { nodeId: button, classes: [] });
+    await ok(B, "update_root_css", { classes: { "p1-badge": null, "p1-active": null, "p1-extra": null } });
   });
 
   await t.test("structure tools: create_node, duplicate_nodes, move_nodes, delete_nodes", async () => {
@@ -619,6 +655,20 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
     const extra = await ok(B, "create_node", { parentId: section, tag: "span", text: "Extra", classes: ["muted-text"] });
     assert.deepEqual((await ok(B, "get_node_info", { nodeId: extra.id })).classes, ["muted-text"]);
     assert.equal((await ok(B, "get_root_css")).usage["muted-text"], 2);
+    // Compact & scoped get_root_css (include, classes, format).
+    const filtered = await ok(B, "get_root_css", { include: ["vars", "usage", "unused"] });
+    assert.deepEqual(Object.keys(filtered).sort(), ["unusedClasses", "unusedVars", "usage", "vars"]);
+    const scoped = await ok(B, "get_root_css", { classes: ["muted-text"], include: ["vars", "css"] });
+    assert.deepEqual(Object.keys(scoped.vars), ["--font-ui"], "only variables referenced by scoped class");
+    assert.match(scoped.css, /\.muted-text/);
+    assert.doesNotMatch(scoped.css, /\.stat-card/);
+    const summaryCss = await ok(B, "get_root_css", { format: "summary" });
+    assert.equal(summaryCss.css, undefined);
+    assert.equal(summaryCss.varsCount, 5);
+    assert.deepEqual(summaryCss.definedClasses.sort(), ["muted-text", "stat-card", "stat-value"]);
+    const cssOnly = await ok(B, "get_root_css", { classes: ["stat-card"], format: "css" });
+    assert.deepEqual(Object.keys(cssOnly).sort(), ["css", "definedClasses", "rulesCount", "varsCount"]);
+    assert.match(cssOnly.css, /\.stat-card/);
     await ok(B, "update_node", { nodeId: extra.id, classes: [] });
     assert.equal((await ok(B, "get_node_info", { nodeId: extra.id })).classes, undefined, "[] clears the list");
     await ok(B, "delete_nodes", { nodeIds: [extra.id] });
@@ -785,7 +835,16 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
 
     const small = await call(B, "get_screenshot", { nodeId: board, scale: 0.5 });
     assert.match(small.text, /at scale 0\.5/);
+    const batchShots = await call(B, "get_screenshot", { nodeIds: [board, section], scale: 0.5 });
+    assert.equal(batchShots.isError, false, batchShots.text);
+    const images = batchShots.result.content.filter((c) => c.type === "image");
+    const captions = batchShots.result.content.filter((c) => c.type === "text");
+    assert.equal(images.length, 2, "batch get_screenshot returns one PNG per target");
+    assert.equal(captions.length, 2);
+    assert.match(captions[0].text, new RegExp(board));
+    assert.match(captions[1].text, new RegExp(section));
     await fails(B, "get_screenshot", { nodeId: "ghost" }, /not found/);
+    await fails(B, "get_screenshot", { nodeIds: [board, "ghost"] }, /not found/);
   });
 
   // ---------------------------------------------------------------- pages
