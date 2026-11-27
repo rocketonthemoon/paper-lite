@@ -483,3 +483,81 @@ test("browser E2E: Light Precision UI, Command Palette (250+ layers), HUD, Conte
 
   assert.deepEqual(cdp.runtimeErrors, [], `Unexpected browser console/runtime errors: ${cdp.runtimeErrors.join(" | ")}`);
 });
+
+test("browser: edits arrive as patches and only changed canvas elements are rebuilt", { timeout: 120_000 }, async (t) => {
+  const browserBin = findBrowser();
+  if (!browserBin) {
+    t.skip("No headless Chromium/Chrome binary found");
+    return;
+  }
+  const srv = await startTestServer();
+  t.after(() => srv.stop());
+  const cdp = await startBrowser(browserBin);
+  t.after(() => cdp.stop());
+  const rest = async (method, url, body) => {
+    const res = await fetch(srv.baseUrl + url, { method, headers: { "content-type": "application/json" }, body: body && JSON.stringify(body) });
+    assert.ok(res.ok, `${method} ${url} → ${res.status}`);
+    return res.json();
+  };
+
+  const ab = await mcpCall(srv.baseUrl, "create_artboard", { name: "Patch board", width: 400, height: 900 });
+  await mcpCall(srv.baseUrl, "write_html", {
+    parentId: ab.id,
+    html: `<div data-name="List" style="display:flex;flex-direction:column;gap:4px">${Array.from({ length: 40 }, (_, i) => `<p data-name="Item ${i}">Item ${i}</p>`).join("")}</div>`,
+  });
+  const list = (await mcpCall(srv.baseUrl, "find_nodes", { query: "List" })).find((n) => n.name === "List").id;
+  const items = (await rest("GET", "/api/state")).nodes[list].children;
+
+  await cdp.send("Page.navigate", { url: srv.baseUrl });
+  const waitFor = async (expr, label) => {
+    for (let i = 0; i < 100; i++) { if (await cdp.evalJs(expr)) return; await sleep(50); }
+    assert.fail(`timed out waiting for ${label}`);
+  };
+  await waitFor(`document.querySelectorAll('#world [data-node-id]').length >= 42 && document.querySelector("#live.live")`, "canvas + live");
+
+  // Tag every canvas element so we can tell reused elements from rebuilt ones.
+  const tag = () => cdp.evalJs(`(() => { let i = 0; for (const el of document.querySelectorAll('#world [data-node-id]')) el.__probe = ++i; return i; })()`);
+  const kept = (ids) => cdp.evalJs(`${JSON.stringify(ids)}.map((id) => Boolean(document.querySelector('#world [data-node-id="' + id + '"]')?.__probe))`);
+  const text = (id) => cdp.evalJs(`document.querySelector('#world [data-node-id="${id}"]')?.textContent ?? null`);
+  const version = () => cdp.evalJs("S.version");
+
+  // A style edit: only that element is rebuilt; its siblings and ancestors stay the same DOM objects.
+  await tag();
+  let v = await version();
+  await mcpCall(srv.baseUrl, "update_styles", { updates: [{ nodeIds: [items[3]], styles: { color: "rgb(255, 0, 0)" } }] });
+  await waitFor(`S.version > ${v}`, "style patch");
+  await waitFor(`getComputedStyle(document.querySelector('#world [data-node-id="${items[3]}"]')).color === "rgb(255, 0, 0)"`, "new color");
+  assert.deepEqual(await kept([ab.id, list, items[0], items[4], items[39]]), [true, true, true, true, true]);
+  assert.deepEqual(await kept([items[3]]), [false], "the edited element was rebuilt");
+
+  // Text edit, delete and reorder.
+  await tag();
+  v = await version();
+  await mcpCall(srv.baseUrl, "set_text_content", { updates: [{ nodeId: items[5], text: "Changed" }] });
+  await mcpCall(srv.baseUrl, "delete_nodes", { nodeIds: [items[6]] });
+  await rest("PATCH", `/api/nodes/${items[39]}`, { parentId: list, index: 0 });
+  await waitFor(`S.version >= ${v + 3}`, "three patches");
+  assert.equal(await text(items[5]), "Changed");
+  assert.equal(await text(items[6]), null, "deleted element is gone");
+  assert.equal(await cdp.evalJs(`document.querySelector('#world [data-node-id="${list}"]').firstElementChild.dataset.nodeId`), items[39]);
+  assert.deepEqual(await kept([items[0], items[10], items[39]]), [true, true, true], "moved and untouched elements are reused");
+
+  // Undo and redo patch too.
+  v = await version();
+  await rest("POST", "/api/undo");
+  await rest("POST", "/api/undo");
+  await waitFor(`S.version >= ${v + 2}`, "undo patches");
+  assert.equal(await text(items[6]), "Item 6", "undo brings the deleted element back");
+  assert.equal(await cdp.evalJs(`document.querySelector('#world [data-node-id="${list}"]').firstElementChild.dataset.nodeId`), items[0]);
+  await rest("POST", "/api/redo");
+  await waitFor(`S.version >= ${v + 3}`, "redo patch");
+  assert.equal(await text(items[6]), null);
+
+  // A tab that missed a step reloads the whole document and ends up identical to the server.
+  await cdp.evalJs("S.version -= 5");
+  await mcpCall(srv.baseUrl, "rename_nodes", { updates: [{ nodeId: items[7], name: "Renamed" }] });
+  const server = await rest("GET", "/api/state");
+  await waitFor(`S.version === ${server.version}`, "resync");
+  assert.equal(await cdp.evalJs("JSON.stringify(S.nodes)"), JSON.stringify(server.nodes));
+  assert.equal(await cdp.evalJs("document.querySelectorAll('#world [data-node-id]').length"), Object.keys(server.nodes).length - server.pages.length);
+});

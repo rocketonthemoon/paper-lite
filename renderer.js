@@ -20,6 +20,8 @@ const CANDIDATES = [
 const START_TIMEOUT = 15_000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const SEND_TIMEOUT = 30_000;
+// Chrome takes ~0.5–1 s to start, so it stays up between calls; it shuts down after this long with no calls.
+const IDLE_MS = Number(process.env.RENDER_IDLE_MS ?? 15 * 60_000);
 // Chrome can hold the profile directory briefly after exiting, so retry the removal a few times.
 const removeLater = (dir, tries = 5) => setTimeout(() => fs.rm(dir, { recursive: true, force: true }, (err) => {
   if (err && tries > 1) removeLater(dir, tries - 1);
@@ -40,8 +42,15 @@ function killTree(proc) {
 }
 
 export class Renderer {
-  constructor(baseUrl) {
+  /**
+   * @param {string} baseUrl where /render/:id is served
+   * @param {{ contentKey?: () => string }} opts contentKey changes whenever anything that affects rendering changes
+   *   (document edits, fonts). While it and the requested artboard and size are the same, the page isn't reloaded.
+   */
+  constructor(baseUrl, { contentKey = null } = {}) {
     this.baseUrl = baseUrl;
+    this.contentKey = contentKey;
+    this.shown = null; // { key, url, width, height } of what the page currently shows
     this.queue = Promise.resolve();
     this.proc = null;
     this.ws = null;
@@ -88,6 +97,7 @@ export class Renderer {
 
   async launch(exe) {
     this.stop(); // clear any half-dead browser before launching a fresh one
+    this.shown = null;
     const profile = fs.mkdtempSync(path.join(os.tmpdir(), "paper-lite-render-"));
     this.profile = profile;
     const isHeadlessShell = path.basename(exe).includes("headless");
@@ -183,7 +193,7 @@ export class Renderer {
     return r.result.value;
   }
 
-  // Run one job at a time; if Chrome dies mid-job, retry once on a fresh browser. Shut down after 2 idle minutes.
+  // Run one job at a time; if Chrome dies mid-job, retry once on a fresh browser. Shut down after IDLE_MS idle.
   run(job) {
     const next = this.queue.then(async () => {
       clearTimeout(this.idleTimer);
@@ -198,7 +208,7 @@ export class Renderer {
           }
         }
       } finally {
-        this.idleTimer = setTimeout(() => this.stop(), 120000);
+        this.idleTimer = setTimeout(() => this.stop(), IDLE_MS);
         this.idleTimer.unref();
       }
     });
@@ -207,15 +217,23 @@ export class Renderer {
   }
 
   async load(artboardId, width, height) {
-    await this.send("Emulation.setDeviceMetricsOverride", { width: Math.max(1, Math.ceil(width)), height: Math.max(1, Math.ceil(height)), deviceScaleFactor: 1, mobile: false });
+    const url = `${this.baseUrl}/render/${encodeURIComponent(artboardId)}`;
+    const w = Math.max(1, Math.ceil(width)), h = Math.max(1, Math.ceil(height));
+    const key = this.contentKey?.() ?? null;
+    const prev = this.shown;
+    // Same artboard, same size, nothing changed since it loaded: the page already shows it.
+    if (key !== null && prev && prev.key === key && prev.url === url && prev.width === w && prev.height === h) return;
+    this.shown = null; // until this load finishes
+    await this.send("Emulation.setDeviceMetricsOverride", { width: w, height: h, deviceScaleFactor: 1, mobile: false });
     const loaded = new Promise((res) => {
       const prev = this.ws.onmessage;
       const t = setTimeout(res, 8000);
       this.ws.onmessage = (m) => { prev(m); if (JSON.parse(m.data).method === "Page.loadEventFired") { clearTimeout(t); this.ws.onmessage = prev; res(); } };
     });
-    await this.send("Page.navigate", { url: `${this.baseUrl}/render/${encodeURIComponent(artboardId)}` });
+    await this.send("Page.navigate", { url });
     await loaded;
     await this.evaluate("document.fonts.ready.then(() => true)");
+    this.shown = { key, url, width: w, height: h };
   }
 
   /** Screenshot a node (rendered inside its artboard). Returns { png: Buffer, width, height, scale }. */
@@ -249,6 +267,7 @@ export class Renderer {
 
   stop() {
     const { ws, proc } = this;
+    this.shown = null;
     clearTimeout(this.idleTimer);
     this.ws = null;
     this.proc = null;

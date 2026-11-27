@@ -53,3 +53,19 @@ export const api = (base) => async (method, url, body) => {
 
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Call an MCP tool over the stateless HTTP endpoint and return the parsed JSON result (or text).
+export async function mcpCall(baseUrl, name, args = {}, headers = {}) {
+  const res = await fetch(`${baseUrl}/mcp`, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...headers },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
+  });
+  const raw = await res.text();
+  const line = raw.split(/\r?\n/).find((l) => l.startsWith("data: "));
+  const body = JSON.parse(line ? line.slice(6) : raw);
+  if (body.error) throw new Error(body.error.message);
+  const text = body.result.content?.[0]?.text ?? "";
+  if (body.result.isError) throw new Error(text);
+  try { return JSON.parse(text); } catch { return text; }
+}

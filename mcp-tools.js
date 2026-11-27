@@ -6,7 +6,7 @@ import * as z from "zod";
 export const SERVER_INSTRUCTIONS = `weft is a live HTML/CSS design canvas. Layers are real DOM nodes styled by the project's shared root CSS (variables + classes) plus camelCase inline overrides.
 Start every session with get_guide (once) and get_basic_info (open project, pages, artboards, fonts, openComments). Use get_selection to see what the user is focused on, and get_comments to check reviewer notes.
 Style through the project's root CSS: get_root_css shows the shared variables, classes, states, @media and nested rules; update_root_css adds them (real CSS with nesting). Layers use class="card" and var(--color-primary); inline style="" only holds what differs.
-Write designs with write_html (one visual group per call), save_checkpoint before major rewrites, set_session_title to label your run, then get_screenshot to review, reply_to_comment if responding to feedback, and call finish_working_on_nodes when done. All writes are undoable (undo).`;
+Work in few, large calls: every tool call costs a full round trip. Write a whole section or screen per write_html call, batch all style tweaks into one update_styles call and all text into one set_text_content call, and get_screenshot once a section is built, not after every small edit. save_checkpoint before major rewrites, set_session_title to label your run, reply_to_comment if responding to feedback, and call finish_working_on_nodes when done. All writes are undoable (undo).`;
 
 const GUIDE = `# weft MCP guide
 
@@ -45,6 +45,17 @@ const GUIDE = `# weft MCP guide
 - update_root_css({ css }) merges each rule into the rule with the same selector and @media (or appends it);
   replace: true makes the text the whole root CSS, in order. get_root_css returns the nested text as css.
 
+## Work in few, large calls
+Each tool call waits for a full model round trip, so the number of calls, not their size, sets how long a design
+takes. Aim for 2–4 calls per screen, not 10–15:
+- write_html: write a complete section (header + hero + cards) or a whole screen in one call. One write_html is
+  one undo step, so a big call is still easy to take back.
+- update_styles / set_text_content / rename_nodes / move_nodes / delete_nodes take lists: collect every change you
+  want and send one call, not one per layer.
+- Set up all the root CSS a screen needs in one update_root_css call before writing it.
+- get_screenshot when a section or screen is done, not after each tweak. get_computed_styles for several layers at once.
+- Read once, then act: get_tree_summary or get_basic_info gives the ids you need for a batch of edits.
+
 ## Workflow
 1. get_basic_info: project, pages, artboards on the current page (id, name, position, size), fonts, root CSS names, the user's selection, openComments count.
 1b. get_root_css: the variables and classes to build with; add missing ones with update_root_css before writing layers.
@@ -52,10 +63,10 @@ const GUIDE = `# weft MCP guide
 3. Safety & runs: save_checkpoint before big rewrites; set_session_title("Short run summary") to name your activity session.
 4. Create:
    - create_artboard for a new screen (default 390×844; use height "fit-content" to grow with content).
-   - write_html({ parentId, html }) to add content. Each call should be roughly one visual group (a header, a card, a form).
+   - write_html({ parentId, html }) to add content: a complete section or whole screen per call (see above).
    - write_html({ targetNodeId, mode: "replace", html }) to rebuild a layer in place.
-5. Edit: update_styles (batch), set_text_content, rename_nodes, move_nodes, duplicate_nodes, delete_nodes.
-6. Review & collaborate: get_screenshot({ nodeId }) after meaningful changes; get_computed_styles for exact values; reply_to_comment / resolve_comment on user notes.
+5. Edit: update_styles, set_text_content, rename_nodes, move_nodes, duplicate_nodes, delete_nodes: one call each with every change in its list.
+6. Review & collaborate: get_screenshot({ nodeId }) once a section or screen is done; get_computed_styles for exact values; reply_to_comment / resolve_comment on user notes.
 7. Finish: finish_working_on_nodes. Use set_selection to point the user at the result.
 8. Code: get_jsx({ nodeId, format: "jsx" | "html" }).
 
@@ -215,7 +226,7 @@ export function registerTools(server, ctx) {
   });
 
   server.registerTool("get_screenshot", {
-    description: "PNG screenshot of a layer or artboard rendered exactly like the canvas/export (headless Chrome). Default target: the user's selection, else the first artboard. Review your work with this after meaningful changes.",
+    description: "PNG screenshot of a layer or artboard rendered exactly like the canvas/export (headless Chrome). Default target: the user's selection, else the first artboard. Review your work with this once a section or screen is built, not after every small edit.",
     inputSchema: { nodeId: z.string().optional(), scale: z.number().min(0.1).max(3).optional().describe("Default 1; large frames are capped at 1600px on the long edge") },
     annotations: READ,
   }, async ({ nodeId, scale = 1 }) => {
@@ -260,7 +271,7 @@ export function registerTools(server, ctx) {
 
   // ---------------------------------------------------------------- write
   server.registerTool("write_html", {
-    description: "Add designs by writing HTML: class=\"card\" for shared root CSS classes, inline style=\"\" for overrides (use var(--name) for root variables). Default: append the parsed elements as children of parentId (omit parentId to create top-level artboards). mode=replace swaps targetNodeId for the parsed elements. Returns created ids. See get_guide for the HTML rules.",
+    description: "Add designs by writing HTML: class=\"card\" for shared root CSS classes, inline style=\"\" for overrides (use var(--name) for root variables). Default: append the parsed elements as children of parentId (omit parentId to create top-level artboards). mode=replace swaps targetNodeId for the parsed elements. Returns created ids. Write a whole section or screen per call rather than many small calls. See get_guide for the HTML rules.",
     inputSchema: {
       html: z.string().min(1),
       parentId: z.string().optional(),
@@ -303,7 +314,7 @@ export function registerTools(server, ctx) {
   }, async (args) => { const n = ctx.createNode(args, "mcp"); ctx.touch([n.id], "create_node", n.name); return text(summary(n.id)); });
 
   server.registerTool("update_styles", {
-    description: "Batch style changes in one undo step: [{ nodeIds: [...], styles: { camelCase: value | null } }].",
+    description: "Batch style changes in one undo step: [{ nodeIds: [...], styles: { camelCase: value | null } }]. Put every style change you have in one call.",
     inputSchema: { updates: z.array(z.object({ nodeIds: ids, styles: styleSchema })).min(1) },
     annotations: WRITE,
   }, async ({ updates }) => {

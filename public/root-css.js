@@ -337,25 +337,37 @@
    * Stylesheet for a canvas: variables on the scope, base classes, each layer's own styles, then states / media /
    * nested rules on top. Same cascade as the exported styles.css.
    */
-  function canvasCss(root, layers, scope) {
+  // The canvas cascade in three parts: `head` (variables + base classes), each layer's own styles, then `tail`
+  // (states, @media, nested rules). Layer rules sit between the two at equal specificity, like the export.
+  function canvasCssParts(root, scope) {
     const rules = root?.rules || [];
     const vars = Object.entries(root?.vars || {});
-    const own = layers.filter(([, st]) => st && Object.keys(st).length)
-      .map(([id, st]) => ({ selector: `${scope} [data-node-id="${id}"]`, styles: st, raw: true }));
     const contextual = rules.filter((r) => !isBase(r));
     const sel = (s) => scopeSelector(s, scope);
     const containerRules = contextual.some((r) => r.media && widthOnly(r.media));
-    return [
-      vars.length ? `${scope} {\n${vars.map(([k, v]) => `  ${k}: ${v};`).join("\n")}\n}` : "",
-      containerRules ? `${scope} > [data-node-id] { container: weft-artboard / inline-size; }` : "",
-      flatCss(rules.filter(isBase), { selector: sel }),
-      flatCss(own),
-      flatCss(contextual, { selector: sel, media: (q) => (widthOnly(q) ? `@container weft-artboard ${widthOnly(q)}` : `@media ${q}`) }),
-    ].filter(Boolean).join("\n\n");
+    return {
+      head: [
+        vars.length ? `${scope} {\n${vars.map(([k, v]) => `  ${k}: ${v};`).join("\n")}\n}` : "",
+        containerRules ? `${scope} > [data-node-id] { container: weft-artboard / inline-size; }` : "",
+        flatCss(rules.filter(isBase), { selector: sel }),
+      ].filter(Boolean).join("\n\n"),
+      tail: flatCss(contextual, { selector: sel, media: (q) => (widthOnly(q) ? `@container weft-artboard ${widthOnly(q)}` : `@media ${q}`) }),
+    };
+  }
+
+  // Layers' own styles as rules. `selectorOf(id)` picks how a layer is targeted (default: its data-node-id).
+  function layerCss(layers, scope, selectorOf = (id) => `[data-node-id="${id}"]`) {
+    return flatCss(layers.filter(([, st]) => st && Object.keys(st).length)
+      .map(([id, st]) => ({ selector: `${scope} ${selectorOf(id)}`, styles: st, raw: true })));
+  }
+
+  function canvasCss(root, layers, scope) {
+    const { head, tail } = canvasCssParts(root, scope);
+    return [head, layerCss(layers, scope), tail].filter(Boolean).join("\n\n");
   }
 
   global.WeftRootCss = {
     VAR_NAME_RE, CLASS_NAME_RE, CANVAS_PREFIX, parse, toText, flatCss, checkSelector, checkMedia, classesIn, definedClasses,
-    isBase, canvasCss, kebab, camel, splitTop,
+    isBase, canvasCss, canvasCssParts, layerCss, kebab, camel, splitTop,
   };
 })(typeof window !== "undefined" ? window : globalThis);

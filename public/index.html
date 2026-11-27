@@ -1368,12 +1368,90 @@ function buildNodeEl(nodes, id) {
   for (const c of n.children || []) el.append(buildNodeEl(nodes, c));
   return el;
 }
-const buildEl = (id) => buildNodeEl(S.nodes, id);
 
+// The canvas keeps its elements between renders and rebuilds an element only when its node changed. Patches from
+// the server replace just the changed node objects in S.nodes, so "changed" is an identity check: builtFrom maps
+// each canvas element to the node object it was built from. Code that changes a canvas element directly (text
+// editing, drag/resize previews) calls markStale so the next render rebuilds it from the node.
+const builtFrom = new WeakMap();
+const markStale = (el) => { if (el) builtFrom.delete(el); };
+
+// One element for node n: id, classes, attributes and text, without children.
+function nodeShell(n) {
+  const svg = SVG_TAGS.has(n.tag);
+  const el = svg ? document.createElementNS(SVG_NS, n.tag) : document.createElement(n.tag);
+  el.dataset.nodeId = n.id;
+  el.classList.add(`${NODE_CLASS}${n.id}`);
+  for (const c of n.classes || []) el.classList.add(`${WeftRootCss.CANVAS_PREFIX}${c}`);
+  for (const [k, v] of Object.entries(n.attrs || {})) el.setAttribute(k, v);
+  if (svg) return el;
+  if (n.tag === "button") el.type = "button";
+  if (n.tag === "a" || n.tag === "button") el.tabIndex = -1;
+  if (n.tag === "img") el.draggable = false;
+  if (!VOID_TAGS.has(n.tag) && n.text) el.append(n.text);
+  return el;
+}
+
+// Bring `el` (or a new element) up to date with node `id`, reusing child elements whose nodes didn't change.
+function syncNodeEl(nodes, id, el) {
+  const n = nodes[id];
+  if (!n) return document.createElement("div");
+  if (el && builtFrom.get(el) === n) {
+    syncChildEls(nodes, n.children || [], el, el);
+    return el;
+  }
+  const fresh = nodeShell(n);
+  builtFrom.set(fresh, n);
+  if (!VOID_TAGS.has(n.tag)) syncChildEls(nodes, n.children || [], fresh, el);
+  return fresh;
+}
+
+// Make `parent`'s element children exactly `childIds`, taking elements to reuse from `from` (the old element).
+function syncChildEls(nodes, childIds, parent, from) {
+  const cur = parent.children;
+  // Usual case: same children in the same order. Sync each in place without building a lookup.
+  if (from === parent && cur.length === childIds.length) {
+    let same = true;
+    for (let i = 0; i < cur.length && same; i++) same = builtFrom.get(cur[i])?.id === childIds[i];
+    if (same) {
+      for (let i = 0; i < childIds.length; i++) {
+        const el = syncNodeEl(nodes, childIds[i], cur[i]);
+        if (el !== cur[i]) cur[i].replaceWith(el);
+      }
+      return;
+    }
+  }
+  const prev = new Map();
+  if (from) for (const c of from.children) if (c.dataset?.nodeId) prev.set(c.dataset.nodeId, c);
+  const kids = childIds.map((cid) => syncNodeEl(nodes, cid, prev.get(cid)));
+  if (kids.length === cur.length && kids.every((k, i) => k === cur[i])) return;
+  const texts = [...parent.childNodes].filter((x) => x.nodeType === Node.TEXT_NODE);
+  parent.replaceChildren(...texts, ...kids);
+}
+
+// The canvas stylesheet is split so an edit only rewrites a small sheet: `canvas-css` (variables, base classes),
+// one sheet per artboard with its layers' own styles, then `canvas-css-tail` (states, @media, nesting), in that
+// order so the cascade matches the export. Layers are targeted by a per-node class (.wn-<id>) rather than the
+// data-node-id attribute: when a sheet changes, the browser then re-styles only elements with the classes it
+// mentions, instead of every element on the canvas.
+const NODE_CLASS = "wn-";
 function renderCanvasCss() {
-  const css = WeftRootCss.canvasCss(rootOf(), layerStyleList(S.nodes, S.nodes[S.rootId].children), "#world");
-  const el = scopedSheet("canvas-css");
-  if (el.textContent !== css) el.textContent = css;
+  const { head, tail } = WeftRootCss.canvasCssParts(rootOf(), "#world");
+  const headEl = scopedSheet("canvas-css");
+  if (headEl.textContent !== head) headEl.textContent = head;
+  const tailEl = scopedSheet("canvas-css-tail");
+  if (headEl.nextElementSibling !== tailEl && !headEl.nextElementSibling?.dataset.artboardCss) headEl.after(tailEl);
+  const keep = new Set();
+  for (const ab of S.nodes[S.rootId].children) {
+    const key = `canvas-css-ab-${ab}`;
+    let el = document.getElementById(key);
+    if (!el) { el = document.createElement("style"); el.id = key; el.dataset.artboardCss = "1"; tailEl.before(el); }
+    const css = WeftRootCss.layerCss(layerStyleList(S.nodes, [ab]), "#world", (id) => `.${NODE_CLASS}${id}`);
+    if (el.textContent !== css) el.textContent = css;
+    keep.add(el);
+  }
+  for (const el of document.querySelectorAll("style[data-artboard-css]")) if (!keep.has(el)) el.remove();
+  if (tailEl.textContent !== tail) tailEl.textContent = tail;
 }
 
 function render() {
@@ -1389,7 +1467,8 @@ function render() {
   renderPages();
   renderCanvasCss();
   $("#root-vars").innerHTML = Object.keys(rootOf().vars).map((k) => `<option value="var(${esc(k)})">`).join("");
-  world.replaceChildren(...S.nodes[S.rootId].children.map(buildEl));
+  syncChildEls(S.nodes, S.nodes[S.rootId].children, world, world);
+  for (const el of world.querySelectorAll(".is-selected")) el.classList.remove("is-selected");
   const onb = $("#empty-onboarding");
   if (onb) {
     const isEmpty = S.nodes[S.rootId].children.length === 0;
@@ -2160,7 +2239,7 @@ function finishEdit(commit) {
   const el = elOf(id);
   editingId = null;
   const text = el ? el.innerText.replace(/\n$/, "") : editOriginal;
-  if (el) { el.contentEditable = "false"; el.classList.remove("editing"); }
+  if (el) { el.contentEditable = "false"; el.classList.remove("editing"); markStale(el); }
   getSelection().removeAllRanges();
   if (commit && text !== editOriginal) patch(id, { text });
   else render();
@@ -2420,6 +2499,7 @@ function dragStart(e, id, fromLabel = false) {
   }
   const el = elOf(id);
   op = { id, el, x0: num(n.styles.left, el.offsetLeft), y0: num(n.styles.top, el.offsetTop), dx: 0, dy: 0 };
+  markStale(el); // the drag preview sets inline left/top
   busy = true;
   if (sel !== id) select(id);
 }
@@ -2444,6 +2524,7 @@ function resizeStart(e) {
   const n = S.nodes[id];
   if (!n || id !== sel || tool !== "select" || spaceDown || editingId) { e.interaction.stop(); return; }
   const el = e.target;
+  markStale(el); // the resize preview sets inline width/height
   op = { id, el, abs: n.styles.position === "absolute", w: el.offsetWidth, h: el.offsetHeight,
     x: num(n.styles.left, el.offsetLeft), y: num(n.styles.top, el.offsetTop), moved: false };
   busy = true;
@@ -3715,8 +3796,27 @@ function connect() {
   const live = $("#live");
   es.addEventListener("open", () => { live.classList.add("live"); $("#live-text").textContent = "Live · synced"; if (S) shareSelection(); });
   es.addEventListener("error", () => { live.classList.remove("live"); $("#live-text").textContent = "Reconnecting…"; });
-  es.addEventListener("state", (ev) => {
-    const { source, state } = JSON.parse(ev.data);
+  // Events that change S are applied one at a time, so a resync (below) can't interleave with a patch.
+  let syncChain = Promise.resolve();
+  const serially = (fn) => { syncChain = syncChain.then(fn).catch((err) => console.error("[weft] sync", err)); };
+  es.addEventListener("state", (ev) => serially(() => { const { source, state } = JSON.parse(ev.data); applyState(source, state); }));
+  // Edits arrive as patches of changed nodes on top of a known version. If this tab missed one (or is on another
+  // project), it reloads the whole document instead.
+  es.addEventListener("patch", (ev) => serially(async () => {
+    const p = JSON.parse(ev.data);
+    if (!S || S.id !== p.id || S.version !== p.baseVersion) {
+      if (S && S.id === p.id && p.version <= S.version) return; // already have this (e.g. after a resync)
+      const full = await api("GET", "/api/state");
+      if (full) applyState(p.source, full);
+      return;
+    }
+    for (const [id, n] of Object.entries(p.nodes)) {
+      if (n) S.nodes[id] = n;
+      else delete S.nodes[id];
+    }
+    applyState(p.source, { ...S, version: p.version, name: p.name, pages: p.pages, rootId: p.rootId, rootCss: p.rootCss || S.rootCss });
+  }));
+  function applyState(source, state) {
     const prevProject = S?.id, prevKey = viewKey();
     S = state;
     if (!dashEl.hidden) $("#dash-back-label").textContent = "Back to canvas";
@@ -3730,7 +3830,7 @@ function connect() {
     render();
     if (!saved) requestAnimationFrame(() => { const b = worldBounds([...world.children]); if (b) fitTo(b, 1); });
     shareSelection();
-  });
+  }
   es.addEventListener("history", (ev) => {
     hist = JSON.parse(ev.data);
     renderHistory();
