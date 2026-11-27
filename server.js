@@ -2148,6 +2148,21 @@ function buildMcpServer() {
   return server;
 }
 
+// Building a server registers every tool schema, so idle servers are pooled and reused. Each request still gets
+// a server of its own (one transport per server at a time), so concurrent requests never share one.
+const MCP_POOL_MAX = 8;
+const mcpPool = [];
+const acquireMcpServer = () => mcpPool.pop() || buildMcpServer();
+async function releaseMcpServer(server, transport) {
+  try {
+    await transport.close();
+    await server.close();
+  } catch {
+    return; // don't reuse a server that didn't close cleanly
+  }
+  if (mcpPool.length < MCP_POOL_MAX) mcpPool.push(server);
+}
+
 // ---------------------------------------------------------------------------
 // HTTP
 // ---------------------------------------------------------------------------
@@ -2454,7 +2469,7 @@ app.get("/api/export/zip", wrap(async (req, res) => {
   }).send(buffer);
 }));
 
-// Stateless Streamable HTTP MCP (/mcp + legacy /paper-lite/mcp alias): fresh server/transport per request, sharing workspace & session context.
+// Stateless Streamable HTTP MCP (/mcp + legacy /paper-lite/mcp alias): a pooled server and fresh transport per request, sharing workspace & session context.
 function mcpToolDetail(toolName, args) {
   if (!args || typeof args !== "object") return "";
   if (toolName === "update_styles" && Array.isArray(args.updates)) {
@@ -2477,9 +2492,9 @@ app.post(["/mcp", "/paper-lite/mcp"], async (req, res) => {
   const tool = callMsg?.params?.name || "";
   const detail = tool ? mcpToolDetail(tool, callMsg?.params?.arguments) : "";
 
-  const server = buildMcpServer();
+  const server = acquireMcpServer();
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-  res.on("close", () => { transport.close(); server.close(); });
+  res.on("close", () => { releaseMcpServer(server, transport); });
   try {
     await server.connect(transport);
     await mcpContextStore.run({ agent, tool, detail }, () => transport.handleRequest(req, res, req.body));
