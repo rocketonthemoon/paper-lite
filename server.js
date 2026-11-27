@@ -139,8 +139,12 @@ const saveWorkspace = () => {
 const saveSessions = (id = state.id, list = projectSessions) =>
   scheduleWrite(`sessions:${id}`, sessionsFile(id), () => JSON.stringify(list));
 
+// A project's sessions: the open project's live list, or the cached / on-disk list of another project.
 async function sessionsOf(id) {
   if (id === state?.id) return projectSessions;
+  return storedSessions(id);
+}
+async function storedSessions(id) {
   if (!sessionsCache.has(id)) {
     const list = await readJsonSafe(sessionsFile(id), []);
     sessionsCache.set(id, Array.isArray(list) ? list.filter((x) => x && x.id) : []);
@@ -352,7 +356,7 @@ async function loadProjectExtras(id) {
     projectCheckpoints = [];
   }
   projectRemote = await repoOf(id).publicRemote();
-  projectSessions = await sessionsOf(id);
+  projectSessions = await storedSessions(id);
   sessionsCache.delete(id);
 }
 
@@ -365,6 +369,7 @@ async function openProject(id, source = "api") {
     sessionsCache.set(state.id, projectSessions);
   }
   state = doc;
+  projectSessions = []; // until loadProjectExtras() reads this project's own sessions
   historyTimeline = [];
   historyCursor = -1;
   lastMcpWriteAt = 0;
