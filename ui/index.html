@@ -1248,7 +1248,7 @@ let actFilter = "all";
 const clock = (iso) => { const d = new Date(iso); return Number.isNaN(+d) ? "" : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }); };
 
 const $ = (s, r = document) => r.querySelector(s);
-const app = $("#app"), stage = $("#stage"), world = $("#world"), layersEl = $("#layers"),
+const app = $("#app"), stage = $("#stage"), world = $("#world"),
   inspector = $("#inspector"), rightHead = $("#right-head"), inspectorFoot = $("#inspector-foot"),
   commentsPanelEl = $("#comments-panel"), commentPinsEl = $("#comment-pins"), commentThreadEl = $("#comment-thread");
 const esc = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -1644,33 +1644,37 @@ function iconFor(n) {
   return ICONS.box;
 }
 
-const TWIST = `<svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M4.75 3.5L7.25 6l-2.5 2.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 let layerFilter = "";
-function renderLayers() {
-  if (!S) return;
-  if (layersEl.querySelector(".row input")) return; // a rename is in progress; it re-renders when it finishes
+// The tree is ui/src/components/LayersPanel.svelte. This builds its rows (it needs the editor's state: selection,
+// expanded artboards, agents, comments) and hands them over through window.weft.
+function layerRows() {
+  if (!S) return { rows: [], filtered: false };
   for (let p = sel && S.nodes[sel]?.parentId; p && p !== S.rootId; p = S.nodes[p]?.parentId) expanded.add(p);
   const agentIds = new Set(agentNodes.map((a) => a.id));
   const q = layerFilter.trim().toLowerCase();
-  const out = [];
-  const rowTrail = (n, id, isAgent) => {
-    const dim = n.parentId === S.rootId ? `<span class="dim">${esc(px(n.styles.width || "auto"))}×${esc(px(n.styles.height || "auto"))}</span>` : "";
-    const mcp = isAgent ? `<span class="mcp-badge">MCP</span>` : "";
-    const nCmts = comments.filter((c) => c.nodeId === id && c.status !== "resolved");
-    const hasRep = nCmts.some((c) => c.status === "replied");
-    const cmtBadge = nCmts.length ? `<span class="row-cmt${hasRep ? " replied" : ""}"><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M3 3.5h10a1 1 0 011 1v6a1 1 0 01-1 1H7l-3 2.5V11.5H3a1 1 0 01-1-1v-6a1 1 0 011-1z" fill="${hasRep ? "#fbe3d9" : "none"}" stroke="${hasRep ? "#d97757" : "currentColor"}" stroke-width="1.4" stroke-linejoin="round"/></svg>${nCmts.length}</span>` : "";
-    return `${mcp}${cmtBadge}${dim}`;
+  const rows = [];
+  const row = (id, n, depth, twist) => {
+    const open = comments.filter((c) => c.nodeId === id && c.status !== "resolved");
+    rows.push({
+      id,
+      name: n.name,
+      depth,
+      twist, // "open" | "closed" | "none"
+      draggable: !q,
+      artboard: n.parentId === S.rootId,
+      sel: id === sel,
+      agent: agentIds.has(id),
+      icon: iconFor(n),
+      dim: n.parentId === S.rootId ? `${px(n.styles.width || "auto")}×${px(n.styles.height || "auto")}` : null,
+      comments: open.length ? { count: open.length, replied: open.some((c) => c.status === "replied") } : null,
+    });
   };
   if (q) {
     const match = (n) => n.name.toLowerCase().includes(q) || n.tag.toLowerCase().includes(q) || (n.text && n.text.toLowerCase().includes(q));
     const visit = (id) => {
       const n = S.nodes[id];
       if (!n) return;
-      if (match(n)) {
-        const isAgent = agentIds.has(id);
-        out.push(`<div class="row${id === sel ? " sel" : ""}${isAgent ? " agent-editing" : ""}${n.parentId === S.rootId ? " ab" : ""}" role="treeitem" data-id="${id}" style="--d:0">` +
-          `<span class="tw none"></span><span class="ic">${iconFor(n)}</span><span class="nm">${esc(n.name)}</span>${rowTrail(n, id, isAgent)}</div>`);
-      }
+      if (match(n)) row(id, n, 0, "none");
       n.children.forEach(visit);
     };
     S.nodes[S.rootId].children.forEach(visit);
@@ -1679,16 +1683,16 @@ function renderLayers() {
       const n = S.nodes[id];
       const has = n.children.length > 0;
       const open = expanded.has(id);
-      const isAgent = agentIds.has(id);
-      out.push(`<div class="row${id === sel ? " sel" : ""}${isAgent ? " agent-editing" : ""}${depth === 0 ? " ab" : ""}" role="treeitem" draggable="true" data-id="${id}" style="--d:${depth}">` +
-        `<span class="tw ${has ? (open ? "open" : "") : "none"}" data-twist>${TWIST}</span><span class="ic">${iconFor(n)}</span>` +
-        `<span class="nm">${esc(n.name)}</span>${rowTrail(n, id, isAgent)}</div>`);
+      row(id, n, depth, has ? (open ? "open" : "closed") : "none");
       if (has && open) n.children.forEach((c) => walk(c, depth + 1));
     };
     S.nodes[S.rootId].children.forEach((c) => walk(c, 0));
   }
-  layersEl.innerHTML = out.join("") || (q ? `<div class="layers-empty">No matching layers.</div>` : `<div class="layers-empty-card"><svg width="18" height="18" viewBox="0 0 16 16" fill="none"><rect x="2.5" y="3" width="11" height="10" rx="2" stroke="#8a8a87" stroke-width="1.4" stroke-dasharray="2.5 2"/></svg><strong>No artboards yet</strong><span>Press F for frame, or click + to add a 390×844 or 1440×900 artboard.</span></div>`);
-  layersEl.querySelector(".row.sel")?.scrollIntoView({ block: "nearest" });
+  return { rows, filtered: Boolean(q) };
+}
+function renderLayers() {
+  if (!S) return;
+  window.weft.events.dispatchEvent(new Event("layers"));
 }
 
 // ---------------------------------------------------------------------------
@@ -2552,43 +2556,27 @@ function setupInteract() {
 // ---------------------------------------------------------------------------
 // Layers panel: select, collapse, rename, drag to reorder / reparent
 // ---------------------------------------------------------------------------
-layersEl.addEventListener("click", (e) => {
-  const row = e.target.closest(".row");
-  if (!row) return;
-  const id = row.dataset.id;
-  if (e.target.closest("[data-twist]")) {
-    expanded.has(id) ? expanded.delete(id) : expanded.add(id);
-    saveExpanded();
-    return renderLayers();
-  }
-  select(id);
-});
-layersEl.addEventListener("dblclick", (e) => { const row = e.target.closest(".row"); if (row && !e.target.closest("[data-twist]")) renameRow(row.dataset.id); });
-layersEl.addEventListener("pointerover", (e) => { const row = e.target.closest(".row"); const id = row?.dataset.id || null; if (id !== hoverId) { hoverId = id; updateOverlay(); } });
-layersEl.addEventListener("pointerleave", () => { hoverId = null; updateOverlay(); });
-
+// Clicks, hover, rename and drag & drop on rows are handled in LayersPanel.svelte, which calls back into the
+// functions below through window.weft.
+function toggleExpanded(id) {
+  expanded.has(id) ? expanded.delete(id) : expanded.add(id);
+  saveExpanded();
+  renderLayers();
+}
+function hoverLayer(id) {
+  if (id !== hoverId) { hoverId = id; updateOverlay(); }
+}
+// Start renaming a layer in the tree (also used by double-clicking an artboard's label on the canvas).
 function renameRow(id) {
   select(id);
-  const nm = layersEl.querySelector(`.row[data-id="${CSS.escape(id)}"] .nm`);
-  if (!nm) return;
-  const input = Object.assign(document.createElement("input"), { value: S.nodes[id].name });
-  nm.replaceWith(input);
-  input.focus(); input.select();
-  let done = false;
-  const finish = (save) => {
-    if (done) return;
-    done = true;
-    const name = input.value.trim();
-    const changed = save && name && S.nodes[id] && name !== S.nodes[id].name;
-    input.replaceWith(nm); // restore the row first so live re-renders aren't held back
-    if (changed) { nm.textContent = name; patch(id, { name }).then((ok) => { if (!ok) renderLayers(); }); }
-    else renderLayers();
-  };
-  input.addEventListener("keydown", (k) => { k.stopPropagation(); if (k.key === "Enter") finish(true); if (k.key === "Escape") finish(false); });
-  input.addEventListener("blur", () => finish(true));
+  window.weft.events.dispatchEvent(new CustomEvent("layer-rename", { detail: id }));
+}
+async function renameLayer(id, name) {
+  const ok = await patch(id, { name });
+  if (!ok) renderLayers();
+  return ok;
 }
 
-let dragRowId = null;
 // Can the dragged layer become a child of target? Artboards stay top-level, and HTML and SVG don't mix.
 function canNestIn(dragId, targetId) {
   const target = S.nodes[targetId], drag = S.nodes[dragId];
@@ -2598,33 +2586,10 @@ function canNestIn(dragId, targetId) {
   if (targetSvg) return dragSvg && (target.tag === "svg" || target.tag === "g") && drag.tag !== "svg";
   return !dragSvg || drag.tag === "svg";
 }
-function dropZone(e, row) {
-  const r = row.getBoundingClientRect();
-  const f = (e.clientY - r.top) / r.height;
-  if (f < 0.3) return "before";
-  if (f > 0.7) return "after";
-  return canNestIn(dragRowId, row.dataset.id) ? "inside" : f < 0.5 ? "before" : "after";
-}
-layersEl.addEventListener("dragstart", (e) => { dragRowId = e.target.closest(".row")?.dataset.id; e.dataTransfer.effectAllowed = "move"; });
-layersEl.addEventListener("dragover", (e) => {
-  const row = e.target.closest(".row");
-  if (!row || !dragRowId) return;
-  e.preventDefault();
-  layersEl.querySelectorAll(".drop-before,.drop-after,.drop-inside").forEach((r) => r.classList.remove("drop-before", "drop-after", "drop-inside"));
-  row.classList.add(`drop-${dropZone(e, row)}`);
-});
-layersEl.addEventListener("dragleave", (e) => { e.target.closest?.(".row")?.classList.remove("drop-before", "drop-after", "drop-inside"); });
-layersEl.addEventListener("drop", (e) => {
-  e.preventDefault();
-  const row = e.target.closest(".row");
-  const id = dragRowId;
-  dragRowId = null;
-  layersEl.querySelectorAll(".drop-before,.drop-after,.drop-inside").forEach((r) => r.classList.remove("drop-before", "drop-after", "drop-inside"));
-  if (!row || !id || row.dataset.id === id) return;
-  const target = S.nodes[row.dataset.id];
-  dragRowId = id;
-  let zone = dropZone(e, row);
-  dragRowId = null;
+// Move layer `id` before / after / inside `targetId`, enforcing the tree's rules. zone: "before" | "after" | "inside".
+function dropLayer(id, targetId, zone) {
+  if (!S.nodes[id] || !S.nodes[targetId] || id === targetId) return;
+  const target = S.nodes[targetId];
   const dragIsArtboard = S.nodes[id].parentId === S.rootId;
   if (dragIsArtboard && target.parentId !== S.rootId) return toast("Artboards stay at the top level");
   // A layer dropped on an artboard row goes into that artboard (there's no "between artboards" for layers).
@@ -2635,9 +2600,8 @@ layersEl.addEventListener("drop", (e) => {
   let index = parent.children.indexOf(target.id) + (zone === "after" ? 1 : 0);
   const cur = parent.children.indexOf(id);
   if (cur >= 0 && cur < index) index -= 1;
-  patch(id, { parentId: parent.id, index });
-});
-layersEl.addEventListener("dragend", () => { dragRowId = null; });
+  return patch(id, { parentId: parent.id, index });
+}
 
 // ---------------------------------------------------------------------------
 // Fonts
@@ -3507,6 +3471,14 @@ window.weft = {
   // Command palette (CommandPalette.svelte)
   cmdkEntries: () => buildCmdkEntries(),
   closeCmdk: () => openCmdk(false),
+  // Layers tree (LayersPanel.svelte)
+  layerRows: () => layerRows(),
+  select: (id) => select(id),
+  toggleExpanded: (id) => toggleExpanded(id),
+  hoverLayer: (id) => hoverLayer(id),
+  renameLayer: (id, name) => renameLayer(id, name),
+  canNestIn: (dragId, targetId) => canNestIn(dragId, targetId),
+  dropLayer: (id, targetId, zone) => dropLayer(id, targetId, zone),
   // Comments tab (CommentsPanel.svelte)
   commentRows: () => commentRows(),
   openCommentThread: (id) => openCommentThread(id),

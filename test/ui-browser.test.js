@@ -749,3 +749,79 @@ test("browser: Comments panel (Svelte): open/resolved tabs, rows open threads, l
   await rest("POST", "/api/comments", { nodeId: b.id, text: "Another" });
   await waitFor(`document.querySelector('#comments-panel [data-cf="open"]').textContent === "Open · 2"`, "live update");
 });
+
+test("browser: Layers panel (Svelte): rename cancel / live updates / artboard label, hover box, refused drops", { timeout: 120_000 }, async (t) => {
+  const browserBin = findBrowser();
+  if (!browserBin) {
+    t.skip("No headless Chromium/Chrome binary found");
+    return;
+  }
+  const srv = await startTestServer();
+  t.after(() => srv.stop());
+  const cdp = await startBrowser(browserBin);
+  t.after(() => cdp.stop());
+  const rest = async (method, url, body) => {
+    const res = await fetch(srv.baseUrl + url, { method, headers: { "content-type": "application/json" }, body: body && JSON.stringify(body) });
+    assert.ok(res.ok, `${method} ${url} → ${res.status}`);
+    return res.json();
+  };
+  const waitFor = async (expr, label) => {
+    for (let i = 0; i < 100; i++) { if (await cdp.evalJs(expr)) return; await sleep(50); }
+    assert.fail(`timed out waiting for ${label}`);
+  };
+  const s0 = await rest("GET", "/api/state");
+  const board = await rest("POST", "/api/nodes", { parentId: s0.rootId, tag: "div", name: "Board", styles: { width: "300px", height: "200px" } });
+  const card = await rest("POST", "/api/nodes", { parentId: board.id, tag: "div", name: "Card" });
+  const img = await rest("POST", "/api/nodes", { parentId: board.id, tag: "img", name: "Photo", attrs: { src: "data:image/png;base64,iVBORw0KGgo=" } });
+  await cdp.send("Page.navigate", { url: srv.baseUrl });
+  const row = (id) => `document.querySelector('#layers .row[data-id="${id}"]')`;
+  await waitFor(`document.querySelector("#live.live") && ${row(board.id)}`, "tree");
+  await cdp.evalJs(`${row(board.id)}.querySelector("[data-twist]").click()`); // new artboards start collapsed
+  await waitFor(`${row(card.id)} && ${row(img.id)}`, "board expanded");
+  const keyIn = (k) => cdp.evalJs(`document.querySelector("#layers .row input").dispatchEvent(new KeyboardEvent("keydown", { key: "${k}", bubbles: true }))`);
+
+  // Double-click → rename box; a live update meanwhile keeps it and what was typed; Escape cancels.
+  await cdp.evalJs(`${row(card.id)}.querySelector(".nm").dispatchEvent(new MouseEvent("dblclick", { bubbles: true }))`);
+  await waitFor(`document.activeElement === document.querySelector('#layers .row[data-id="${card.id}"] input')`, "rename input focused");
+  await cdp.evalJs(`(() => { const i = document.querySelector("#layers .row input"); i.value = "Half typed"; i.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+  await rest("PATCH", `/api/nodes/${board.id}`, { name: "Board (edited elsewhere)" });
+  await waitFor(`${row(board.id)}.querySelector(".nm").textContent === "Board (edited elsewhere)"`, "live update arrived");
+  assert.equal(await cdp.evalJs(`document.querySelector("#layers .row input")?.value`), "Half typed", "rename survives live updates");
+  await keyIn("Escape");
+  await waitFor(`!document.querySelector("#layers .row input")`, "rename closed");
+  assert.equal(await cdp.evalJs(`${row(card.id)}.querySelector(".nm").textContent`), "Card");
+  assert.equal((await rest("GET", "/api/state")).nodes[card.id].name, "Card", "Escape doesn't save");
+
+  // Double-clicking an artboard's label on the canvas renames it in the tree.
+  await cdp.evalJs(`document.querySelector('#labels .ab-label[data-id="${board.id}"]').dispatchEvent(new MouseEvent("dblclick", { bubbles: true }))`);
+  await waitFor(`document.activeElement === document.querySelector('#layers .row[data-id="${board.id}"] input')`, "artboard rename");
+  await cdp.evalJs(`(() => { const i = document.querySelector("#layers .row input"); i.value = "Renamed board"; i.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+  await keyIn("Enter");
+  for (let i = 0; i < 100 && (await rest("GET", "/api/state")).nodes[board.id].name !== "Renamed board"; i++) await sleep(50);
+  assert.equal((await rest("GET", "/api/state")).nodes[board.id].name, "Renamed board");
+
+  // Hovering a row shows the canvas hover box; leaving the tree hides it.
+  await cdp.evalJs(`${row(card.id)}.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }))`);
+  assert.equal(await cdp.evalJs("hoverId"), card.id);
+  assert.equal(await cdp.evalJs(`getComputedStyle(document.getElementById("hover-box")).display`), "block");
+  await cdp.evalJs(`document.getElementById("layers").dispatchEvent(new PointerEvent("pointerleave"))`);
+  assert.equal(await cdp.evalJs("hoverId"), null);
+
+  // Dropping into an <img> is refused with a toast; nothing moves.
+  await cdp.evalJs(`(() => {
+    const from = ${row(card.id)}, to = ${row(img.id)};
+    const r = to.getBoundingClientRect(), dt = new DataTransfer(), y = r.top + r.height * 0.5;
+    from.dispatchEvent(new DragEvent("dragstart", { bubbles: true, dataTransfer: dt }));
+    to.dispatchEvent(new DragEvent("dragover", { bubbles: true, cancelable: true, dataTransfer: dt, clientY: y }));
+    to.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: dt, clientY: y }));
+  })()`);
+  await sleep(300);
+  assert.equal((await rest("GET", "/api/state")).nodes[card.id].parentId, board.id, "card stays in the board");
+  assert.equal(await cdp.evalJs(`document.querySelectorAll("#layers .drop-before, #layers .drop-after, #layers .drop-inside").length`), 0, "drop highlight cleared");
+
+  // An agent's edit shows up live, with its MCP badge while it works.
+  await mcpCall(srv.baseUrl, "write_html", { parentId: card.id, html: `<p data-name="From agent">Hi</p>` });
+  await waitFor(`!${row(card.id)}.querySelector(".tw").classList.contains("none")`, "card gains an expand arrow");
+  await cdp.evalJs(`${row(card.id)}.querySelector("[data-twist]").click()`);
+  await waitFor(`[...document.querySelectorAll("#layers .row .nm")].some((n) => n.textContent === "From agent")`, "agent layer in tree");
+});
