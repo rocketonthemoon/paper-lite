@@ -217,10 +217,12 @@ export class Renderer {
     return next;
   }
 
-  async load(artboardId, width, height, widthOverride = null) {
-    const wOverride = Number.isFinite(widthOverride) && widthOverride > 0 ? Math.round(widthOverride) : null;
-    const url = `${this.baseUrl}/render/${encodeURIComponent(artboardId)}${wOverride ? `?width=${wOverride}` : ""}`;
+  async load(artboardId, width, height, opts = {}) {
+    const rawOverride = typeof opts === "number" ? opts : opts?.widthOverride;
+    const wOverride = typeof rawOverride === "number" && Number.isFinite(rawOverride) && rawOverride > 0 ? Math.round(rawOverride) : null;
+    const useWidthQuery = Boolean(wOverride || rawOverride === true);
     const w = Math.max(1, Math.ceil(wOverride || width)), h = Math.max(1, Math.ceil(height));
+    const url = `${this.baseUrl}/render/${encodeURIComponent(artboardId)}${useWidthQuery ? `?width=${w}` : ""}`;
     const key = this.contentKey?.() ?? null;
     const prev = this.shown;
     // Same artboard, same size, nothing changed since it loaded: the page already shows it.
@@ -239,9 +241,9 @@ export class Renderer {
   }
 
   /** Screenshot a node (rendered inside its artboard). Returns { png: Buffer, width, height, scale, diagnostics? }. */
-  screenshot({ artboardId, nodeId, width, height, scale = 1, maxSize = 1600, diagnostics = false, checkContrast = false, checkTapTargets } = {}) {
+  screenshot({ artboardId, nodeId, width, height, scale = 1, maxSize = 1600, widthOverride = false, diagnostics = false, checkContrast = false, checkTapTargets } = {}) {
     return this.run(async () => {
-      await this.load(artboardId, width, height);
+      await this.load(artboardId, width, height, { widthOverride });
       const rect = await this.evaluate(`(() => { const el = document.querySelector('[data-layer="${nodeId}"], .layer-${nodeId}'); if (!el) return null;
         const r = el.getBoundingClientRect(); return { x: r.left + scrollX, y: r.top + scrollY, w: r.width, h: r.height }; })()`);
       if (!rect || rect.w < 1 || rect.h < 1) throw new Error("Node has no visible box to capture");
@@ -250,7 +252,8 @@ export class Renderer {
         clip: { x: rect.x, y: rect.y, width: rect.w, height: rect.h, scale: s } });
       let diag = null;
       if (diagnostics) {
-        diag = await this.evaluate(buildDomAuditScript({ artboardId, width, checkContrast, checkTapTargets }));
+        const effectiveWidth = typeof widthOverride === "number" && Number.isFinite(widthOverride) && widthOverride > 0 ? Math.round(widthOverride) : width;
+        diag = await this.evaluate(buildDomAuditScript({ artboardId, width: effectiveWidth, checkContrast, checkTapTargets }));
       }
       return {
         png: Buffer.from(data, "base64"),

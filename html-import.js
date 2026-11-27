@@ -47,13 +47,29 @@ const squash = (t) => t.replace(/\s+/g, " ");
  */
 export function htmlToSpecs(html) {
   const warnings = [];
-  const frag = parseFragment(String(html || ""));
+  const normalizedHtml = String(html || "").replace(/<icon\b((?:[^>"']|"[^"]*"|'[^']*')*?)\s*\/>/gi, "<icon$1></icon>");
+  const frag = parseFragment(normalizedHtml);
   const mapped = new Set();
 
   const convert = (el) => {
     const raw = el.tagName || el.nodeName;
     const svgNs = el.namespaceURI === "http://www.w3.org/2000/svg";
     let tag = svgNs ? raw : raw.toLowerCase();
+    if (tag === "icon") {
+      const spec = { tag: "icon", iconName: "", name: "", text: "", styles: {}, attrs: {}, children: [] };
+      for (const { name, value } of el.attrs || []) {
+        if (name === "name") spec.iconName = value;
+        else if (name === "style") Object.assign(spec.styles, parseInlineStyle(value));
+        else if (name === "data-name" || name === "data-label" || (name === "aria-label" && !spec.name)) spec.name = value;
+        else if (name === "class") spec.classes = value.split(/\s+/).filter(Boolean);
+        else if (name === "id" || name.startsWith("data-") || name.startsWith("on")) continue;
+        else spec.attrs[name] = value;
+      }
+      if ((el.childNodes || []).some((c) => c.nodeName !== "#text" || c.value.trim()) && warnings.length < 50) {
+        warnings.push(`<icon${spec.iconName ? ` name="${spec.iconName}"` : ""}> cannot hold child content; ignored`);
+      }
+      return spec;
+    }
     if (TAG_ALIASES[tag]) {
       if (LOSSY.has(tag) && !mapped.has(tag) && warnings.length < 50) {
         mapped.add(tag);
@@ -66,6 +82,8 @@ export function htmlToSpecs(html) {
       if (name === "style") Object.assign(spec.styles, parseInlineStyle(value));
       else if (name === "data-name" || name === "data-label" || name === "aria-label" && !spec.name) spec.name = value;
       else if (name === "class") spec.classes = value.split(/\s+/).filter(Boolean); // shared classes from the root CSS
+      else if (name === "data-component") { if (value.trim()) spec.component = value.trim(); }
+      else if (name === "data-slot") { if (value.trim()) spec.slot = value.trim(); }
       else if (name === "id" || name.startsWith("data-") || name.startsWith("on")) continue;
       else spec.attrs[name] = value;
     }

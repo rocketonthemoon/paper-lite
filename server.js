@@ -13,7 +13,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import {
   HttpError, ID_RE, SVG_TAGS, VOID_TAGS, cleanName, cleanTag, emptyPage, emptyProject, lenientMerge, mergeAttrs, mergeStyles,
   newId, normalizeProject, emptyRootCss, mergeRootCss, rootCssText, rootCssFlat, rootBaseClasses, definedRootClasses,
-  isBaseRule, rootClassesIn, cleanClassList, varsIn,
+  isBaseRule, rootClassesIn, cleanClassList, varsIn, analyzeRootCssUsage, pruneUnusedRootCss,
 } from "./model.js";
 import { FontLibrary, familiesIn, renameWithRetry } from "./fonts.js";
 import { htmlToSpecs } from "./html-import.js";
@@ -21,6 +21,9 @@ import { Renderer } from "./renderer.js";
 import { BlitzRenderer, PreferBlitz } from "./renderer-blitz.js";
 import { registerTools, SERVER_INSTRUCTIONS } from "./mcp-tools.js";
 import { CheckpointRepo } from "./checkpoint-store.js";
+import { MAX_ICONS, expandIconSpecs, parseSvgIcon } from "./icons.js";
+import { analyzeDesignLint, exportDesignTokens, importDesignTokens } from "./design-tokens.js";
+import { createComponentEngine, extractComponentOverridesFromSpec, trackNodeOverrides } from "./components.js";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.DATA_DIR || path.join(ROOT, "data");
@@ -320,6 +323,8 @@ function docSnapshot(doc = state) {
     rootId: doc.rootId,
     nodes: doc.nodes,
     rootCss: doc.rootCss || emptyRootCss(),
+    icons: doc.icons || {},
+    components: doc.components || {},
   });
 }
 
@@ -519,17 +524,21 @@ function sendEvent(event, data) {
 // Full document: on connect and when another project opens. Edits send only what changed (broadcastPatch).
 const broadcast = (source) => {
   lastSentRootCss = state.rootCss;
+  lastSentComponents = state.components;
   sendEvent("state", { source, state });
 };
 
 // Send browsers the nodes that changed ({ id: node | null } for deleted), the page list, and the root CSS when
 // it changed. A browser applies it only on top of `baseVersion`; one that missed a step reloads the full state.
 let lastSentRootCss = null;
+let lastSentComponents = null;
 function broadcastPatch(source, ids, baseVersion = state.version) {
   const nodes = {};
   for (const id of ids) nodes[id] = state.nodes[id] ?? null;
   const rootCss = state.rootCss !== lastSentRootCss ? state.rootCss : undefined;
+  const components = state.components !== lastSentComponents ? state.components : undefined;
   lastSentRootCss = state.rootCss;
+  lastSentComponents = state.components;
   sendEvent("patch", {
     source,
     id: state.id,
@@ -539,6 +548,7 @@ function broadcastPatch(source, ids, baseVersion = state.version) {
     pages: state.pages,
     rootId: state.rootId,
     ...(rootCss ? { rootCss } : {}),
+    ...(components ? { components } : {}),
     nodes,
   });
 }
@@ -594,7 +604,7 @@ function ensureAgentStartCheckpoint(beforeState) {
 // While an edit runs, `state.nodes` is a proxy that copies each node the first time the edit reads or writes it.
 // Afterwards those copies are compared with the live nodes; the ones that differ become the undo patch.
 // ---------------------------------------------------------------------------
-const docMeta = (doc) => ({ pages: [...doc.pages], rootCss: structuredClone(doc.rootCss || emptyRootCss()) });
+const docMeta = (doc) => ({ pages: [...doc.pages], rootCss: structuredClone(doc.rootCss || emptyRootCss()), icons: structuredClone(doc.icons || {}), components: structuredClone(doc.components || {}) });
 const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
 function beginTracking() {
@@ -625,6 +635,8 @@ function rollbackTracking(tr) {
   }
   state.pages = tr.meta.pages;
   state.rootCss = tr.meta.rootCss;
+  state.icons = tr.meta.icons;
+  state.components = tr.meta.components;
 }
 
 // Finish an edit: returns { before, after } with only the nodes that changed ({ id: node | null }) and the
@@ -667,6 +679,8 @@ function applyPatchSide(side) {
   if (side.meta) {
     state.pages = [...side.meta.pages];
     state.rootCss = structuredClone(side.meta.rootCss);
+    if (side.meta.icons !== undefined) state.icons = structuredClone(side.meta.icons);
+    state.components = structuredClone(side.meta.components || {});
   }
   if (!state.pages.includes(state.rootId)) state.rootId = state.pages[0];
 }
@@ -975,6 +989,8 @@ async function restoreCheckpointById(id, source = "api") {
     s.rootId = snap.pages.includes(s.rootId) ? s.rootId : snap.rootId;
     s.nodes = snap.nodes;
     if (snap.rootCss) s.rootCss = snap.rootCss;
+    s.icons = snap.icons || {};
+    s.components = snap.components ? structuredClone(snap.components) : {};
     return cp;
   }, { tool: "Restore checkpoint", target: cp.name, label: `Restore checkpoint · ${cp.name}` });
   return { id: cp.id, name: cp.name };
@@ -1323,7 +1339,19 @@ function updateNode(id, patch, source = "api", meta = null) {
   if (patch.text !== undefined) next.text = String(patch.text);
   if (patch.styles !== undefined) next.styles = mergeStyles(patch.replaceStyles ? {} : node.styles, patch.styles);
   if (patch.attrs !== undefined) next.attrs = mergeAttrs(node.attrs, patch.attrs, next.tag ?? node.tag);
-  if (patch.classes !== undefined) next.classes = definedClasses(cleanClassList(patch.classes ?? []));
+  if (patch.classes !== undefined || patch.addClasses !== undefined || patch.removeClasses !== undefined) {
+    let list = patch.classes !== undefined ? definedClasses(cleanClassList(patch.classes ?? [])) : [...(node.classes || [])];
+    if (patch.removeClasses !== undefined) {
+      const rm = new Set(cleanClassList(patch.removeClasses ?? []));
+      list = list.filter((c) => !rm.has(c));
+    }
+    if (patch.addClasses !== undefined) {
+      const add = definedClasses(cleanClassList(patch.addClasses ?? []));
+      for (const c of add) if (!list.includes(c)) list.push(c);
+      list = cleanClassList(list);
+    }
+    next.classes = list;
+  }
   const moving = patch.parentId !== undefined || patch.index !== undefined;
   if (moving) {
     if (isPage(id)) throw new HttpError(400, "Pages are reordered with update_page");
@@ -1340,8 +1368,24 @@ function updateNode(id, patch, source = "api", meta = null) {
   else if (patch.text !== undefined && patch.styles === undefined) uiTool = "Edit text";
   else if (patch.name !== undefined && patch.styles === undefined) uiTool = "Rename";
   else if (patch.styles !== undefined) uiTool = "Edit styles";
-  else if (patch.classes !== undefined) uiTool = "Edit classes";
+  else if (patch.classes !== undefined || patch.addClasses !== undefined || patch.removeClasses !== undefined) uiTool = "Edit classes";
   else if (patch.tag !== undefined) uiTool = "Change tag";
+  if (patch.detachComponent) {
+    return mutate(source, (s) => {
+      const target = s.nodes[id];
+      const rootId = target.componentRootId || target.id;
+      for (const item of Object.values(s.nodes)) {
+        if (item.id === rootId || item.componentRootId === rootId) {
+          delete item.componentId; delete item.componentRootId; delete item.componentKey; delete item.componentOverrides;
+        }
+      }
+      return target;
+    }, meta || { tool: "detach_component", target: node.name, nodeIds: [id] });
+  }
+  if (!meta?.skipOverrideTracking && node.componentId && node.componentKey) {
+    const ov = trackNodeOverrides(node, patch, next);
+    if (ov) next.componentOverrides = ov;
+  }
   return mutate(source, (s) => {
     const n = s.nodes[id];
     Object.assign(n, next);
@@ -1356,6 +1400,44 @@ function updateNode(id, patch, source = "api", meta = null) {
     }
     return n;
   }, meta || (source === "mcp" ? null : { tool: uiTool, target: next.name || node.name, nodeIds: [id] }));
+}
+
+function updateNodesMatching({ artboardIds, pageId, query, tag, hasClass, classes, addClasses, removeClasses, styles, replaceStyles, attrs } = {}, source = "mcp") {
+  const filterArtboards = artboardIds?.length ? new Set(artboardIds.map((aid) => getNode(aid).id)) : null;
+  if (pageId) getPage(pageId);
+  const hasFilter = Boolean(filterArtboards || pageId || (typeof query === "string" && query.trim()) || tag || hasClass);
+  if (!hasFilter) throw new HttpError(400, "Provide at least one filter (artboardIds, pageId, query, tag, or hasClass)");
+  const tagFilter = tag ? cleanTag(tag) : null;
+  const classFilter = hasClass ? cleanClassList([String(hasClass).replace(/^\./, "")])[0] : null;
+  const q = typeof query === "string" ? query.trim().toLowerCase() : "";
+  const hasPatch = classes !== undefined || addClasses !== undefined || removeClasses !== undefined || styles !== undefined || attrs !== undefined;
+  if (!hasPatch) throw new HttpError(400, "Provide at least one change (classes, addClasses, removeClasses, styles, or attrs)");
+  const patch = {};
+  if (classes !== undefined) patch.classes = classes;
+  if (addClasses !== undefined) patch.addClasses = addClasses;
+  if (removeClasses !== undefined) patch.removeClasses = removeClasses;
+  if (styles !== undefined) patch.styles = styles;
+  if (replaceStyles !== undefined) patch.replaceStyles = replaceStyles;
+  if (attrs !== undefined) patch.attrs = attrs;
+
+  const matched = [];
+  for (const n of Object.values(state.nodes)) {
+    if (isPage(n.id)) continue;
+    if (pageId && pageOf(n.id) !== pageId) continue;
+    if (filterArtboards && !filterArtboards.has(artboardOf(n.id))) continue;
+    if (tagFilter && n.tag !== tagFilter) continue;
+    if (classFilter && !n.classes?.includes(classFilter)) continue;
+    if (q && !n.name.toLowerCase().includes(q) && !n.text.toLowerCase().includes(q) && n.id !== query) continue;
+    matched.push(n.id);
+  }
+  if (!matched.length) return { matched: 0, updated: 0, nodeIds: [] };
+  const targetName = matched.length === 1 ? state.nodes[matched[0]]?.name : `${matched.length} layers`;
+  batch(source, () => matched.map((id) => updateNode(id, patch, source).id), {
+    tool: source === "mcp" ? "update_nodes_matching" : "Batch edit",
+    target: targetName,
+    nodeIds: matched,
+  });
+  return { matched: matched.length, updated: matched.length, nodeIds: matched };
 }
 
 function deleteNode(id, source = "api") {
@@ -1385,11 +1467,15 @@ function duplicateNode(id, source = "api") {
   if (isPage(id)) throw new HttpError(400, "Pages cannot be duplicated");
   const node = getNode(id);
   return mutate(source, (s) => {
-    const copy = (srcId, parentId) => {
+    const dupRootSourceId = node.componentId && !node.componentRootId ? node.id : null;
+    const copy = (srcId, parentId, newInstRoot = null) => {
       const src = s.nodes[srcId];
       const nid = newId();
-      s.nodes[nid] = { ...structuredClone(src), id: nid, parentId, children: [] };
-      s.nodes[nid].children = src.children.map((c) => copy(c, nid));
+      const instRoot = newInstRoot || (srcId === dupRootSourceId ? nid : null);
+      const cloned = { ...structuredClone(src), id: nid, parentId, children: [] };
+      if (cloned.componentRootId && dupRootSourceId && cloned.componentRootId === dupRootSourceId && instRoot) cloned.componentRootId = instRoot;
+      s.nodes[nid] = cloned;
+      s.nodes[nid].children = src.children.map((c) => copy(c, nid, instRoot));
       return nid;
     };
     const nid = copy(id, node.parentId);
@@ -1451,19 +1537,117 @@ function definedClasses(list) {
   return list;
 }
 
-function getRootCss(doc = state) {
+function getRootCss(opts = {}, doc = state) {
   const root = doc.rootCss || emptyRootCss();
-  const usage = {};
-  for (const n of Object.values(doc.nodes)) for (const c of n.classes || []) usage[c] = (usage[c] || 0) + 1;
+  const { usage, unusedClasses: allUnusedClasses, unusedVars: allUnusedVars } = analyzeRootCssUsage(root, doc.nodes);
+  const include = Array.isArray(opts?.include) && opts.include.length ? opts.include : null;
+  const classesOpt = Array.isArray(opts?.classes) && opts.classes.length ? opts.classes : null;
+  const format = opts?.format || "full";
+
+  const wantedClasses = classesOpt
+    ? new Set(cleanClassList(classesOpt.map((c) => String(c ?? "").trim().replace(/^\./, ""))))
+    : null;
+  const collectVarsFrom = (rulesList) => {
+    const used = new Set();
+    const addVars = (val) => {
+      for (const ref of varsIn(val)) {
+        if (used.has(ref)) continue;
+        used.add(ref);
+        if (ref in root.vars) addVars(root.vars[ref]);
+        for (const rr of root.rules) if (rr.selector === ":root" && ref in rr.styles) addVars(rr.styles[ref]);
+      }
+    };
+    for (const r of rulesList) for (const val of Object.values(r.styles)) addVars(val);
+    return used;
+  };
+
+  let scopedRules = root.rules;
+  let scopedVars = root.vars;
+  let scopedDefined = definedRootClasses(root);
+  let scopedUsage = usage;
+  let unusedClasses = allUnusedClasses;
+  let unusedVars = allUnusedVars;
+  if (wantedClasses) {
+    const classRules = root.rules.filter((r) => rootClassesIn(r.selector).some((c) => wantedClasses.has(c)));
+    const neededVars = collectVarsFrom(classRules);
+    scopedRules = [];
+    for (const r of root.rules) {
+      if (r.selector === ":root") {
+        const sub = Object.fromEntries(Object.entries(r.styles).filter(([k]) => neededVars.has(k)));
+        if (Object.keys(sub).length) scopedRules.push({ ...r, styles: sub });
+      } else if (rootClassesIn(r.selector).some((c) => wantedClasses.has(c))) {
+        scopedRules.push(r);
+      }
+    }
+    scopedVars = Object.fromEntries(Object.entries(root.vars).filter(([k]) => neededVars.has(k)));
+    scopedDefined = scopedDefined.filter((c) => wantedClasses.has(c));
+    scopedUsage = Object.fromEntries(Object.entries(usage).filter(([c]) => wantedClasses.has(c)));
+    unusedClasses = allUnusedClasses.filter((c) => wantedClasses.has(c));
+    const unusedVarSet = new Set(allUnusedVars);
+    unusedVars = Object.keys(scopedVars).filter((k) => unusedVarSet.has(k));
+  }
+
+  const scopedRoot = { vars: scopedVars, rules: scopedRules };
+  const baseClasses = rootBaseClasses(scopedRoot);
+  const nonBaseRules = scopedRules.filter((r) => !isBaseRule(r));
+  const cssText = rootCssText(scopedRoot);
+
+  if (include) {
+    const want = new Set(include);
+    if (want.has("unused")) { want.add("unusedClasses"); want.add("unusedVars"); }
+    if (format === "css") want.add("css");
+    const out = {};
+    if (want.has("vars")) out.vars = scopedVars;
+    if (want.has("classes")) out.classes = baseClasses;
+    if (want.has("rules")) out.rules = nonBaseRules;
+    if (want.has("definedClasses")) out.definedClasses = scopedDefined;
+    if (want.has("css")) out.css = cssText;
+    if (want.has("usage")) out.usage = scopedUsage;
+    if (want.has("unusedClasses")) out.unusedClasses = unusedClasses;
+    if (want.has("unusedVars")) out.unusedVars = unusedVars;
+    return out;
+  }
+
+  if (format === "summary") {
+    return {
+      varsCount: Object.keys(scopedVars).length,
+      rulesCount: scopedRules.length,
+      varNames: Object.keys(scopedVars),
+      definedClasses: scopedDefined,
+      usage: scopedUsage,
+      unusedClasses,
+      unusedVars,
+    };
+  }
+
+  if (format === "css") {
+    return {
+      css: cssText,
+      definedClasses: scopedDefined,
+      varsCount: Object.keys(scopedVars).length,
+      rulesCount: scopedRules.length,
+    };
+  }
+
   // classes: the plain `.name { }` rules; rules: everything else (states, @media, nested, element selectors).
-  return { vars: root.vars, classes: rootBaseClasses(root), rules: root.rules.filter((r) => !isBaseRule(r)), definedClasses: definedRootClasses(root), css: rootCssText(root), usage };
+  return {
+    vars: scopedVars,
+    classes: baseClasses,
+    rules: nonBaseRules,
+    definedClasses: scopedDefined,
+    css: cssText,
+    usage: scopedUsage,
+    unusedClasses,
+    unusedVars,
+  };
 }
 
 // Patch the root CSS. `css` text is parsed and merged like vars/classes; replace: true starts from empty.
 // Removing a class also removes it from every layer that used it, in the same undo step.
-function updateRootCss({ vars, classes, css, replace = false } = {}, source = "api") {
+async function updateRootCss({ vars, classes, css, rules, replace = false, pruneUnused = false } = {}, source = "api") {
   const before = state.rootCss || emptyRootCss();
-  const next = mergeRootCss(before, { css, vars, classes }, { replace });
+  let next = mergeRootCss(before, { css, vars, classes, rules }, { replace });
+  if (pruneUnused) next = pruneUnusedRootCss(next, state.nodes);
   // Changed variables and rules, by name (a rule is named by its selector and @media).
   const ruleKey = (r) => (r.media ? `@media ${r.media} { ${r.selector} }` : r.selector);
   const ruleMap = (root) => {
@@ -1471,14 +1655,36 @@ function updateRootCss({ vars, classes, css, replace = false } = {}, source = "a
     for (const r of root.rules) m.set(ruleKey(r), JSON.stringify([m.get(ruleKey(r)), r.styles]));
     return m;
   };
+  const classSig = (root) => {
+    const m = new Map();
+    for (const r of root.rules) {
+      for (const c of rootClassesIn(r.selector)) {
+        const list = m.get(c) || [];
+        list.push([r.selector, r.media || "", r.styles]);
+        m.set(c, list);
+      }
+    }
+    for (const [c, list] of m) m.set(c, JSON.stringify(list));
+    return m;
+  };
   const rb = ruleMap(before), rn = ruleMap(next);
+  const cb = classSig(before), cn = classSig(next);
   const changed = [
     ...Object.keys({ ...before.vars, ...next.vars }).filter((k) => before.vars[k] !== next.vars[k]),
     ...[...new Set([...rb.keys(), ...rn.keys()])].filter((k) => rb.get(k) !== rn.get(k)),
   ];
-  const stillDefined = new Set(definedRootClasses(next));
+  const addedClasses = [...cn.keys()].filter((c) => !cb.has(c));
+  const removedClasses = [...cb.keys()].filter((c) => !cn.has(c));
+  const updatedClasses = [...cn.keys()].filter((c) => cb.has(c) && cb.get(c) !== cn.get(c));
+  const addedVars = Object.keys(next.vars).filter((k) => !(k in before.vars));
+  const removedVars = Object.keys(before.vars).filter((k) => !(k in next.vars));
+  const updatedVars = Object.keys(next.vars).filter((k) => k in before.vars && before.vars[k] !== next.vars[k]);
+
+  const stillDefinedList = definedRootClasses(next);
+  const stillDefined = new Set(stillDefinedList);
   const dropped = definedRootClasses(before).filter((c) => !stillDefined.has(c));
   const touchedIds = [];
+  const warnings = [];
   mutate(source, (s) => {
     s.rootCss = next;
     if (dropped.length) {
@@ -1488,34 +1694,122 @@ function updateRootCss({ vars, classes, css, replace = false } = {}, source = "a
         if (!n.classes.length) delete n.classes;
         touchedIds.push(n.id);
       }
+      const pruneTree = (t) => {
+        if (t.classes?.length) { t.classes = t.classes.filter((c) => !dropped.includes(c)); if (!t.classes.length) delete t.classes; }
+        (t.children || []).forEach(pruneTree);
+      };
+      for (const comp of Object.values(s.components || {})) if (comp?.tree) pruneTree(comp.tree);
     }
   }, { tool: source === "mcp" ? "update_root_css" : "Edit root CSS", target: changed.length ? `Root CSS · ${changed.slice(0, 3).join(", ")}${changed.length > 3 ? "…" : ""}` : "Root CSS", nodeIds: touchedIds });
-  return { ...getRootCss(), changed, removedFromLayers: touchedIds.length || undefined };
+  // Ensure full persistence before returning so subsequent write_html / restarts always see the updated root CSS.
+  await flushWrites();
+  if (touchedIds.length) {
+    warnings.push(`Removed ${dropped.map((c) => `.${c}`).join(", ")} from ${touchedIds.length} layer${touchedIds.length === 1 ? "" : "s"}`);
+  }
+  const missingVars = new Set();
+  for (const r of next.rules) {
+    for (const v of Object.values(r.styles)) {
+      for (const ref of varsIn(v)) {
+        if (!(ref in next.vars) && !next.rules.some((rr) => rr.selector === ":root" && ref in rr.styles)) {
+          missingVars.add(ref);
+        }
+      }
+    }
+  }
+  if (missingVars.size) warnings.push(`Undefined variables referenced in root CSS: ${[...missingVars].join(", ")}`);
+  return {
+    addedClasses,
+    updatedClasses,
+    removedClasses,
+    addedVars,
+    updatedVars,
+    removedVars,
+    changed,
+    definedClasses: stillDefinedList,
+    varsCount: Object.keys(next.vars).length,
+    rulesCount: next.rules.length,
+    ...(touchedIds.length ? { removedFromLayers: touchedIds.length } : {}),
+    warnings,
+  };
 }
 
-// Nudges for agents: hard-coded values that already exist as a root variable, and var() names that don't exist.
-function rootCssHints(nodeIds, doc = state) {
-  const root = doc.rootCss || emptyRootCss();
-  // Several variables can share a value (--space-3 and --radius both 12px); name them all.
-  const byValue = new Map();
-  for (const [k, v] of Object.entries(root.vars)) byValue.set(String(v).toLowerCase(), [...(byValue.get(String(v).toLowerCase()) || []), k]);
-  const hints = new Set();
-  for (const id of nodeIds) {
-    const n = doc.nodes[id];
-    if (!n) continue;
-    for (const [k, v] of Object.entries(n.styles)) {
-      if (doc.pages.includes(n.parentId) && (k === "left" || k === "top" || k === "position")) continue;
-      const known = byValue.get(String(v).toLowerCase());
-      if (known) hints.add(`${k}: ${v} is the root variable ${known.join(" / ")}; use ${known.map((x) => `var(${x})`).join(" or ")} so it stays shared`);
-      for (const ref of varsIn(v)) if (!(ref in root.vars)) hints.add(`${n.name}: var(${ref}) isn't defined in the root CSS (add it with update_root_css)`);
-    }
-    if (hints.size >= 20) break;
+async function importRootCss({ sourceProjectId, mode = "merge", varsOnly = false, classes } = {}, source = "mcp") {
+  if (!["merge", "replace"].includes(mode)) throw new HttpError(400, `Invalid mode "${mode}" (use merge or replace)`);
+  if (!sourceProjectId || !ID_RE.test(String(sourceProjectId))) throw new HttpError(400, "Invalid sourceProjectId");
+  const srcDoc = await readProject(sourceProjectId);
+  const srcRoot = srcDoc.rootCss || emptyRootCss();
+  const classSet = Array.isArray(classes) && classes.length ? new Set(cleanClassList(classes)) : null;
+
+  let rulesToImport = [];
+  if (!varsOnly) {
+    rulesToImport = classSet
+      ? srcRoot.rules.filter((r) => rootClassesIn(r.selector).some((c) => classSet.has(c)))
+      : srcRoot.rules;
   }
-  return [...hints].slice(0, 20);
+
+  let varsToImport = {};
+  if (classSet && !varsOnly) {
+    const needed = new Set();
+    const queue = [];
+    for (const r of rulesToImport) {
+      for (const stVal of Object.values(r.styles || {})) {
+        for (const v of varsIn(stVal)) if (!needed.has(v)) { needed.add(v); queue.push(v); }
+      }
+    }
+    while (queue.length) {
+      const v = queue.shift();
+      if (!(v in srcRoot.vars)) continue;
+      varsToImport[v] = srcRoot.vars[v];
+      for (const ref of varsIn(srcRoot.vars[v])) {
+        if (!needed.has(ref)) { needed.add(ref); queue.push(ref); }
+      }
+    }
+  } else {
+    varsToImport = { ...srcRoot.vars };
+  }
+
+  const res = await updateRootCss({ vars: varsToImport, rules: rulesToImport, replace: mode === "replace" }, source);
+  return {
+    importedFrom: { id: srcDoc.id, name: srcDoc.name },
+    mode,
+    varsImported: Object.keys(varsToImport).length,
+    rulesImported: rulesToImport.length,
+    ...res,
+  };
+}
+
+async function applyDesignTokens({ tokens, mode = "merge" } = {}, source = "mcp") {
+  if (!["merge", "replace"].includes(mode)) throw new HttpError(400, `Invalid mode "${mode}" (use merge or replace)`);
+  const parsed = importDesignTokens(tokens);
+  const existingVars = state.rootCss?.vars || {};
+  const varsPatch = mode === "replace"
+    ? { ...Object.fromEntries(Object.keys(existingVars).map((k) => [k, null])), ...parsed.vars }
+    : parsed.vars;
+  const res = await updateRootCss({ vars: varsPatch }, source);
+  return {
+    mode,
+    imported: parsed.tokenCount,
+    ...(parsed.warnings.length ? { warnings: parsed.warnings } : {}),
+    ...res,
+  };
+}
+
+// Design system linter + nudges for agents (exact duplicates, unknown var(), spacing/radii/font-size/color lints).
+function rootCssHints(nodeIds, doc = state, options = {}) {
+  return analyzeDesignLint(nodeIds, doc, options);
 }
 
 // Insert a parsed HTML spec tree (lenient: bad tags/styles/attrs are dropped with warnings). Call inside mutate/batch.
 function addSubtree(spec, parentId, index, warnings) {
+  if (spec.component) {
+    const comp = state.components?.[spec.component];
+    if (comp) {
+      const overrides = extractComponentOverridesFromSpec(spec);
+      const rootName = spec.name && spec.name !== "Frame" ? spec.name : undefined;
+      return components.instantiateIntoState(comp, parentId, index, overrides, rootName, warnings).rootId;
+    }
+    warnings.push(`Component "${spec.component}" is not registered; built as a regular layer`);
+  }
   const parent = getNode(parentId);
   const label = cleanName(spec.name, spec.tag);
   let tag;
@@ -1561,9 +1855,42 @@ function specTag(spec) {
   try { return cleanTag(spec.tag); } catch { return "div"; }
 }
 
-function writeHtml({ html, parentId, targetNodeId, mode = "insert-children", index }, source = "mcp") {
-  const { specs, warnings } = htmlToSpecs(html);
-  if (!specs.length) throw new HttpError(400, "No elements found in html");
+function listIcons(doc = state) {
+  return Object.values(doc.icons || {})
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((ic) => ({ name: ic.name, ...(ic.viewBox ? { viewBox: ic.viewBox } : {}), shapes: ic.children.length }));
+}
+
+function registerIcons({ icons, name, svg, replace = false } = {}, source = "mcp") {
+  const entries = Array.isArray(icons) ? icons : (name !== undefined || svg !== undefined ? [{ name, svg }] : []);
+  if (!entries.length) throw new HttpError(400, "Provide icons: [{ name, svg }] or { name, svg }");
+  const parsed = entries.map((e) => parseSvgIcon(e?.name, e?.svg));
+  const next = replace ? {} : structuredClone(state.icons || {});
+  for (const asset of parsed) next[asset.name] = asset;
+  if (Object.keys(next).length > MAX_ICONS) throw new HttpError(400, `At most ${MAX_ICONS} registered icons per project`);
+  mutate(source, (s) => { s.icons = next; }, {
+    tool: source === "mcp" ? "register_icons" : "Register icons",
+    target: parsed.length === 1 ? parsed[0].name : `${parsed.length} icons`,
+  });
+  return { registered: parsed.map((p) => p.name), total: Object.keys(next).length };
+}
+
+function deleteIcon(name, source = "mcp") {
+  const key = String(name ?? "").trim();
+  if (!key || !Object.hasOwn(state.icons || {}, key)) throw new HttpError(404, `Icon "${key}" not found`);
+  mutate(source, (s) => {
+    const next = { ...(s.icons || {}) };
+    delete next[key];
+    s.icons = next;
+  }, { tool: source === "mcp" ? "delete_icon" : "Delete icon", target: key });
+  return { deleted: key, total: Object.keys(state.icons || {}).length };
+}
+
+function writeHtml({ html, parentId, targetNodeId, mode = "insert-children", index, lint = true }, source = "mcp") {
+  const { specs: rawSpecs, warnings } = htmlToSpecs(html);
+  if (!rawSpecs.length) throw new HttpError(400, "No elements found in html");
+  const specs = expandIconSpecs(rawSpecs, state.icons, warnings);
+  if (!specs.length) throw new HttpError(400, warnings[0] || "No elements found in html");
   let parent = (typeof parentId === "string" ? parentId.trim() : "") || state.rootId;
   let at = index;
   let replaceTargetName = null;
@@ -1589,7 +1916,7 @@ function writeHtml({ html, parentId, targetNodeId, mode = "insert-children", ind
   }, { tool: "write_html", target: targetLabel });
   const countAll = (id) => 1 + state.nodes[id].children.reduce((a, c) => a + countAll(c), 0);
   const subtree = (id) => [id, ...state.nodes[id].children.flatMap(subtree)];
-  warnings.push(...rootCssHints(created.flatMap(subtree)));
+  warnings.push(...rootCssHints(created.flatMap(subtree), state, { lint }));
   return {
     created: created.map((id) => ({ id, name: state.nodes[id].name, tag: state.nodes[id].tag })),
     layers: created.reduce((a, id) => a + countAll(id), 0),
@@ -2215,6 +2542,7 @@ async function exportProjectZip(projectId, format = "html") {
 
   const fontCss = allFamilies.size ? fonts.css({ families: [...allFamilies], filesBase: "fonts" }) : "";
   entries.push({ name: "styles.css", data: sheet.css(fontCss) });
+  entries.push({ name: "tokens.json", data: `${JSON.stringify(exportDesignTokens(doc), null, 2)}\n` });
 
   // Bundle uploaded font files used anywhere in the project so exported HTML works offline.
   const fontFiles = allFamilies.size ? fonts.uploadedFor([...allFamilies]) : [];
@@ -2395,12 +2723,19 @@ async function auditArtboards({ nodeIds, nodeId, width, checkContrast = false, c
   return { ok: audits.every((a) => a.ok), summary, audits };
 }
 
+const components = createComponentEngine({
+  getState: () => state, getNode, isPage, safePageOf, nestError, insertChild, nextArtboardPosition, definedClasses, mutate, specTag,
+});
+
 const mcpContext = {
   state: () => state,
   urls: { ui: PUBLIC_URL, mcp: `${PUBLIC_URL}/mcp` },
   getNode, isPage, pageOf, artboardOf, artboardSize, outline, exportCode, renderer, measureInTab, auditArtboards,
-  createNode, updateNode, deleteNode, duplicateNode, createArtboard, writeHtml,
-  rootCss: { get: () => getRootCss(), update: (patch) => updateRootCss(patch, "mcp"), hints: (ids) => rootCssHints(ids) },
+  createNode, updateNode, updateNodesMatching, deleteNode, duplicateNode, createArtboard, writeHtml,
+  components: { list: () => components.list(), create: (a, s) => components.create(a, s), instantiate: (a, s) => components.instantiate(a, s), update: (a, s) => components.update(a, s), remove: (a, s) => components.remove(a, s) },
+  rootCss: { get: (opts) => getRootCss(opts), update: (patch) => updateRootCss(patch, "mcp"), import: (opts) => importRootCss(opts, "mcp"), hints: (ids, opts) => rootCssHints(ids, state, opts) },
+  tokens: { export: () => exportDesignTokens(state), import: (opts) => applyDesignTokens(opts, "mcp") },
+  icons: { list: () => listIcons(), register: (opts) => registerIcons(opts, "mcp"), remove: (name) => deleteIcon(name, "mcp") },
   batch: (source, fn, meta) => batch(source, fn, meta),
   undo: (source) => stepHistory(source, "undo"),
   redo: (source) => stepHistory(source, "redo"),
@@ -2538,6 +2873,12 @@ app.post("/api/state", wrap((req) => {
 // Nodes
 app.get("/api/root-css", wrap(() => getRootCss()));
 app.patch("/api/root-css", wrap((req) => updateRootCss(req.body || {}, who(req))));
+app.get("/api/icons", wrap(() => listIcons()));
+app.post("/api/icons", wrap((req) => registerIcons(req.body || {}, who(req))));
+app.delete("/api/icons/:name", wrap((req) => deleteIcon(req.params.name, who(req))));
+app.post("/api/root-css/import", wrap((req) => importRootCss(req.body || {}, who(req))));
+app.get("/api/tokens", wrap(() => exportDesignTokens(state)));
+app.post("/api/tokens", wrap((req) => applyDesignTokens(req.body || {}, who(req))));
 app.post("/api/nodes", wrap((req) => createNode(req.body || {}, who(req))));
 app.patch("/api/nodes/:id", wrap((req) => updateNode(req.params.id, req.body || {}, who(req))));
 app.delete("/api/nodes/:id", wrap((req) => deleteNode(req.params.id, who(req))));
