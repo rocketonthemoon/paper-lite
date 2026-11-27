@@ -229,20 +229,33 @@ export function registerTools(server, ctx) {
   });
 
   server.registerTool("get_screenshot", {
-    description: "PNG screenshot of a layer or artboard rendered exactly like the canvas/export (headless Chrome). Default target: the user's selection, else the first artboard. Review your work with this once a section or screen is built, not after every small edit.",
-    inputSchema: { nodeId: z.string().optional(), scale: z.number().min(0.1).max(3).optional().describe("Default 1; large frames are capped at 1600px on the long edge") },
+    description: "PNG screenshot of one or more layers/artboards rendered exactly like the canvas/export (headless Chrome). Pass nodeId for one, nodeIds for batch capture, or omit for the user's selection / first artboard.",
+    inputSchema: {
+      nodeId: z.string().optional(),
+      nodeIds: z.array(z.string()).min(1).max(12).optional().describe("Batch capture multiple layers/artboards in one call"),
+      scale: z.number().min(0.1).max(3).optional().describe("Default 1; large frames are capped at 1600px on the long edge"),
+    },
     annotations: READ,
-  }, async ({ nodeId, scale = 1 }) => {
-    const id = nodeId || ctx.selection().ids[0] || S().nodes[S().rootId].children[0];
-    if (!id) throw new Error("Canvas is empty");
-    const target = ctx.getNode(id);
-    const ab = ctx.artboardOf(id);
-    ctx.look([id], "get_screenshot", target.name);
-    const shot = await ctx.renderer.screenshot({ artboardId: ab, nodeId: id, ...ctx.artboardSize(ab), scale });
-    return { content: [
-      { type: "image", data: shot.png.toString("base64"), mimeType: "image/png" },
-      { type: "text", text: `${S().nodes[id].name} (${id}) · ${shot.width}×${shot.height}px at scale ${shot.scale}` },
-    ] };
+  }, async ({ nodeId, nodeIds, scale = 1 }) => {
+    let targets;
+    if (nodeIds?.length) {
+      targets = [...new Set([...(nodeId ? [nodeId] : []), ...nodeIds])];
+    } else {
+      const id = nodeId || ctx.selection().ids[0] || S().nodes[S().rootId].children[0];
+      if (!id) throw new Error("Canvas is empty");
+      targets = [id];
+    }
+    const items = targets.map((id) => ({ id, target: ctx.getNode(id), ab: ctx.artboardOf(id) }));
+    ctx.look(targets, "get_screenshot", items.length === 1 ? items[0].target.name : `${items.length} targets`);
+    const content = [];
+    for (const { id, ab } of items) {
+      const shot = await ctx.renderer.screenshot({ artboardId: ab, nodeId: id, ...ctx.artboardSize(ab), scale });
+      content.push(
+        { type: "image", data: shot.png.toString("base64"), mimeType: "image/png" },
+        { type: "text", text: `${S().nodes[id].name} (${id}) · ${shot.width}×${shot.height}px at scale ${shot.scale}` },
+      );
+    }
+    return { content };
   });
 
   server.registerTool("get_jsx", {
@@ -256,10 +269,14 @@ export function registerTools(server, ctx) {
 
   // ---------------------------------------------------------------- root css
   server.registerTool("get_root_css", {
-    description: "The project's root CSS: variables (vars), plain classes (classes, camelCase styles), every other rule (rules: states, @media, nested; { selector, media?, styles }), all class names layers can use (definedClasses), the whole thing as nested CSS text (css), and how many layers use each class (usage). Build with these instead of raw values.",
-    inputSchema: {},
+    description: "The project's root CSS: variables (vars), plain classes (classes), contextual rules (rules), definedClasses, nested CSS text (css), and class usage. Optionally filter by classes, select fields via include, or use format: summary | css | full.",
+    inputSchema: {
+      include: z.array(z.enum(["vars", "classes", "rules", "definedClasses", "css", "usage", "unused", "unusedClasses", "unusedVars"])).min(1).optional().describe("Subset of fields to return"),
+      classes: z.array(z.string()).min(1).optional().describe("Scope to these classes and their referenced variables"),
+      format: z.enum(["summary", "css", "full"]).optional().describe("summary = compact counts/names; css = scoped CSS string + counts; full = full object (default)"),
+    },
     annotations: READ,
-  }, async () => text(ctx.rootCss.get()));
+  }, async (args) => text(ctx.rootCss.get(args || {})));
 
   server.registerTool("update_root_css", {
     description: "Add or change the root CSS in one undo step. Pass css text, real CSS with nesting, states and @media (\":root { --x: 1px; } .card { padding: var(--x); &:hover { opacity: .9; } @media (max-width: 640px) { padding: 8px; } }\"), and/or vars { \"--name\": value | null } and classes { name: { camelCase: value | null } | null }. Merges into the existing root CSS unless replace: true. Every layer using a changed variable or class updates everywhere.",
@@ -334,18 +351,67 @@ export function registerTools(server, ctx) {
     return text(hints.length ? { updated: touched.length, hints } : { updated: touched.length });
   });
 
+  const nodePatchFields = {
+    name: z.string().optional(),
+    tag: z.string().optional(),
+    text: z.string().optional(),
+    classes: classesSchema.optional(),
+    addClasses: classesSchema.optional().describe("Append shared classes without replacing existing ones"),
+    removeClasses: z.array(z.string()).max(12).optional().describe("Remove shared classes from the layer"),
+    styles: styleSchema.optional(),
+    replaceStyles: z.boolean().optional(),
+    attrs: z.record(z.string(), z.union([z.string(), z.null()])).optional(),
+  };
+
   server.registerTool("update_node", {
-    description: "Patch one layer: name, tag, text, classes (replaces the list; [] clears), styles (merged unless replaceStyles), attrs.",
+    description: "Patch one layer (nodeId, ...) or many layers in one undo step (updates: [{ nodeId, ... }]). Supports name, tag, text, classes, addClasses, removeClasses, styles (merged unless replaceStyles), attrs.",
     inputSchema: {
-      nodeId: z.string(), name: z.string().optional(), tag: z.string().optional(), text: z.string().optional(),
-      classes: classesSchema.optional(),
-      styles: styleSchema.optional(), replaceStyles: z.boolean().optional(), attrs: z.record(z.string(), z.union([z.string(), z.null()])).optional(),
+      nodeId: z.string().optional(),
+      ...nodePatchFields,
+      updates: z.array(z.object({ nodeId: z.string(), ...nodePatchFields })).min(1).optional().describe("Batch multiple node updates in one undo step"),
     },
     annotations: WRITE,
-  }, async ({ nodeId, ...patch }) => {
+  }, async ({ nodeId, updates, ...patch }) => {
+    if (updates && nodeId) throw new Error("Pass either nodeId or updates, not both");
+    if (updates?.length) {
+      const targetIds = updates.map((u) => u.nodeId);
+      const targetName = targetIds.length === 1 ? (updates[0].name || S().nodes[targetIds[0]]?.name) : `${targetIds.length} layers`;
+      const updated = ctx.batch("mcp", () => updates.map(({ nodeId: id, ...p }) => ctx.updateNode(id, p, "mcp")), {
+        tool: "update_node",
+        target: targetName,
+        nodeIds: targetIds,
+      });
+      ctx.touch(targetIds, "update_node", targetName);
+      const hints = updates.some((u) => u.styles) ? ctx.rootCss.hints(targetIds) : [];
+      return text(hints.length ? { updated: updated.length, nodes: updated.map((n) => summary(n.id)), hints } : { updated: updated.length, nodes: updated.map((n) => summary(n.id)) });
+    }
+    if (!nodeId) throw new Error("Provide nodeId or updates");
     const n = ctx.updateNode(nodeId, patch, "mcp", { tool: "update_node", target: patch.name || S().nodes[nodeId]?.name, nodeIds: [nodeId] });
     ctx.touch([nodeId], "update_node", patch.styles ? Object.keys(patch.styles).slice(0, 2).join(", ") : n.name);
     return text(summary(nodeId));
+  });
+
+  server.registerTool("update_nodes_matching", {
+    description: "Patch every layer matching filters (artboardIds, pageId, query, tag, hasClass) in one undo step. Supports addClasses, removeClasses, classes, styles, replaceStyles, attrs.",
+    inputSchema: {
+      artboardIds: z.array(z.string()).min(1).optional(),
+      pageId: z.string().optional(),
+      query: z.string().optional(),
+      tag: z.string().optional(),
+      hasClass: z.string().optional(),
+      classes: classesSchema.optional(),
+      addClasses: classesSchema.optional(),
+      removeClasses: z.array(z.string()).max(12).optional(),
+      styles: styleSchema.optional(),
+      replaceStyles: z.boolean().optional(),
+      attrs: z.record(z.string(), z.union([z.string(), z.null()])).optional(),
+    },
+    annotations: WRITE,
+  }, async (args) => {
+    const res = ctx.updateNodesMatching(args, "mcp");
+    if (res.nodeIds.length) ctx.touch(res.nodeIds, "update_nodes_matching", `${res.updated} layers`);
+    const hints = args.styles && res.nodeIds.length ? ctx.rootCss.hints(res.nodeIds) : [];
+    return text(hints.length ? { ...res, hints } : res);
   });
 
   server.registerTool("set_text_content", {
