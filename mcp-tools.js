@@ -210,7 +210,7 @@ export function registerTools(server, ctx) {
   });
 
   server.registerTool("get_computed_styles", {
-    description: "Browser-computed CSS and layout boxes (x, y, width, height relative to the artboard) for layers, rendered in headless Chrome. Use for exact values when exporting or checking alignment.",
+    description: "Browser-computed CSS and layout boxes (x, y, width, height relative to the artboard) for layers, measured in the user's open editor tab when it shows the artboard, else in headless Chrome. Use for exact values when exporting or checking alignment.",
     inputSchema: { nodeIds: ids, properties: z.array(z.string()).optional().describe("kebab-case CSS properties (default: a common layout/typography set)") },
     annotations: READ,
   }, async ({ nodeIds, properties }) => {
@@ -221,7 +221,10 @@ export function registerTools(server, ctx) {
     for (const id of nodeIds) { ctx.getNode(id); const ab = ctx.artboardOf(id); groups.set(ab, [...(groups.get(ab) || []), id]); }
     ctx.look(nodeIds, "get_computed_styles", `${nodeIds.length} layer${nodeIds.length === 1 ? "" : "s"}`);
     const out = {};
-    for (const [ab, list] of groups) Object.assign(out, await ctx.renderer.computed({ artboardId: ab, nodeIds: list, ...ctx.artboardSize(ab), properties: props }));
+    for (const [ab, list] of groups) {
+      const fromTab = await ctx.measureInTab({ artboardId: ab, nodeIds: list, properties: props });
+      Object.assign(out, fromTab || await ctx.renderer.computed({ artboardId: ab, nodeIds: list, ...ctx.artboardSize(ab), properties: props }));
+    }
     return text(out);
   });
 

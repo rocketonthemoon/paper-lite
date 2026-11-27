@@ -136,6 +136,7 @@ Each project's checkpoints are commits in a git repo (`DATA_DIR/projects/<id>.gi
 | `RENDERER` | `chrome` | `blitz` renders screenshots and computed styles with the Blitz sidecar (`weft-render`, experimental) and uses headless Chrome only for what it can't do. See [Blitz renderer](#blitz-renderer-experimental) |
 | `WEFT_RENDER_PATH` | `weft-render/target/release/weft-render` | The `weft-render` binary, for `RENDERER=blitz` |
 | `CHROME_FLAGS` | empty (`--no-sandbox --disable-dev-shm-usage --disable-gpu` in Docker) | Extra Chrome flags, space-separated |
+| `TAB_MEASURE_MS` | `500` | `get_computed_styles` first asks open editor tabs, which already have the artboard laid out (a few ms, and no headless Chrome start). A tab answers only if it shows that artboard at the current version; otherwise, or after this long, headless Chrome measures. `0` always uses headless Chrome |
 | `PERSIST_THROTTLE_MS` | `300` | Edits apply in memory at once; disk writes are coalesced to at most one per this interval (`0` writes immediately). Pending writes are flushed on shutdown |
 | `WEFT_URL` (or `PAPER_LITE_URL`) | `http://localhost:3000/mcp` | Server URL used by `mcp-stdio.js` |
 
