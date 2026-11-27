@@ -2350,10 +2350,55 @@ function answerTabMeasure(id, body) {
   else if (--m.waiting <= 0) m.done(null);
   return { ok: true };
 }
+async function auditArtboards({ nodeIds, nodeId, width, checkContrast = false, checkTapTargets } = {}) {
+  const rawIds = nodeIds?.length
+    ? nodeIds
+    : nodeId
+      ? [nodeId]
+      : uiSelection.ids.filter((id) => state.nodes[id] && !isPage(id));
+  const artboards = [];
+  const seen = new Set();
+  const pushAb = (ab) => {
+    if (ab && !seen.has(ab)) {
+      seen.add(ab);
+      artboards.push(ab);
+    }
+  };
+  if (rawIds.length) {
+    for (const id of rawIds) {
+      getNode(id);
+      if (isPage(id)) {
+        for (const cid of state.nodes[id].children || []) pushAb(cid);
+      } else {
+        pushAb(artboardOf(id));
+      }
+    }
+  } else {
+    for (const cid of state.nodes[state.rootId]?.children || []) pushAb(cid);
+  }
+  if (!artboards.length) throw new HttpError(400, "Canvas is empty");
+  look(artboards, "audit_artboard", artboards.length === 1 ? state.nodes[artboards[0]].name : `${artboards.length} artboards`);
+  const audits = [];
+  const summary = { brokenImages: 0, overflows: 0, missingFonts: 0, tapTargets: 0, lowContrast: 0 };
+  for (const ab of artboards) {
+    const size = artboardSize(ab);
+    const report = await renderer.audit({
+      artboardId: ab,
+      ...size,
+      widthOverride: width,
+      checkContrast,
+      checkTapTargets,
+    });
+    for (const k of Object.keys(summary)) summary[k] += report.summary?.[k] || 0;
+    audits.push({ artboardId: ab, name: state.nodes[ab].name, ...report });
+  }
+  return { ok: audits.every((a) => a.ok), summary, audits };
+}
+
 const mcpContext = {
   state: () => state,
   urls: { ui: PUBLIC_URL, mcp: `${PUBLIC_URL}/mcp` },
-  getNode, isPage, pageOf, artboardOf, artboardSize, outline, exportCode, renderer, measureInTab,
+  getNode, isPage, pageOf, artboardOf, artboardSize, outline, exportCode, renderer, measureInTab, auditArtboards,
   createNode, updateNode, deleteNode, duplicateNode, createArtboard, writeHtml,
   rootCss: { get: () => getRootCss(), update: (patch) => updateRootCss(patch, "mcp"), hints: (ids) => rootCssHints(ids) },
   batch: (source, fn, meta) => batch(source, fn, meta),
@@ -2734,8 +2779,10 @@ es.addEventListener("fonts", () => { if (!fontsSeen) { fontsSeen = true; return;
 }));
 app.get("/render/:id", wrap((req, res) => {
   const ab = artboardOf(req.params.id);
+  const w = Number(req.query.width);
+  const widthCss = Number.isFinite(w) && w > 0 ? `body>[data-layer="${ab}"]{width:${Math.round(w)}px!important}` : "";
   res.type("html").send(`<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="/fonts.css">
-<style>html,body{margin:0;background:transparent}</style></head><body>${toHtml(ab, { fontBase: "", markIds: true })}</body></html>`);
+<style>html,body{margin:0;background:transparent}${widthCss}</style></head><body>${toHtml(ab, { fontBase: "", markIds: true })}</body></html>`);
 }));
 app.get("/api/export", wrap((req, res) => {
   res.type("text/plain").send(exportCode(String(req.query.format || "html"), req.query.nodeId ? String(req.query.nodeId) : undefined));
@@ -2762,6 +2809,7 @@ function mcpToolDetail(toolName, args) {
   if (toolName === "write_html") return args.mode === "replace" ? "replace" : "";
   if (toolName === "create_artboard" && args.name) return String(args.name).slice(0, 28);
   if (toolName === "get_screenshot" && args.scale) return `${args.scale}x`;
+  if (toolName === "audit_artboard" && args.width) return `${args.width}px`;
   if (toolName === "get_jsx" && args.format) return String(args.format);
   return "";
 }

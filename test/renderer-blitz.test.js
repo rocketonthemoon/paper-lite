@@ -67,6 +67,7 @@ test("PreferBlitz: Chrome for unsupported CSS, a missing sidecar or a Blitz erro
     available,
     screenshot: async (a) => { calls.push(`${name}:screenshot:${a.artboardId}`); if (fail) throw new Error(`${name} broke`); return name; },
     computed: async (a) => { calls.push(`${name}:computed:${a.artboardId}`); return name; },
+    audit: async (a) => { calls.push(`${name}:audit:${a.artboardId}`); return name; },
     stop: () => calls.push(`${name}:stop`),
   });
   const fallbacks = [];
@@ -76,7 +77,9 @@ test("PreferBlitz: Chrome for unsupported CSS, a missing sidecar or a Blitz erro
   });
   assert.equal(await r.screenshot({ artboardId: "plain" }), "blitz");
   assert.equal(await r.computed({ artboardId: "blurry" }), "chrome", "unsupported CSS goes to Chrome");
-  assert.deepEqual(calls, ["blitz:screenshot:plain", "chrome:computed:blurry"]);
+  assert.equal(await r.audit({ artboardId: "plain" }), "chrome", "audits always run in Chrome");
+  assert.equal(await r.screenshot({ artboardId: "plain", diagnostics: true }), "chrome", "screenshot diagnostics run in Chrome");
+  assert.deepEqual(calls, ["blitz:screenshot:plain", "chrome:computed:blurry", "chrome:audit:plain", "chrome:screenshot:plain"]);
   assert.deepEqual(fallbacks, [], "routing by CSS is not a failure");
 
   calls.length = 0;

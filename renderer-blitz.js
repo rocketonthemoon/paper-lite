@@ -182,8 +182,12 @@ export class PreferBlitz {
     return this.chrome[method](args);
   }
 
-  screenshot(args) { return this.attempt("screenshot", args); }
+  screenshot(args) {
+    if (args?.diagnostics) return this.chrome.screenshot(args);
+    return this.attempt("screenshot", args);
+  }
   computed(args) { return this.attempt("computed", args); }
+  audit(args) { return this.chrome.audit(args); }
 
   stop() {
     this.blitz.stop();

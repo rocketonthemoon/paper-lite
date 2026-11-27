@@ -1,4 +1,4 @@
-// weft MCP tool set (49 tools). Modelled on Paper's MCP so agents can drive the canvas end to end:
+// weft MCP tool set (50 tools). Modelled on Paper's MCP so agents can drive the canvas end to end:
 // read (info / tree / nodes / comments / computed styles / screenshots / code) → write (HTML, styles, text, structure)
 // → review (screenshot) → reply_to_comment / finish_working_on_nodes. Every write is one undoable step and shows live in the UI.
 import * as z from "zod";
@@ -66,7 +66,7 @@ takes. Aim for 2–4 calls per screen, not 10–15:
    - write_html({ parentId, html }) to add content: a complete section or whole screen per call (see above).
    - write_html({ targetNodeId, mode: "replace", html }) to rebuild a layer in place.
 5. Edit: update_styles, set_text_content, rename_nodes, move_nodes, duplicate_nodes, delete_nodes: one call each with every change in its list.
-6. Review & collaborate: get_screenshot({ nodeId }) once a section or screen is done; get_computed_styles for exact values; reply_to_comment / resolve_comment on user notes.
+6. Review & collaborate: get_screenshot({ nodeId }) or audit_artboard({ nodeIds }) once a section or screen is done (broken images, overflows, missing fonts, tap targets, contrast); get_computed_styles for exact values; reply_to_comment / resolve_comment on user notes.
 7. Finish: finish_working_on_nodes. Use set_selection to point the user at the result.
 8. Code: get_jsx({ nodeId, format: "jsx" | "html" }).
 
@@ -229,21 +229,44 @@ export function registerTools(server, ctx) {
   });
 
   server.registerTool("get_screenshot", {
-    description: "PNG screenshot of a layer or artboard rendered exactly like the canvas/export (headless Chrome). Default target: the user's selection, else the first artboard. Review your work with this once a section or screen is built, not after every small edit.",
-    inputSchema: { nodeId: z.string().optional(), scale: z.number().min(0.1).max(3).optional().describe("Default 1; large frames are capped at 1600px on the long edge") },
+    description: "PNG screenshot of a layer or artboard rendered exactly like the canvas/export (headless Chrome). Default target: the user's selection, else the first artboard. Pass diagnostics: true to also run DOM/layout/font/image health checks. Review your work with this once a section or screen is built, not after every small edit.",
+    inputSchema: {
+      nodeId: z.string().optional(),
+      scale: z.number().min(0.1).max(3).optional().describe("Default 1; large frames are capped at 1600px on the long edge"),
+      diagnostics: z.boolean().optional().describe("Attach DOM & rendering health diagnostics (broken images, overflows, missing fonts, tap targets)"),
+      checkContrast: z.boolean().optional().describe("When diagnostics is true, also check WCAG text contrast ratios"),
+      checkTapTargets: z.boolean().optional().describe("When diagnostics is true, override mobile (<44px) tap-target checking"),
+    },
     annotations: READ,
-  }, async ({ nodeId, scale = 1 }) => {
+  }, async ({ nodeId, scale = 1, diagnostics = false, checkContrast = false, checkTapTargets }) => {
     const id = nodeId || ctx.selection().ids[0] || S().nodes[S().rootId].children[0];
     if (!id) throw new Error("Canvas is empty");
     const target = ctx.getNode(id);
     const ab = ctx.artboardOf(id);
     ctx.look([id], "get_screenshot", target.name);
-    const shot = await ctx.renderer.screenshot({ artboardId: ab, nodeId: id, ...ctx.artboardSize(ab), scale });
-    return { content: [
+    const shot = await ctx.renderer.screenshot({ artboardId: ab, nodeId: id, ...ctx.artboardSize(ab), scale, diagnostics, checkContrast, checkTapTargets });
+    const content = [
       { type: "image", data: shot.png.toString("base64"), mimeType: "image/png" },
       { type: "text", text: `${S().nodes[id].name} (${id}) · ${shot.width}×${shot.height}px at scale ${shot.scale}` },
-    ] };
+    ];
+    if (shot.diagnostics) {
+      content.push({ type: "text", text: JSON.stringify({ diagnostics: shot.diagnostics }, null, 2) });
+    }
+    return { content };
   });
+
+  server.registerTool("audit_artboard", {
+    description: "Run automated DOM & rendering diagnostics on one or more artboards (headless Chrome): broken images (naturalWidth === 0), horizontal overflow or clipped containers, unloaded custom webfonts, mobile (<44px) tap targets, and optional WCAG contrast checks. Defaults to the selection or all artboards on the current page.",
+    inputSchema: {
+      nodeIds: z.array(z.string()).min(1).optional().describe("Artboard or layer IDs to audit (resolved to unique artboards)"),
+      nodeId: z.string().optional().describe("Single artboard or layer ID to audit"),
+      width: z.number().int().min(200).max(4096).optional().describe("Optional viewport width override (e.g. 390, 834, 1440)"),
+      checkContrast: z.boolean().optional().describe("Check WCAG contrast ratios on text layers (4.5:1 normal, 3:1 large)"),
+      checkTapTargets: z.boolean().optional().describe("Check interactive controls <44px (default: enabled when width <= 480px)"),
+    },
+    annotations: READ,
+  }, async ({ nodeIds, nodeId, width, checkContrast = false, checkTapTargets }) =>
+    text(await ctx.auditArtboards({ nodeIds, nodeId, width, checkContrast, checkTapTargets })));
 
   server.registerTool("get_jsx", {
     description: "Code for a layer/artboard (or the whole page when nodeId is omitted): jsx = React components (className for shared classes, inline style objects for overrides, the root CSS they use in a header comment), html = <style> with the used root CSS and .layer-<id> overrides + markup. The project .zip export links every screen to one root styles.css.",
