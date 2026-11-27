@@ -84,9 +84,33 @@ test("exports share rules, icons and components instead of repeating them", { ti
     assert.match(files["components/Sidebar.jsx"], /^export function Sidebar\(\)/m);
     assert.match(files["components/Icon.jsx"], /^export function Icon\(\)/m);
     const home = files["page-1/home.jsx"];
-    assert.match(home, /^import "\.\.\/styles\.css";\nimport \{ Sidebar \} from "\.\.\/components\/Sidebar\.jsx";\nimport \{ Icon \} from "\.\.\/components\/Icon\.jsx";/);
+    assert.match(home, /^import "\.\.\/tokens\.css";\nimport "\.\.\/components\.css";\nimport \{ Sidebar \} from "\.\.\/components\/Sidebar\.jsx";\nimport \{ Icon \} from "\.\.\/components\/Icon\.jsx";/);
     assert.doesNotMatch(home, /style=/, "with the shared stylesheet, JSX uses class names only");
-    assert.match(files["page-1/home.html"], /<symbol id="icon-1"/);
+    assert.match(files["page-1/home.html"], /<symbol id="icon-1"/, "screens keep their icons inline (they open from disk)");
+    // icons.svg: each distinct icon in the project once, self-contained (attributes and inline styles, no classes).
+    const sprite = files["icons.svg"];
+    assert.match(sprite, /^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg">/);
+    assert.equal((sprite.match(/<symbol id="icon-[a-z0-9-]+" viewBox="0 0 24 24"[^>]*>/g) || []).length, 3, "three distinct icons");
+    for (const d of ["M0 0L24 24", "M1 0L24 24", "M2 0L24 24"]) assert.equal(sprite.split(`d="${d}"`).length - 1, 1, `${d} once`);
+    assert.match(sprite, /stroke="#333"/);
+    assert.match(sprite, /<symbol id="[^"]+" viewBox="0 0 24 24" fill="none">/, "the outer svg's paint carries over (not its size)");
+    assert.doesNotMatch(sprite, /<symbol[^>]* width=/);
+    assert.doesNotMatch(sprite, /class=/);
+    const ids = [...sprite.matchAll(/<symbol id="([^"]+)"/g)].map((m) => m[1]);
+    assert.equal(new Set(ids).size, ids.length, "unique symbol ids");
+  });
+
+  await t.test("icons.svg: registered icons under their own names, and their placed copies aren't added again", async () => {
+    await mcpCall(srv.baseUrl, "register_icons", { icons: [{ name: "bell", svg: '<svg viewBox="0 0 16 16" fill="none"><path d="M8 2a4 4 0 00-4 4v3l-1 2h10l-1-2V6a4 4 0 00-4-4z" stroke="#444"/></svg>' }] });
+    const ab = await mcpCall(srv.baseUrl, "create_artboard", { name: "Alerts", width: 400, height: 300 });
+    await mcpCall(srv.baseUrl, "write_html", { parentId: ab.id, html: `<div data-name="Row"><icon name="bell"></icon><span>One</span></div><div data-name="Row 2"><icon name="bell" style="width:24px;height:24px"></icon></div>` });
+    const files = unzip(Buffer.from(await (await fetch(`${srv.baseUrl}/api/export/zip?format=html`)).arrayBuffer()));
+    const sprite = files["icons.svg"];
+    const ids = [...sprite.matchAll(/<symbol id="([^"]+)"/g)].map((m) => m[1]);
+    assert.equal(ids[0], "icon-bell", "registered icons come first, by name");
+    assert.equal(sprite.split('d="M8 2a4 4').length - 1, 1, "two placed copies of the registered icon: still one symbol");
+    assert.match(sprite, /<symbol id="icon-bell" viewBox="0 0 16 16" fill="none">/);
+    assert.ok(files["tokens.json"], "the W3C tokens file is still exported");
   });
 
   await t.test("icons aren't shared when the root CSS styles SVG content (selectors wouldn't reach into <use>)", async () => {

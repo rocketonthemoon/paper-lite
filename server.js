@@ -2166,11 +2166,18 @@ function sharedSheet(doc = state) {
       }
       return byDecl.get(decl);
     },
-    css(fontCss = "") {
+    // tokens.css: fonts and the root CSS variables, the design's colours, sizes and font stacks.
+    tokensCss(fontCss = "") {
+      const l = cssLayers(doc.rootCss || emptyRootCss(), "");
+      const parts = [fontCss, l.vars && `/* Root CSS variables */\n${l.vars}`].filter(Boolean);
+      return `${parts.length ? parts.join("\n\n") : "/* No fonts or root CSS variables in this project yet. */"}\n`;
+    },
+    // components.css: the root CSS classes, the reset, layer overrides, then the root's states / media / nested rules.
+    // Linked after tokens.css, so the cascade is the same as one sheet.
+    componentsCss() {
       const l = cssLayers(doc.rootCss || emptyRootCss(), rules.join("\n\n"));
       return [
-        fontCss,
-        l.vars || l.base ? `/* Root CSS: shared variables and classes */\n${[l.vars, l.base].filter(Boolean).join("\n\n")}` : "",
+        l.base && `/* Root CSS: shared classes */\n${l.base}`,
         `${RESET_CSS}\nbody { margin: 0; }`,
         l.own && `/* Layer overrides */\n${l.own}`,
         l.contextual && `/* Root CSS: states, breakpoints and nested rules (they apply over layer overrides) */\n${l.contextual}`,
@@ -2262,6 +2269,53 @@ function toHtml(nodeId, { fontBase = PUBLIC_URL, filesBase, doc = state, sheet, 
   const l = cssLayers(usedRootCss(roots, doc), css.join("\n\n"));
   const styleText = [l.vars, l.base, RESET_CSS, l.own, l.contextual].filter(Boolean).join("\n\n");
   return `<style>\n${fontCss}${styleText}\n</style>\n\n${body}\n`;
+}
+
+// icons.svg in the project export: every icon in the project once, as a <symbol>, for reuse in an app
+// (<svg><use href="icons.svg#icon-search"/></svg> when served over http). Registered icons (register_icons) come
+// first under their registered names; any other distinct SVG on a page follows, named after its layer, unless it is a
+// copy of a registered icon. Styles are written inline, so the sprite works without the export's stylesheets.
+// Exported screens keep the icons they use inline, because browsers won't load <use> from another file when a page is
+// opened from disk.
+function iconSprite(doc = state) {
+  // Registry icons are specs ({ tag, attrs, styles, children }); page SVGs are layers. Both become plain shapes.
+  const fromSpec = (sp) => ({ tag: sp.tag, attrs: sp.attrs || {}, styles: sp.styles || {}, text: sp.text || "", kids: (sp.children || []).map(fromSpec) });
+  const fromNode = (id) => {
+    const n = doc.nodes[id];
+    return { tag: n.tag, attrs: n.attrs || {}, styles: exportStyles(n, doc), text: n.text || "", kids: n.children.filter((c) => doc.nodes[c]).map(fromNode) };
+  };
+  const shapesKey = (kids) => JSON.stringify(kids.map(function k(x) { return [x.tag, x.attrs, x.styles, x.text, x.kids.map(k)]; }));
+  const attrsOf = (x, skip = new Set()) => {
+    const style = Object.entries(x.styles).filter(([k]) => !skip.has(k)).map(([k, v]) => `${kebab(k)}: ${v}`).join("; ");
+    return Object.entries(x.attrs).filter(([k]) => !skip.has(k)).map(([k, v]) => ` ${k}="${escHtml(v)}"`).join("") + (style ? ` style="${escHtml(style)}"` : "");
+  };
+  // The outer <svg>'s size and placement belong to where the icon is used; its paint (fill="none", stroke, …) is
+  // inherited by the shapes, so it goes on the <symbol>.
+  const PLACEMENT = new Set(["width", "height", "viewBox", "xmlns", "x", "y", "position", "left", "top", "right", "bottom",
+    "margin", "display", "flexShrink", "flexGrow", "alignSelf", "order"]);
+  const element = (x, depth) => {
+    const pad = "  ".repeat(depth);
+    if (!x.kids.length) return `${pad}<${x.tag}${attrsOf(x)}${x.text ? `>${escHtml(x.text)}</${x.tag}>` : "/>"}`;
+    return [`${pad}<${x.tag}${attrsOf(x)}>`, ...x.kids.map((c) => element(c, depth + 1)), `${pad}</${x.tag}>`].join("\n");
+  };
+  const seen = new Map(), ids = new Set();
+  const add = (svg, name) => {
+    const key = shapesKey(svg.kids);
+    if (!svg.kids.length || seen.has(key)) return;
+    const viewBox = svg.attrs.viewBox ? ` viewBox="${escHtml(svg.attrs.viewBox)}"` : "";
+    const symbolId = uniqueSlug(ids, `icon ${name}`, "icon");
+    seen.set(key, `  <symbol id="${symbolId}"${viewBox}${attrsOf(svg, PLACEMENT)}>\n${svg.kids.map((c) => element(c, 2)).join("\n")}\n  </symbol>`);
+  };
+  for (const icon of Object.values(doc.icons || {}).sort((a, b) => a.name.localeCompare(b.name))) add(fromSpec({ tag: "svg", ...icon }), icon.name);
+  const walk = (id) => {
+    const n = doc.nodes[id];
+    if (!n) return;
+    if (n.tag === "svg") add(fromNode(id), n.name);
+    else n.children.forEach(walk);
+  };
+  for (const pid of doc.pages) walk(pid);
+  if (!seen.size) return null;
+  return `<svg xmlns="http://www.w3.org/2000/svg">\n${[...seen.values()].join("\n")}\n</svg>\n`;
 }
 
 function componentName(name) {
@@ -2375,14 +2429,14 @@ function jsxBuilder(doc, roots, { sheet } = {}) {
   };
 }
 
-function toJsx(nodeId, { filesBase, doc = state, sheet, cssHref = "../styles.css" } = {}) {
+function toJsx(nodeId, { filesBase, doc = state, sheet } = {}) {
   const roots = exportRoots(nodeId, doc);
   const b = jsxBuilder(doc, roots, { sheet });
   const screens = roots.map((id) => b.screen(id).code);
   const comps = b.components().map((c) => b.component(c, false));
   const { decl, chunks } = b.finishStyles([...comps, ...screens]);
   let header = "";
-  if (sheet) header = `import "${cssHref}";\n\n`;
+  if (sheet) header = `import "../tokens.css";\nimport "../components.css";\n\n`; // the project export's stylesheets
   else {
     const fam = usedFonts(roots, doc);
     // "*/" inside a value would end the comment early.
@@ -2519,13 +2573,13 @@ async function exportProjectZip(projectId, format = "html") {
       const slug = uniqueSlug(usedFiles, ab.name, `screen-${ai + 1}`);
       if (wantHtml) {
         const body = toHtml(abId, { doc, sheet });
-        const html = `<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1">\n<title>${escHtml(ab.name)} · ${escHtml(doc.name)}</title>\n<link rel="stylesheet" href="../styles.css">\n</head>\n<body>\n${body}</body>\n</html>\n`;
+        const html = `<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1">\n<title>${escHtml(ab.name)} · ${escHtml(doc.name)}</title>\n<link rel="stylesheet" href="../tokens.css">\n<link rel="stylesheet" href="../components.css">\n</head>\n<body>\n${body}</body>\n</html>\n`;
         entries.push({ name: `${pageDir}/${slug}.html`, data: html });
       }
       if (wantJsx) {
         const { code, deps } = jsx.screen(abId);
         const imports = [...deps].map((c) => `import { ${c.name} } from "../components/${c.name}.jsx";\n`).join("");
-        entries.push({ name: `${pageDir}/${slug}.jsx`, data: `import "../styles.css";\n${imports}\n${code}\n` });
+        entries.push({ name: `${pageDir}/${slug}.jsx`, data: `import "../tokens.css";\nimport "../components.css";\n${imports}\n${code}\n` });
       }
       items.push({ name: ab.name, fileBase: `${pageDir}/${slug}`, width: ab.styles.width || "auto", height: ab.styles.height || "auto" });
     }
@@ -2541,8 +2595,12 @@ async function exportProjectZip(projectId, format = "html") {
   }
 
   const fontCss = allFamilies.size ? fonts.css({ families: [...allFamilies], filesBase: "fonts" }) : "";
-  entries.push({ name: "styles.css", data: sheet.css(fontCss) });
+  entries.push({ name: "tokens.css", data: sheet.tokensCss(fontCss) });
+  entries.push({ name: "components.css", data: sheet.componentsCss() });
+  // The same tokens as tokens.css, in the W3C Design Tokens format, for design tools and token pipelines.
   entries.push({ name: "tokens.json", data: `${JSON.stringify(exportDesignTokens(doc), null, 2)}\n` });
+  const sprite = iconSprite(doc);
+  if (sprite) entries.push({ name: "icons.svg", data: sprite });
 
   // Bundle uploaded font files used anywhere in the project so exported HTML works offline.
   const fontFiles = allFamilies.size ? fonts.uploadedFor([...allFamilies]) : [];

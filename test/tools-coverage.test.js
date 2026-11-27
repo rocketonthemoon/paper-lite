@@ -718,18 +718,21 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
     sharedIds = [one, two, note];
   });
 
-  await t.test("project zip: every screen links one root styles.css", async () => {
+  await t.test("project zip: every screen links the root tokens.css and components.css", async () => {
     const files = unzip(Buffer.from(await (await fetch(`${B}/api/export/zip?format=both`)).arrayBuffer()));
     const names = Object.keys(files);
-    assert.deepEqual(names.filter((n) => n.endsWith(".css")), ["styles.css"], "exactly one stylesheet, at the root");
-    assert.ok(names.includes("tokens.json"), "tokens.json is exported alongside styles.css");
+    assert.deepEqual(names.filter((n) => n.endsWith(".css")).sort(), ["components.css", "tokens.css"], "two stylesheets, at the root");
+    assert.ok(names.includes("tokens.json"), "tokens.json is exported alongside tokens.css");
     const zipTokens = JSON.parse(files["tokens.json"].toString());
     assert.equal(zipTokens.color.primary.$value, "#0000ff");
-    const css = files["styles.css"].toString();
+    const tokens = files["tokens.css"].toString();
+    assert.match(tokens, /:root \{[^}]*--color-primary: #0000ff;[^}]*--font-ui: 'Geist', sans-serif;/);
+    assert.doesNotMatch(tokens, /^\./m, "tokens only: no classes");
+    const css = files["components.css"].toString();
+    assert.doesNotMatch(css, /:root \{/, "variables live in tokens.css");
     const at = (re) => css.search(re);
-    assert.ok(at(/Root CSS: shared variables and classes/) < at(/box-sizing/) && at(/box-sizing/) < at(/Layer overrides/)
-      && at(/Layer overrides/) < at(/states, breakpoints and nested rules/), "root, reset, overrides, then states / media / nested");
-    assert.match(css, /:root \{[^}]*--color-primary: #0000ff;[^}]*--font-ui: 'Geist', sans-serif;/);
+    assert.ok(at(/Root CSS: shared classes/) < at(/box-sizing/) && at(/box-sizing/) < at(/Layer overrides/)
+      && at(/Layer overrides/) < at(/states, breakpoints and nested rules/), "root classes, reset, overrides, then states / media / nested");
     assert.equal((css.match(/^\.stat-card \{/gm) || []).length, 1, "the base class is defined once");
     assert.match(css, /\.stat-card \{\n {2}padding: var\(--space-3\);\n {2}background: var\(--color-primary\);/);
     assert.match(css, /\.stat-card:hover \{\n {2}background: #000080;\n\}/);
@@ -742,7 +745,7 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
     assert.ok(screens.length >= 2, "both artboards exported");
     for (const n of screens) {
       const html = files[n].toString();
-      assert.match(html, /<link rel="stylesheet" href="\.\.\/styles\.css">/, `${n} links the root stylesheet`);
+      assert.match(html, /<link rel="stylesheet" href="\.\.\/tokens\.css">\n<link rel="stylesheet" href="\.\.\/components\.css">/, `${n} links tokens, then components`);
       assert.doesNotMatch(html, /<style|style="/, `${n} carries no CSS of its own`);
     }
     const desktop = files[screens.find((n) => n.endsWith("desktop.html"))].toString();
@@ -751,7 +754,7 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
     assert.match(desktop, /<p class="muted-text note">Note<\/p>/);
     assert.match(css, /\.note \{\n {2}color: var\(--color-primary\);\n {2}padding: var\(--space-3\);\n\}/);
     const jsx = files[screens.find((n) => n.endsWith("desktop.html")).replace(/html$/, "jsx")].toString();
-    assert.match(jsx, /^import "\.\.\/styles\.css";/);
+    assert.match(jsx, /^import "\.\.\/tokens\.css";\nimport "\.\.\/components\.css";/);
     assert.match(jsx, /className="stat-card">\{"Two"\}/);
     assert.doesNotMatch(jsx, /style=\{\{/);
     await ok(B, "delete_nodes", { nodeIds: sharedIds });
