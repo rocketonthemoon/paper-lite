@@ -15,9 +15,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const EXPECTED_TOOLS = [
   "add_font", "create_artboard", "create_component", "create_node", "create_page", "create_project", "delete_component", "delete_nodes", "delete_page",
-  "delete_project", "duplicate_nodes", "duplicate_project", "find_nodes", "finish_working_on_nodes", "get_basic_info",
+  "delete_project", "duplicate_nodes", "duplicate_project", "export_design_tokens", "find_nodes", "finish_working_on_nodes", "get_basic_info",
   "get_children", "get_comments", "get_computed_styles", "get_guide", "get_jsx", "get_node_info", "get_root_css",
-  "get_screenshot", "get_selection", "get_tree_summary", "git_pull", "git_push", "git_status", "instantiate_component", "list_checkpoints", "list_components", "list_fonts", "list_projects", "move_nodes", "open_project",
+  "get_screenshot", "get_selection", "get_tree_summary", "git_pull", "git_push", "git_status", "import_design_tokens", "import_root_css", "instantiate_component", "list_checkpoints", "list_components", "list_fonts", "list_projects", "move_nodes", "open_project",
   "redo", "remove_font", "rename_nodes", "rename_project", "reply_to_comment", "resolve_comment", "restore_checkpoint",
   "save_checkpoint", "set_selection", "set_session_title", "set_text_content", "switch_page", "undo", "update_component", "update_node",
   "update_nodes_matching", "update_page", "update_root_css", "update_styles", "write_html",
@@ -161,7 +161,7 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
   t.after(() => srv.stop());
   const B = srv.baseUrl;
 
-  await t.test("tools/list exposes exactly the 50 documented tools with schemas", async () => {
+  await t.test("tools/list exposes all documented tools with schemas", async () => {
     const { tools } = await rpc(B, "tools/list");
     assert.deepEqual(tools.map((x) => x.name).sort(), EXPECTED_TOOLS);
     for (const tool of tools) {
@@ -722,6 +722,9 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
     const files = unzip(Buffer.from(await (await fetch(`${B}/api/export/zip?format=both`)).arrayBuffer()));
     const names = Object.keys(files);
     assert.deepEqual(names.filter((n) => n.endsWith(".css")), ["styles.css"], "exactly one stylesheet, at the root");
+    assert.ok(names.includes("tokens.json"), "tokens.json is exported alongside styles.css");
+    const zipTokens = JSON.parse(files["tokens.json"].toString());
+    assert.equal(zipTokens.color.primary.$value, "#0000ff");
     const css = files["styles.css"].toString();
     const at = (re) => css.search(re);
     assert.ok(at(/Root CSS: shared variables and classes/) < at(/box-sizing/) && at(/box-sizing/) < at(/Layer overrides/)
@@ -782,6 +785,69 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
     assert.equal((created.warnings || []).some((w) => /nf-hero/.test(w)), false);
     await ok(B, "delete_nodes", { nodeIds: [created.created[0].id] });
     await ok(B, "update_root_css", { replace: true, css: prev.css });
+  });
+
+  await t.test("cross-project design system: import_root_css, W3C tokens.json, and expanded linter", async () => {
+    const kit = await ok(B, "create_project", { name: "UI Kit", open: false });
+    const target = await ok(B, "create_project", { name: "Consumer" });
+    await ok(B, "open_project", { projectId: kit.id });
+    await ok(B, "update_root_css", {
+      css: `:root { --color-brand: #0000ff; --space-4: 16px; --radius-lg: 12px; --font-size-body: 15px; --unused-var: 99px; }
+        .kit-btn { padding: var(--space-4); border-radius: var(--radius-lg); color: var(--color-brand); @media (max-width: 640px) { padding: 8px; } }
+        .kit-badge { font-size: var(--font-size-body); }`,
+    });
+    const tokensJson = await ok(B, "export_design_tokens");
+    assert.equal(tokensJson.color.brand.$value, "#0000ff");
+    assert.equal(tokensJson.space["4"].$value, "16px");
+    const restTokens = await (await fetch(`${B}/api/tokens`)).json();
+    assert.equal(restTokens.radius.lg.$value, "12px");
+
+    await ok(B, "open_project", { projectId: target.id });
+    // Scoped import pulls only .kit-btn and its referenced vars (excluding --unused-var and .kit-badge)
+    const scoped = await ok(B, "import_root_css", { sourceProjectId: kit.id, classes: ["kit-btn"] });
+    assert.deepEqual(scoped.definedClasses, ["kit-btn"]);
+    assert.ok(scoped.addedVars.includes("--color-brand") && !scoped.addedVars.includes("--unused-var"));
+    assert.ok((await ok(B, "get_root_css")).vars["--color-brand"]);
+
+    // Merge import brings the rest
+    const merged = await ok(B, "import_root_css", { sourceProjectId: kit.id, mode: "merge" });
+    assert.deepEqual(merged.definedClasses.sort(), ["kit-badge", "kit-btn"]);
+    assert.ok(merged.addedVars.includes("--font-size-body"));
+    assert.equal((await ok(B, "get_root_css")).vars["--font-size-body"], "15px");
+
+    // Import W3C Design Tokens via MCP in replace mode (preserves classes, swaps vars)
+    const impTok = await ok(B, "import_design_tokens", {
+      mode: "replace",
+      tokens: {
+        color: { $type: "color", primary: { $value: "#112233" } },
+        space: { $type: "dimension", md: { $value: { value: 20, unit: "px" } } },
+        radius: { $type: "dimension", card: { $value: "10px" } },
+        "font-size": { $type: "dimension", sm: { $value: "13px" } },
+      },
+    });
+    assert.equal(impTok.imported, 4);
+    assert.ok(impTok.removedVars.includes("--unused-var"), "replace removes old tokens");
+    assert.equal((await ok(B, "get_root_css")).vars["--unused-var"], undefined, "replace removes old tokens");
+    assert.deepEqual(impTok.definedClasses.sort(), ["kit-badge", "kit-btn"], "classes are preserved");
+
+    // Expanded design system linter warns on spacing, radii, font sizes, and colors
+    const b2 = await ok(B, "create_artboard", { name: "Lint Board", width: 400, height: 300 });
+    const wRes = await ok(B, "write_html", {
+      parentId: b2.id,
+      html: `<div style="padding: 18px; border-radius: 6px; font-size: 22px; color: #ff0000">Raw</div>`,
+    });
+    assert.ok(wRes.warnings.some((w) => /spacing token/.test(w)), wRes.warnings.join("\n"));
+    assert.ok(wRes.warnings.some((w) => /radius token/.test(w)), wRes.warnings.join("\n"));
+    assert.ok(wRes.warnings.some((w) => /font-size token/.test(w)), wRes.warnings.join("\n"));
+    assert.ok(wRes.warnings.some((w) => /color token/.test(w)), wRes.warnings.join("\n"));
+
+    const lId = wRes.created[0].id;
+    const quiet = await ok(B, "update_styles", { updates: [{ nodeIds: [lId], styles: { padding: "22px" } }], lint: false });
+    assert.deepEqual(quiet, { updated: 1 }, "lint: false suppresses design system scale warnings");
+
+    await ok(B, "open_project", { projectId });
+    await ok(B, "delete_project", { projectId: target.id });
+    await ok(B, "delete_project", { projectId: kit.id });
   });
 
   await t.test("preview: a screen opens as a live page sized to its artboard", async () => {

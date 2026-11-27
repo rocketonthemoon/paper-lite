@@ -171,7 +171,7 @@ function coalesceMatchingRule(rules, rule) {
  * - vars: { "--name": value | null }.
  * - classes: { name: { camelCase: value | null } | null }: the plain `.name { }` rule; null removes it.
  */
-export function mergeRootCss(base, { css, vars, classes } = {}, { replace = false } = {}) {
+export function mergeRootCss(base, { css, vars, classes, rules } = {}, { replace = false } = {}) {
   const out = replace ? emptyRootCss() : structuredClone(base || emptyRootCss());
   out.vars ||= {};
   out.rules ||= [];
@@ -182,6 +182,16 @@ export function mergeRootCss(base, { css, vars, classes } = {}, { replace = fals
       out.vars[k] = cleanVarValue(k, v);
     }
     for (const raw of parsed.rules) {
+      const rule = cleanRule(raw);
+      if (!replace || rule.media) {
+        out.rules = coalesceMatchingRule(out.rules, rule);
+      } else {
+        out.rules.push(rule);
+      }
+    }
+  }
+  if (Array.isArray(rules)) {
+    for (const raw of rules) {
       const rule = cleanRule(raw);
       if (!replace || rule.media) {
         out.rules = coalesceMatchingRule(out.rules, rule);

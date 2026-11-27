@@ -1,4 +1,4 @@
-// weft MCP tool set (49 tools). Modelled on Paper's MCP so agents can drive the canvas end to end:
+// weft MCP tool set (52 tools). Modelled on Paper's MCP so agents can drive the canvas end to end:
 // read (info / tree / nodes / comments / computed styles / screenshots / code) → write (HTML, styles, text, structure)
 // → review (screenshot) → reply_to_comment / finish_working_on_nodes. Every write is one undoable step and shows live in the UI.
 import * as z from "zod";
@@ -44,6 +44,8 @@ const GUIDE = `# weft MCP guide
   the layers that use it. write_html and update_styles warn when a raw value duplicates a variable.
 - update_root_css({ css }) merges each rule into the rule with the same selector and @media (or appends it);
   replace: true makes the text the whole root CSS, in order. get_root_css returns the nested text as css.
+- Cross-project design systems: import_root_css imports variables, classes and @media rules from another project;
+  export_design_tokens / import_design_tokens convert between :root CSS variables and W3C Design Tokens (tokens.json).
 
 ## Work in few, large calls
 Each tool call waits for a full model round trip, so the number of calls, not their size, sets how long a design
@@ -300,6 +302,33 @@ export function registerTools(server, ctx) {
     annotations: WRITE,
   }, async ({ css, vars, classes, replace, pruneUnused }) => text(await ctx.rootCss.update({ css, vars, classes, replace, pruneUnused })));
 
+  server.registerTool("import_root_css", {
+    description: "Import root CSS variables, shared classes, states and @media rules from another project into the open project (one undo step). Optionally pass varsOnly: true or classes: [...] to scope the import.",
+    inputSchema: {
+      sourceProjectId: z.string().describe("Id of the source project (e.g. a Design System / UI Kit project)"),
+      mode: z.enum(["merge", "replace"]).optional().describe("merge (default) preserves existing vars/rules not overwritten; replace starts from empty"),
+      varsOnly: z.boolean().optional().describe("Import :root variables only (skip classes and rules)"),
+      classes: z.array(z.string()).optional().describe("Import only these class names (plus any rules and :root variables they reference)"),
+    },
+    annotations: WRITE,
+  }, async ({ sourceProjectId, mode = "merge", varsOnly = false, classes }) =>
+    text(await ctx.rootCss.import({ sourceProjectId, mode, varsOnly, classes })));
+
+  server.registerTool("export_design_tokens", {
+    description: "Export the open project's :root CSS variables as a W3C Design Tokens (DTCG) JSON object ($value, $type, {group.token} references). Also included as tokens.json in the project .zip export.",
+    inputSchema: {},
+    annotations: READ,
+  }, async () => text(ctx.tokens.export()));
+
+  server.registerTool("import_design_tokens", {
+    description: "Import W3C Design Tokens (DTCG JSON object or JSON string with $value / $type / {token.ref}) into the open project's :root CSS variables in one undo step.",
+    inputSchema: {
+      tokens: z.union([z.string(), z.record(z.string(), z.any())]).describe("W3C Design Tokens JSON object or serialized JSON string"),
+      mode: z.enum(["merge", "replace"]).optional().describe("merge (default) adds/updates variables; replace removes existing :root variables not in the imported tokens while keeping classes"),
+    },
+    annotations: WRITE,
+  }, async ({ tokens, mode = "merge" }) => text(await ctx.tokens.import({ tokens, mode })));
+
   // ---------------------------------------------------------------- write
   server.registerTool("write_html", {
     description: "Add designs by writing HTML: class=\"card\" for shared root CSS classes, inline style=\"\" for overrides (use var(--name) for root variables). Default: append the parsed elements as children of parentId (omit parentId to create top-level artboards). mode=replace swaps targetNodeId for the parsed elements. Returns created ids. Write a whole section or screen per call rather than many small calls. See get_guide for the HTML rules.",
@@ -309,10 +338,11 @@ export function registerTools(server, ctx) {
       targetNodeId: z.string().optional(),
       mode: z.enum(["insert-children", "replace"]).optional(),
       index: z.number().int().optional().describe("Insert position among siblings (default: end)"),
+      lint: z.boolean().optional().describe("Design system lint hints for un-tokenized spacing, radii, font sizes and colors (default: true)"),
     },
     annotations: WRITE,
-  }, async ({ html, parentId, targetNodeId, mode = "insert-children", index }) => {
-    const res = ctx.writeHtml({ html, parentId, targetNodeId, mode, index });
+  }, async ({ html, parentId, targetNodeId, mode = "insert-children", index, lint = true }) => {
+    const res = ctx.writeHtml({ html, parentId, targetNodeId, mode, index, lint });
     ctx.touch(res.created.map((c) => c.id), "write_html", res.created[0]?.name || "");
     return text(res);
   });
@@ -346,9 +376,12 @@ export function registerTools(server, ctx) {
 
   server.registerTool("update_styles", {
     description: "Batch style changes in one undo step: [{ nodeIds: [...], styles: { camelCase: value | null } }]. Put every style change you have in one call.",
-    inputSchema: { updates: z.array(z.object({ nodeIds: ids, styles: styleSchema })).min(1) },
+    inputSchema: {
+      updates: z.array(z.object({ nodeIds: ids, styles: styleSchema })).min(1),
+      lint: z.boolean().optional().describe("Design system lint hints for un-tokenized spacing, radii, font sizes and colors (default: true)"),
+    },
     annotations: WRITE,
-  }, async ({ updates }) => {
+  }, async ({ updates, lint = true }) => {
     const keys = [...new Set(updates.flatMap((u) => Object.keys(u.styles || {})))].slice(0, 3).join(", ");
     const targetIds = updates.flatMap((u) => u.nodeIds);
     const targetName = targetIds.length === 1 ? S().nodes[targetIds[0]]?.name : `${targetIds.length} layers`;
@@ -358,7 +391,7 @@ export function registerTools(server, ctx) {
       nodeIds: targetIds,
     });
     ctx.touch(touched, "update_styles", keys);
-    const hints = ctx.rootCss.hints(touched);
+    const hints = ctx.rootCss.hints(touched, { lint });
     return text(hints.length ? { updated: touched.length, hints } : { updated: touched.length });
   });
 

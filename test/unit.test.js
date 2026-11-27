@@ -26,6 +26,7 @@ import {
 } from "../model.js";
 import { htmlToSpecs, parseInlineStyle } from "../html-import.js";
 import { FontLibrary, familiesIn, parseFontFileName, renameWithRetry } from "../fonts.js";
+import { analyzeDesignLint, exportDesignTokens, importDesignTokens } from "../design-tokens.js";
 
 test("model: cleanTag normalises case and rejects disallowed tags", () => {
   assert.equal(cleanTag("DIV"), "div");
@@ -441,6 +442,80 @@ test("normalizeProject keeps root CSS and layer classes, dropping invalid entrie
   assert.ok(warnings.length >= 4, warnings.join("\n"));
   assert.throws(() => normalizeProject({ ...raw, nodes: { p: raw.nodes.p, a: { ...raw.nodes.a, classes: ["card"] } } }), /look like --color-primary/, "strict loading rejects bad root CSS");
   assert.deepEqual(normalizeProject({ nodes: { p: { name: "P", tag: "div" } }, pages: ["p"] }).rootCss, { vars: {}, rules: [] }, "older projects get an empty root CSS");
+});
+
+test("design-tokens: W3C DTCG export/import round-trips vars, aliases, collisions and composites", () => {
+  const doc = {
+    rootCss: {
+      vars: {
+        "--color-primary": "#0000ff",
+        "--color-accent": "var(--color-primary)",
+        "--radius": "12px",
+        "--radius-lg": "20px",
+        "--space-4": "16px",
+        "--font-ui": "'Geist', sans-serif",
+      },
+      rules: [],
+    },
+  };
+  const tokens = exportDesignTokens(doc);
+  assert.equal(tokens.color.primary.$type, "color");
+  assert.equal(tokens.color.accent.$value, "{color.primary}");
+  assert.equal(tokens.radius.$root.$value, "12px", "leaf/group collision uses $root");
+  assert.equal(tokens.radius.lg.$value, "20px");
+  assert.equal(tokens.font.ui.$type, "fontFamily");
+
+  const reimported = importDesignTokens(tokens);
+  assert.deepEqual(reimported.vars, doc.rootCss.vars, "W3C tokens round-trip back to :root vars losslessly");
+
+  const dtcg = importDesignTokens({
+    spacing: { $type: "dimension", sm: { $value: { value: 8, unit: "px" } } },
+    brand: { $type: "color", base: { $value: { colorSpace: "srgb", components: [1, 0, 0] } }, alias: { $value: "{brand.base}" } },
+    heading: { $type: "typography", $value: { fontFamily: ["Inter", "sans-serif"], fontSize: { value: 24, unit: "px" } } },
+  });
+  assert.equal(dtcg.vars["--spacing-sm"], "8px");
+  assert.equal(dtcg.vars["--brand-base"], "#ff0000");
+  assert.equal(dtcg.vars["--brand-alias"], "var(--brand-base)");
+  assert.equal(dtcg.vars["--heading-font-family"], "Inter, sans-serif");
+  assert.equal(dtcg.vars["--heading-font-size"], "24px");
+});
+
+test("design-tokens: analyzeDesignLint catches spacing, radii, font-size, shorthand and color tokens", () => {
+  const doc = {
+    pages: ["p1"],
+    nodes: {
+      p1: { id: "p1", children: ["n1"] },
+      n1: {
+        id: "n1",
+        name: "Card",
+        parentId: "p1",
+        styles: {
+          padding: "12px 16px",
+          borderRadius: "10px",
+          fontSize: "19px",
+          color: "rgb(0, 0, 255)",
+          backgroundColor: "#ff00ff",
+        },
+      },
+    },
+    rootCss: {
+      vars: {
+        "--color-primary": "#0000ff",
+        "--space-3": "12px",
+        "--space-4": "16px",
+        "--radius-md": "8px",
+        "--font-size-md": "16px",
+      },
+      rules: [],
+    },
+  };
+  const hints = analyzeDesignLint(["n1"], doc);
+  assert.ok(hints.some((h) => /12px 16px repeats root variable values/.test(h)), hints.join("\n"));
+  assert.ok(hints.some((h) => /borderRadius: 10px doesn't use a radius token/.test(h)), hints.join("\n"));
+  assert.ok(hints.some((h) => /fontSize: 19px doesn't use a font-size token/.test(h)), hints.join("\n"));
+  assert.ok(hints.some((h) => /color: rgb\(0, 0, 255\) matches the root variable --color-primary/.test(h)), hints.join("\n"));
+  assert.ok(hints.some((h) => /backgroundColor: #ff00ff doesn't use a color token/.test(h)), hints.join("\n"));
+  assert.deepEqual(analyzeDesignLint(["n1"], doc, { lint: false }), []);
 });
 
 test("htmlToSpecs captures data-component and data-slot, and normalizeProject preserves components", () => {
