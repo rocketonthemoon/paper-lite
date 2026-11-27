@@ -143,7 +143,8 @@ Each project's checkpoints are commits in a git repo (`DATA_DIR/projects/<id>.gi
 
 `get_screenshot` and `get_computed_styles` render artboards in headless Chrome. [`weft-render/`](weft-render/) is a small
 Rust sidecar that renders them with [Blitz](https://github.com/DioxusLabs/blitz), an HTML/CSS engine without a browser or
-JavaScript, instead. To try it, install Rust, then:
+JavaScript, instead. To try it, install Rust (and on Linux the fontconfig headers, e.g. `libfontconfig1-dev` and
+`pkg-config`), then:
 
 ```bash
 npm run build:blitz          # cargo build --release in weft-render/ (a few minutes the first time)
