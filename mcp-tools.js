@@ -1,4 +1,4 @@
-// weft MCP tool set (46 tools). Modelled on Paper's MCP so agents can drive the canvas end to end:
+// weft MCP tool set (49 tools). Modelled on Paper's MCP so agents can drive the canvas end to end:
 // read (info / tree / nodes / comments / computed styles / screenshots / code) → write (HTML, styles, text, structure)
 // → review (screenshot) → reply_to_comment / finish_working_on_nodes. Every write is one undoable step and shows live in the UI.
 import * as z from "zod";
@@ -467,6 +467,25 @@ export function registerTools(server, ctx) {
     inputSchema: { id: z.string() },
     annotations: WRITE,
   }, async ({ id }) => text(await ctx.checkpoints.restore(id)));
+
+  // ---------------------------------------------------------------- git remote (connected by the user in the UI)
+  server.registerTool("git_status", {
+    description: "Whether the open project's checkpoints are synced to a git remote (GitHub, GitLab, …): URL, auto-push, last push/pull, last error. The token is never shown.",
+    inputSchema: {},
+    annotations: READ,
+  }, async () => text(await ctx.git.status()));
+
+  server.registerTool("git_push", {
+    description: "Push the open project's checkpoints to its connected git remote. Save a checkpoint first to include the current design. Fails if the remote has newer checkpoints: git_pull, then push again.",
+    inputSchema: {},
+    annotations: { ...WRITE, openWorldHint: true },
+  }, async () => text(await ctx.git.push()));
+
+  server.registerTool("git_pull", {
+    description: "Fetch checkpoints from the open project's git remote into the checkpoint list. Does not change the design; use restore_checkpoint to apply one.",
+    inputSchema: {},
+    annotations: { ...WRITE, openWorldHint: true },
+  }, async () => text(await ctx.git.pull()));
 
   // ---------------------------------------------------------------- projects
   server.registerTool("list_projects", {

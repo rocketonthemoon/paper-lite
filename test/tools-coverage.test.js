@@ -17,7 +17,7 @@ const EXPECTED_TOOLS = [
   "add_font", "create_artboard", "create_node", "create_page", "create_project", "delete_nodes", "delete_page",
   "delete_project", "duplicate_nodes", "duplicate_project", "find_nodes", "finish_working_on_nodes", "get_basic_info",
   "get_children", "get_comments", "get_computed_styles", "get_guide", "get_jsx", "get_node_info", "get_root_css",
-  "get_screenshot", "get_selection", "get_tree_summary", "list_checkpoints", "list_fonts", "list_projects", "move_nodes", "open_project",
+  "get_screenshot", "get_selection", "get_tree_summary", "git_pull", "git_push", "git_status", "list_checkpoints", "list_fonts", "list_projects", "move_nodes", "open_project",
   "redo", "remove_font", "rename_nodes", "rename_project", "reply_to_comment", "resolve_comment", "restore_checkpoint",
   "save_checkpoint", "set_selection", "set_session_title", "set_text_content", "switch_page", "undo", "update_node",
   "update_page", "update_root_css", "update_styles", "write_html",
@@ -161,7 +161,7 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
   t.after(() => srv.stop());
   const B = srv.baseUrl;
 
-  await t.test("tools/list exposes exactly the 46 documented tools with schemas", async () => {
+  await t.test("tools/list exposes exactly the 49 documented tools with schemas", async () => {
     const { tools } = await rpc(B, "tools/list");
     assert.deepEqual(tools.map((x) => x.name).sort(), EXPECTED_TOOLS);
     for (const tool of tools) {

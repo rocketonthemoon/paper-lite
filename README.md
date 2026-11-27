@@ -63,7 +63,7 @@ If your client only supports stdio, start the server first, then use the relay:
 }
 ```
 
-## MCP tools (46)
+## MCP tools (49)
 
 | Category | Tools |
 | --- | --- |
@@ -72,6 +72,7 @@ If your client only supports stdio, start the server first, then use the relay:
 | Inspection & selection | `get_guide`, `get_basic_info`, `get_selection`, `set_selection`, `get_tree_summary`, `get_children`, `get_node_info`, `find_nodes`, `get_computed_styles`, `get_screenshot` |
 | Comments & collaboration | `get_comments`, `reply_to_comment`, `resolve_comment`, `finish_working_on_nodes`, `set_session_title` |
 | Checkpoints & history | `save_checkpoint`, `list_checkpoints`, `restore_checkpoint`, `undo`, `redo` |
+| Git remote | `git_status`, `git_push`, `git_pull` |
 | Root CSS (shared styles) | `get_root_css`, `update_root_css` |
 | Fonts & export | `list_fonts`, `add_font`, `remove_font`, `get_jsx` |
 
@@ -80,7 +81,7 @@ If your client only supports stdio, start the server first, then use the relay:
 | File | Role |
 | --- | --- |
 | [`server.js`](server.js) | Express 5 server: REST API, SSE (`/events`), JSON persistence, history/checkpoints/comments/activity, export, and `/mcp` |
-| [`mcp-tools.js`](mcp-tools.js) | Zod schemas and handlers for all 46 MCP tools |
+| [`mcp-tools.js`](mcp-tools.js) | Zod schemas and handlers for all 49 MCP tools |
 | [`mcp-stdio.js`](mcp-stdio.js) | stdio ↔ HTTP relay for stdio-only clients |
 | [`model.js`](model.js) | Project/node/comment normalization, CSS and attribute validation |
 | [`html-import.js`](html-import.js) | `parse5`-based HTML → node converter used by `write_html` |
@@ -99,6 +100,7 @@ If your client only supports stdio, start the server first, then use the relay:
 | `/api/state`, `/api/nodes`, `/api/pages` | Active project, node and page CRUD |
 | `/api/history` | Undo timeline (`GET /api/history`, `POST /api/history/jump`, `POST /api/history/undo-agent-run`) |
 | `/api/checkpoints` | Named checkpoints (`GET`, `POST`, `POST :id/restore`) |
+| `/api/git` | Git remote for the open project's checkpoints (`GET`, `PUT /remote`, `DELETE /remote`, `POST /push`, `POST /pull`) |
 | `/api/comments` | Layer comments (`GET`, `POST`, `POST :id/reply`, `PATCH :id`, `DELETE :id`) |
 | `/api/activity` | Dashboard activity sessions (`GET`, `POST :id/revert`) |
 | `POST /api/undo`, `POST /api/redo` | History step |
@@ -107,6 +109,16 @@ If your client only supports stdio, start the server first, then use the relay:
 | `GET /render/:id` | Clean page that headless Chrome renders |
 
 Requests are restricted by `Host`/`Origin` checks (see `ALLOWED_HOSTS`).
+
+## Syncing checkpoints to a git host
+
+Each project's checkpoints are commits in a git repo (`DATA_DIR/projects/<id>.git`). To back them up or share them, open **History → Git remote → Connect**, paste an HTTPS repository URL and an access token, and use **Push** / **Pull**. Turn on **Push after each checkpoint** to sync automatically.
+
+- Works with any host that serves git over HTTPS: GitHub, GitLab, Bitbucket, Gitea, self-hosted. The username sent with the token defaults per host (`x-access-token` for GitHub, `oauth2` for GitLab, `x-token-auth` for Bitbucket, `git` otherwise) and can be changed.
+- The token needs read and write access to the repository contents (on GitHub, a fine-grained token with *Contents: Read and write* on that one repo).
+- The token is stored on the server only, in `projects/<id>.remote.json` (mode 600, outside the repo), and is never sent to the browser or to agents.
+- **Pull never changes your design.** It adds the remote's checkpoints to the list; restore one to apply it. If both sides have new checkpoints, a merge commit keeps both sets, so nothing is lost.
+- Agents can call `git_status`, `git_push` and `git_pull`; only a person can connect a remote.
 
 ## Configuration
 
