@@ -20,6 +20,7 @@ const SAFE_SVG_VALUE = /^[\w\s.,#%()+-]*$/;
 const UNITLESS = new Set(["opacity", "zIndex", "flexGrow", "flexShrink", "fontWeight", "lineHeight", "order", "aspectRatio"]);
 const SAFE_URL = /^(https?:\/\/|data:image\/(png|jpe?g|gif|webp|svg\+xml);|\/|#|\.\/)/i;
 export const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+export const ICON_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
 export const COMPONENT_NAME_RE = /^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/;
 export const SLOT_NAME_RE = /^[a-zA-Z0-9_-]{1,64}$/;
 const COMMENT_STATUSES = new Set(["open", "read", "replied", "resolved"]);
@@ -334,7 +335,7 @@ export function emptyPage(name = "Page 1", id = newId()) {
 /** A new, empty project document: one empty page and an empty comments list. */
 export function emptyProject(id, name) {
   const page = emptyPage("Page 1");
-  return { version: 1, id, name: cleanName(name, "Untitled"), pages: [page.id], rootId: page.id, nodes: { [page.id]: page }, rootCss: emptyRootCss(), components: {}, comments: [] };
+  return { version: 1, id, name: cleanName(name, "Untitled"), pages: [page.id], rootId: page.id, nodes: { [page.id]: page }, rootCss: emptyRootCss(), icons: {}, components: {}, comments: [] };
 }
 
 function normalizeComments(rawComments) {
@@ -446,9 +447,47 @@ export function normalizeProject(raw, { id, name, warnings = null } = {}) {
     rootId,
     nodes,
     rootCss: normalizeRootCss(raw.rootCss, warnings),
+    icons: normalizeIcons(raw.icons, warnings),
     components: normalizeComponents(raw.components, warnings),
     comments: normalizeComments(raw.comments),
   };
+}
+
+export function sanitizeSvgSpecNode(spec, label) {
+  const tag = String(spec?.tag || "").toLowerCase();
+  if (!SVG_TAGS.has(tag)) throw new HttpError(400, `${label}: icon markup can only contain SVG elements (got <${tag}>)`);
+  const attrs = mergeAttrs({}, spec.attrs || {}, tag);
+  const styles = mergeStyles({}, spec.styles || {});
+  return {
+    tag,
+    ...(Object.keys(attrs).length ? { attrs } : {}),
+    ...(Object.keys(styles).length ? { styles } : {}),
+    children: (spec.children || []).map((c) => sanitizeSvgSpecNode(c, label)),
+  };
+}
+
+export function normalizeIcons(rawIcons, warnings = null) {
+  if (!rawIcons || typeof rawIcons !== "object" || Array.isArray(rawIcons)) return {};
+  const out = {};
+  for (const [k, asset] of Object.entries(rawIcons)) {
+    if (!asset || typeof asset !== "object") continue;
+    try {
+      const name = String(asset.name || k).trim();
+      if (!ICON_NAME_RE.test(name)) throw new HttpError(400, `Invalid icon name "${name}"`);
+      const cleanRoot = sanitizeSvgSpecNode({ tag: "svg", attrs: asset.attrs, styles: asset.styles, children: asset.children }, `Icon "${name}"`);
+      out[name] = {
+        name,
+        ...(cleanRoot.attrs?.viewBox ? { viewBox: cleanRoot.attrs.viewBox } : {}),
+        attrs: cleanRoot.attrs || {},
+        ...(cleanRoot.styles && Object.keys(cleanRoot.styles).length ? { styles: cleanRoot.styles } : {}),
+        children: cleanRoot.children,
+      };
+    } catch (err) {
+      if (!warnings) throw err;
+      warnings.push(`Icon "${k}": ${err.message}`);
+    }
+  }
+  return out;
 }
 
 function normalizeRootCss(raw, warnings) {

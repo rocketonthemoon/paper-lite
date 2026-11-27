@@ -14,13 +14,13 @@ const PAPER_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const EXPECTED_TOOLS = [
-  "add_font", "create_artboard", "create_component", "create_node", "create_page", "create_project", "delete_component", "delete_nodes", "delete_page",
-  "delete_project", "duplicate_nodes", "duplicate_project", "export_design_tokens", "find_nodes", "finish_working_on_nodes", "get_basic_info",
-  "get_children", "get_comments", "get_computed_styles", "get_guide", "get_jsx", "get_node_info", "get_root_css",
-  "get_screenshot", "get_selection", "get_tree_summary", "git_pull", "git_push", "git_status", "import_design_tokens", "import_root_css", "instantiate_component", "list_checkpoints", "list_components", "list_fonts", "list_projects", "move_nodes", "open_project",
-  "redo", "remove_font", "rename_nodes", "rename_project", "reply_to_comment", "resolve_comment", "restore_checkpoint",
-  "save_checkpoint", "set_selection", "set_session_title", "set_text_content", "switch_page", "undo", "update_component", "update_node",
-  "update_nodes_matching", "update_page", "update_root_css", "update_styles", "write_html",
+  "add_font", "create_artboard", "create_component", "create_node", "create_page", "create_project", "delete_component", "delete_icon", "delete_nodes", "delete_page",
+  "delete_project", "duplicate_nodes", "duplicate_project", "export_design_tokens", "find_nodes", "finish_working_on_nodes", "get_basic_info", "get_children", "get_comments", "get_computed_styles",
+  "get_guide", "get_jsx", "get_node_info", "get_root_css", "get_screenshot", "get_selection", "get_tree_summary", "git_pull", "git_push", "git_status",
+  "import_design_tokens", "import_root_css", "instantiate_component", "list_checkpoints", "list_components", "list_fonts", "list_icons", "list_projects", "move_nodes", "open_project",
+  "redo", "register_icons", "remove_font", "rename_nodes", "rename_project", "reply_to_comment", "resolve_comment", "restore_checkpoint", "save_checkpoint", "set_selection",
+  "set_session_title", "set_text_content", "switch_page", "undo", "update_component", "update_node", "update_nodes_matching", "update_page", "update_root_css", "update_styles",
+  "write_html",
 ];
 
 // Markup an attacker could put in layer names / text to break out of exported or rendered HTML.
@@ -848,6 +848,38 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
     await ok(B, "open_project", { projectId });
     await ok(B, "delete_project", { projectId: target.id });
     await ok(B, "delete_project", { projectId: kit.id });
+  });
+
+  await t.test("icon registry: register_icons, list_icons, delete_icon, and <icon /> expansion", async () => {
+    const reg = await ok(B, "register_icons", {
+      icons: [
+        { name: "nf-n", svg: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none"><path d="M4 2V22M20 2V22" stroke="#e50914" stroke-width="4"/></svg>' },
+        { name: "dot", svg: '<svg viewBox="0 0 8 8" width="8" height="8"><circle cx="4" cy="4" r="3" fill="#ffffff"/></svg>' },
+      ],
+    });
+    assert.deepEqual(reg.registered, ["nf-n", "dot"]);
+    assert.equal(reg.total, 2);
+    const list = await ok(B, "list_icons");
+    assert.deepEqual(list.map((i) => i.name), ["dot", "nf-n"]);
+    await fails(B, "register_icons", { name: "evil", svg: '<svg><script>alert(1)</script><path d="M0 0"/></svg>' }, /unsafe/i);
+
+    const wRes = await ok(B, "write_html", {
+      parentId: section,
+      html: '<div style="display:flex;gap:8px"><icon name="nf-n" width="16" /><icon name="nf-n" width="16" /><icon name="ghost" /><span>Row</span></div>',
+    });
+    assert.ok(wRes.warnings.some((w) => /ghost.*isn't registered/.test(w)), wRes.warnings.join("\n"));
+    const rowId = wRes.created[0].id;
+    const kids = await ok(B, "get_children", { nodeId: rowId });
+    assert.deepEqual(kids.map((k) => k.tag), ["svg", "svg", "span"]);
+
+    const htmlOut = await ok(B, "get_jsx", { nodeId: rowId, format: "html" });
+    assert.equal((htmlOut.match(/<symbol /g) || []).length, 1, "repeated <icon> instances deduplicate into one <symbol>");
+    assert.equal((htmlOut.match(/<use href="#icon-1"\/>/g) || []).length, 2);
+
+    assert.deepEqual(await ok(B, "delete_icon", { name: "dot" }), { deleted: "dot", total: 1 });
+    await ok(B, "undo");
+    assert.equal((await ok(B, "list_icons")).length, 2, "delete_icon is undoable");
+    await ok(B, "delete_nodes", { nodeIds: [rowId] });
   });
 
   await t.test("preview: a screen opens as a live page sized to its artboard", async () => {
