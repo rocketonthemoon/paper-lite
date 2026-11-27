@@ -1,6 +1,6 @@
 <script>
   // Inspector when nothing is selected: root CSS, canvas surface, fonts, MCP, export and shortcuts. Fields and buttons
-  // keep their ids / data-* attributes and are handled by the editor engine's listeners on #inspector / #right.
+  // keep their ids / data-* attributes and are passed by Inspector.svelte to the editor engine.
   import { weft } from "../../lib/bridge.svelte.js";
   import ColorFld from "./ColorFld.svelte";
 
