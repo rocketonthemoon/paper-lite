@@ -1698,8 +1698,8 @@ function renderLayers() {
 // ---------------------------------------------------------------------------
 // Inspector
 // ---------------------------------------------------------------------------
-const fld = (label, key, value, extra = "") =>
-  `<label class="fld${extra.includes("disabled") ? " off" : ""}"><span>${label}</span><input data-style="${key}" value="${esc(px(value))}" ${extra.includes("list=") ? "" : 'list="root-vars" '}${extra}></label>`;
+// The inspector's fields are rendered by ui/src/components/inspector/*.svelte (same data-* attributes as before);
+// the listeners below still apply what is typed or clicked.
 const hex6 = (v) => {
   const s = String(v || "").trim();
   if (/^#[0-9a-f]{6}$/i.test(s)) return s;
@@ -1709,212 +1709,20 @@ const hex6 = (v) => {
   if (m) return "#" + [m[1], m[2], m[3]].map((x) => Math.max(0, Math.min(255, Number(x))).toString(16).padStart(2, "0")).join("");
   return "#ffffff";
 };
-// fallback: the colour shown when the value is unset (e.g. the default page surface) instead of the "no fill" slash.
-const colorFld = (key, value, placeholder = "none", data = "data-style", fallback = "") => {
-  const isEmpty = !value || value === "transparent";
-  const shown = resolveVars(isEmpty ? fallback : value);
-  return `<label class="fld"><span class="swatch${!shown ? " empty" : ""}" style="${shown ? `background:${esc(shown)}` : ""}"><input type="color" ${data}="${key}" value="${hex6(shown || value)}"></span>` +
-    `<input ${data}="${key}" value="${esc(value || "")}" placeholder="${placeholder}" list="root-vars"></label>`;
-};
-
-function alignGrid(st) {
-  const col = st.flexDirection === "column";
-  const vals = ["flex-start", "center", "flex-end"];
-  const norm = (v) => (v === "start" ? "flex-start" : v === "end" ? "flex-end" : v || "flex-start");
-  const j = norm(st.justifyContent), a = norm(st.alignItems);
-  let cells = "";
-  for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) {
-    const jj = col ? vals[r] : vals[c], aa = col ? vals[c] : vals[r];
-    cells += `<button data-action="align" data-j="${jj}" data-a="${aa}" class="${jj === j && aa === a ? "on" : ""}" title="${jj} / ${aa}"></button>`;
-  }
-  return `<div class="align-grid">${cells}</div>`;
-}
-
-function nodePanel(n) {
-  const st = n.styles;
-  const ab = n.parentId === S.rootId;
-  const abs = st.position === "absolute";
-  const flex = st.display === "flex" || st.display === "inline-flex";
-  const texty = !VOID_TAGS.has(n.tag) && (n.text !== "" || TEXT_TAGS.has(n.tag));
-  const posOpts = ["static", "relative", "absolute"].map((p) => `<option ${(st.position || "static") === p ? "selected" : ""}>${p}</option>`).join("");
-  const dispOpts = [["", "default"], ["block", "block"], ["flex", "flex"], ["inline-flex", "inline-flex"], ["grid", "grid"], ["inline-block", "inline-block"], ["none", "none"]].map(([v, l]) => `<option value="${v}" ${(st.display || "") === v ? "selected" : ""}>${l}</option>`).join("");
-  const tagOpts = TAGS.map((t) => `<option ${t === n.tag ? "selected" : ""}>${t}</option>`).join("");
-  const presets = ab ? [["390×844", 390, 844], ["768×1024", 768, 1024], ["1440×900", 1440, 900], ["Auto H", null, "fit-content"]] : [];
-  const weights = ["", "100", "200", "300", "400", "500", "600", "700", "800", "900"].map((w) => `<option value="${w}" ${String(st.fontWeight || "") === w ? "selected" : ""}>${w || "—"}</option>`).join("");
-  const opacity = st.opacity == null ? "100" : String(Math.round(num(st.opacity, 1) * 100));
-  const mine = n.classes || [], defined = definedClassList();
-  const avail = defined.filter((c) => !mine.includes(c));
-  const classable = Object.keys(classableStyles(n)).length > 0;
-  const summary = (c) => {
-    const base = Object.entries(baseStylesOf(c)).map(([k, v]) => `${kebabCss(k)}: ${v}`).join("; ");
-    const more = rulesUsing(c).length;
-    return `${base || "(no base styles)"}${more ? ` + ${more} state / media / nested rule${more === 1 ? "" : "s"}` : ""}`;
-  };
-  return `
-  <div class="sec">
-    <div class="grid2"><label class="fld wide"><span>Name</span><input data-field="name" value="${esc(n.name)}"></label></div>
-    <div class="grid2">
-      <label class="fld"><span>Tag</span><select data-field="tag">${tagOpts}</select></label>
-      <label class="fld${ab ? " off" : ""}"><span>Pos</span><select data-style="position" ${ab ? "disabled" : ""}>${posOpts}</select></label>
-    </div>
-  </div>
-  <div class="sec" id="layer-classes">
-    <div class="sec-h">Shared classes <span class="muted">root CSS</span></div>
-    ${mine.length ? `<div class="chips">${mine.map((c) => `<span class="class-chip" title="${esc(summary(c))}">.${esc(c)}<button type="button" data-action="remove-class" data-class="${esc(c)}" title="Remove .${esc(c)}" aria-label="Remove .${esc(c)}"><svg width="10" height="10" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button></span>`).join("")}</div>
-    <div class="hint">Fields below show this layer's own overrides.</div>`
-      : `<div class="hint">${defined.length ? "None yet. Add one to share its styles." : "No shared classes yet. Turn this layer's styles into one to reuse them."}</div>`}
-    ${avail.length ? `<div class="grid2"><label class="fld wide"><span>Add</span><select data-class-add><option value="">Choose a class…</option>${avail.map((c) => `<option value="${esc(c)}">.${esc(c)}</option>`).join("")}</select></label></div>` : ""}
-    <button class="btn subtle" data-action="make-class" style="width:100%" ${classable ? "" : "disabled title=\"This layer has no styles of its own to share\""}>Make class from this layer's styles</button>
-  </div>
-  <div class="sec">
-    <div class="sec-h">Layout</div>
-    <div class="grid2">${fld("X", "left", st.left, abs ? "" : "disabled placeholder='—' title='Set position: absolute to move freely'")}${fld("Y", "top", st.top, abs ? "" : "disabled placeholder='—'")}</div>
-    <div class="grid2">${fld("W", "width", st.width, "placeholder='auto'")}${fld("H", "height", st.height, "placeholder='auto'")}</div>
-    <div class="grid2"><label class="fld wide"><span>Display</span><select data-style="display">${dispOpts}</select></label></div>
-    ${ab ? `<div class="chips">${presets.map(([lbl, pw, ph]) => `<button type="button" class="chip${(!pw || px(st.width) == pw) && px(st.height) == ph ? " on" : ""}" data-action="preset-size" data-w="${pw ?? ""}" data-h="${ph}">${lbl}</button>`).join("")}</div>` : ""}
-  </div>
-  <div class="sec">
-    <div class="sec-h${flex ? "" : " solo"}">Flex &amp; Spacing ${flex ? `<button class="icon-btn" data-action="unflex" title="Remove flex" aria-label="Remove flex"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3.5 8h9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>` : `<button class="icon-btn" data-action="flex" title="Add flex (Shift+A)" aria-label="Add flex"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button>`}</div>
-    ${flex ? `
-    <div class="flex-row">${alignGrid(st)}
-      <div class="stack">
-        <div class="seg"><button data-action="dir" data-dir="row" class="${st.flexDirection !== "column" ? "on" : ""}" title="Row"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 8h10M9.5 4.5L13 8l-3.5 3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Row</span></button><button data-action="dir" data-dir="column" class="${st.flexDirection === "column" ? "on" : ""}" title="Column"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 3v10M4.5 9.5L8 13l3.5-3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Column</span></button></div>
-        ${fld("Gap", "gap", st.gap, "placeholder='0'")}
-      </div>
-    </div>
-    <div class="grid2">${fld("Pad", "padding", st.padding, "placeholder='0'")}<label class="fld"><span>Wrap</span><select data-style="flexWrap"><option value="">nowrap</option><option ${st.flexWrap === "wrap" ? "selected" : ""}>wrap</option></select></label></div>` : ""}
-    <label class="check"><input type="checkbox" data-style="overflow" value="hidden" ${st.overflow === "hidden" || st.overflow === "clip" ? "checked" : ""}> Clip content</label>
-  </div>
-  <div class="sec">
-    <div class="sec-h">Surface &amp; Border ${st.backgroundColor ? `<button class="icon-btn" data-action="clear" data-key="backgroundColor" title="Remove fill" aria-label="Remove fill"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3.5 8h9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>` : ""}</div>
-    <div class="grid2"><div class="wide" style="grid-column:1/-1">${colorFld("backgroundColor", st.backgroundColor)}</div></div>
-    <div class="grid2">${fld("Rad", "borderRadius", st.borderRadius, "placeholder='0'")}<label class="fld"><span>Opc</span><input data-style="opacity" data-kind="percent" value="${opacity}"></label></div>
-    <div class="grid2">${fld("Bdr", "border", st.border, "placeholder='1px solid #ebebea' data-mono").replace('class="fld"', 'class="fld wide"')}</div>
-    <div class="grid2">${fld("Shd", "boxShadow", st.boxShadow, "placeholder='none' data-mono").replace('class="fld"', 'class="fld wide"')}</div>
-  </div>
-  ${texty ? `
-  <div class="sec">
-    <div class="sec-h">Typography</div>
-    <div class="grid2">${fld("Font", "fontFamily", st.fontFamily, "placeholder='inherit' list='font-families' data-kind='font'").replace('class="fld"', 'class="fld wide"')}</div>
-    <div class="grid2">${fld("Size", "fontSize", st.fontSize, "placeholder='16'")}<label class="fld"><span>Wt</span><select data-style="fontWeight">${weights}</select></label></div>
-    <div class="grid2">${fld("Line", "lineHeight", st.lineHeight, "placeholder='normal'")}${fld("Trk", "letterSpacing", st.letterSpacing, "placeholder='0'")}</div>
-    <div class="typo-color-row">
-      <div class="color-wrap">${colorFld("color", st.color, "inherit")}</div>
-      <div class="seg seg-align">${[["left", `<svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M2.5 4h11M2.5 8h7M2.5 12h9.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>`], ["center", `<svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M2.5 4h11M4.5 8h7M3.5 12h9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>`], ["right", `<svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M2.5 4h11M6.5 8h7M4 12h9.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>`]].map(([a, ic]) => `<button type="button" data-action="textAlign" data-v="${a}" class="${(st.textAlign || "left") === a ? "on" : ""}" title="Align ${a}" aria-label="Align ${a}">${ic}</button>`).join("")}</div>
-    </div>
-  </div>` : ""}
-  ${!n.children.length && !VOID_TAGS.has(n.tag) && !SVG_TAGS.has(n.tag) ? `
-  <div class="sec">
-    <div class="sec-h">Text <span class="muted">double-click on canvas</span></div>
-    <textarea class="code text" data-field="text">${esc(n.text)}</textarea>
-  </div>` : ""}
-  ${n.tag === "img" || n.tag === "a" ? `
-  <div class="sec">
-    <div class="sec-h">Attributes</div>
-    ${n.tag === "img" ? `<div class="grid2"><label class="fld wide"><span>src</span><input data-attr="src" value="${esc(n.attrs?.src || "")}" placeholder="https://…"></label></div>
-    <div class="grid2"><label class="fld wide"><span>alt</span><input data-attr="alt" value="${esc(n.attrs?.alt || "")}"></label></div>` :
-    `<div class="grid2"><label class="fld wide"><span>href</span><input data-attr="href" value="${esc(n.attrs?.href || "")}" placeholder="https://…"></label></div>`}
-  </div>` : ""}
-  <div class="sec">
-    <div class="sec-h${cssJsonOpen ? "" : " solo"}">Raw CSS JSON
-      <button type="button" class="link-toggle" data-action="toggle-css-json">${cssJsonOpen ? "Collapse" : "Expand"}<svg width="10" height="10" viewBox="0 0 12 12" fill="none" style="transform:rotate(${cssJsonOpen ? 180 : 0}deg)"><path d="M3.5 4.75L6 7.25l2.5-2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
-    </div>
-    ${cssJsonOpen ? `
-    <div class="hint">Empty <code>""</code> or <code>null</code> removes a property · <kbd>Ctrl+Enter</kbd> applies</div>
-    <textarea class="code" id="css-json" spellcheck="false">${esc(JSON.stringify(st, null, 2))}</textarea>
-    <button class="btn subtle" data-action="apply-css" style="width:100%">Apply CSS</button>` : ""}
-  </div>`;
-}
-
-function pagePanel() {
+// The header above the inspector is ui/src/components/RightHead.svelte; this is the data it shows. Its buttons
+// (data-action) are handled by the #right click listener below.
+function rightHeadModel() {
+  if (!S) return null;
+  const n = sel && S.nodes[sel];
+  if (n) return { kind: n.parentId === S.rootId ? "artboard" : "layer", name: n.name, agent: agentNodes.some((a) => a.id === n.id) };
   const root = S.nodes[S.rootId];
-  const bg = (root.styles.backgroundColor || "#eef2f6").toLowerCase();
-  const mcpUrl = `${location.origin}/mcp`;
-  const rc = rootOf();
-  const vars = Object.entries(rc.vars), nClasses = definedClassList().length, nRules = rc.rules.length;
-  const isColor = (v) => /^(#[0-9a-f]{3,8}|rgba?\(|hsla?\()/i.test(resolveVars(v).trim());
-  return `
-  <div class="sec" id="root-css-sec">
-    <div class="sec-h">Root CSS <span class="muted">${vars.length} variable${vars.length === 1 ? "" : "s"} · ${nClasses} class${nClasses === 1 ? "" : "es"} · ${nRules} rule${nRules === 1 ? "" : "s"}</span></div>
-    ${vars.length ? `<div class="var-list">${vars.slice(0, 16).map(([k, v]) => `<div class="var-row">${isColor(v) ? `<span class="sw" style="background:${esc(resolveVars(v))}"></span>` : ""}<span>${esc(k)}</span><span class="vv" title="${esc(v)}">${esc(v)}</span></div>`).join("")}${vars.length > 16 ? `<div class="hint">+${vars.length - 16} more in the editor below</div>` : ""}</div>` : ""}
-    <div class="hint">Shared by every screen: layers use <code>var(--name)</code> and these classes, so an edit here restyles them everywhere. Nesting (<code>&amp;:hover</code>, <code>&amp; .title</code>), states and <code>@media</code> work; on the canvas, width queries follow each artboard's width · <kbd>Ctrl+Enter</kbd> applies</div>
-    <textarea class="code root-css" id="root-css" spellcheck="false" wrap="off" aria-label="Root CSS" placeholder=":root {&#10;  --color-primary: #0000ff;&#10;  --space-4: 16px;&#10;}&#10;&#10;.card {&#10;  padding: var(--space-4);&#10;}">${esc(WeftRootCss.toText(rc))}</textarea>
-    <button class="btn subtle" data-action="apply-root-css" style="width:100%">Apply root CSS</button>
-  </div>
-  <div class="sec">
-    <div class="sec-h">Canvas surface</div>
-    ${colorFld("backgroundColor", root.styles.backgroundColor, "#eef2f6", "data-page", "#eef2f6")}
-    <div class="chips">
-      <button type="button" class="chip${bg === "#eef2f6" || !root.styles.backgroundColor ? " on" : ""}" style="flex:1" data-action="page-bg" data-bg="#eef2f6">Light</button>
-      <button type="button" class="chip${bg === "#ffffff" ? " on" : ""}" style="flex:1" data-action="page-bg" data-bg="#ffffff">White</button>
-      <button type="button" class="chip${bg === "#282828" ? " on" : ""}" style="flex:1;background:#282828;color:#fff;border-color:${bg === "#282828" ? "#4c7dff" : "#282828"}" data-action="page-bg" data-bg="#282828">Dark</button>
-    </div>
-  </div>
-  <div class="sec">
-    <div class="sec-h">Fonts <span class="muted">${fontLib.length} in library</span></div>
-    <div class="font-list">${fontLib.map((f) => `<div class="font-row"><span class="fam" style="font-family:${esc(fontStack(f.family))}${f.source === "upload" ? `;font-weight:${f.weight};font-style:${f.style}` : ""}">${esc(f.family)}</span>
-      <span class="meta">${f.source === "upload" ? `${f.weightRange ? f.weightRange.join("–") : f.weight}${f.style === "italic" ? " italic" : ""} · ${esc(f.format)}` : f.builtin ? "built-in" : "Google"}</span>
-      ${f.builtin ? "" : `<button class="icon-btn" data-action="remove-font" data-id="${esc(f.id)}" title="Remove ${esc(f.family)}" aria-label="Remove ${esc(f.family)}"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button>`}</div>`).join("")}</div>
-    <label class="fld"><span>Google</span><input id="google-family" placeholder="Family, e.g. Plus Jakarta"></label>
-    <div class="btnrow">
-      <button class="btn" data-action="add-google"><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>Google Font</button>
-      <label class="btn subtle"><svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M8 10.5v-8M4.5 5.5L8 2l3.5 3.5M3 13.5h10" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>Upload…<input type="file" id="font-file" accept=".woff2,.woff,.ttf,.otf" multiple hidden></label>
-    </div>
-  </div>
-  <div class="sec">
-    <div class="sec-h">MCP server <span class="mcp-live-tag">Connected</span></div>
-    <div class="mono">${esc(mcpUrl)}</div>
-    <div class="mono" id="mcp-cmd" hidden>claude mcp add --transport http weft ${esc(mcpUrl)}</div>
-    <button class="btn" data-action="copy-mcp" style="width:100%"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="5" y="5" width="8.5" height="8.5" rx="1.5"/><path d="M11 5V3.5A1 1 0 0010 2.5H3.5a1 1 0 00-1 1V10a1 1 0 001 1H5"/></svg>Copy Claude Code command</button>
-  </div>
-  <div class="sec">
-    <div class="sec-h">Export project <span class="muted">.zip</span></div>
-    <div class="btnrow">
-      <button class="btn primary" data-action="export-zip" data-format="html">HTML</button>
-      <button class="btn" data-action="export-zip" data-format="jsx">JSX</button>
-      <button class="btn" data-action="export-zip" data-format="both">Both</button>
-    </div>
-  </div>
-  <div class="sec">
-    <div class="sec-h">Export page</div>
-    <div class="btnrow"><button class="btn" data-action="copy" data-format="html">Copy HTML + CSS</button><button class="btn" data-action="copy" data-format="jsx">Copy JSX</button></div>
-  </div>
-  <div class="sec">
-    <div class="sec-h">Shortcuts</div>
-    ${[["Command palette", "Ctrl K"], ["Select / Hand", "V / H"], ["Frame / Rect / Text", "F / R / T"], ["Pan", "Space + drag"],
-      ["Fit / Selection / 100%", "Shift 1 / 2 / 0"], ["Parent / child", "Esc / Enter"], ["Duplicate / Delete", "Ctrl D / Del"], ["Preview screen", "P"],
-      ["Undo / Redo", "Ctrl Z / Ctrl Shift Z"], ["Add flex / Snap", "Shift A / Shift G"], ["Copy HTML / Hide UI", "Ctrl C / Ctrl \\"]]
-      .map(([a, b]) => `<div class="kv"><span>${a}</span><b>${esc(b)}</b></div>`).join("")}
-  </div>`;
+  let layers = 0;
+  const count = (id) => { layers += 1; (S.nodes[id]?.children || []).forEach(count); };
+  root.children.forEach(count);
+  return { kind: "page", name: root.name, artboards: root.children.length, layers };
 }
-
-function renderRightHead(n) {
-  if (n) {
-    const ab = n.parentId === S.rootId;
-    const isAgent = agentNodes.some((a) => a.id === n.id);
-    rightHead.innerHTML = `
-      <div class="right-id" data-kind="${ab ? "artboard" : "layer"}">
-        <span class="right-title" title="${esc(n.name)}">${esc(n.name)}</span>
-        ${isAgent ? `<span class="mcp-badge" title="Edited via MCP">MCP</span>` : ""}
-      </div>
-      <div class="right-acts">
-        <button class="icon-btn" data-action="preview" title="Preview ${ab ? "this screen" : "its screen"} in a new tab (P)" aria-label="Preview screen"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M9.5 2.5h4v4M13.5 2.5L7.5 8.5M12 9.5V13a.5.5 0 01-.5.5H3a.5.5 0 01-.5-.5V4.5A.5.5 0 013 4h3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
-        <button class="icon-btn" data-action="zoom-sel" title="Zoom to selection (Shift+2)" aria-label="Zoom to selection"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><circle cx="8" cy="8" r="4.5"/><path d="M8 1v3M8 12v3M1 8h3M12 8h3"/></svg></button>
-        <button class="icon-btn" data-action="duplicate" title="Duplicate (Ctrl+D)" aria-label="Duplicate"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="5" y="5" width="8.5" height="8.5" rx="1.5"/><path d="M11 5V3.5A1 1 0 0010 2.5H3.5a1 1 0 00-1 1V10a1 1 0 001 1H5"/></svg></button>
-        <button class="icon-btn del-act" data-action="delete" title="Delete (Del)" aria-label="Delete"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5"/></svg></button>
-      </div>`;
-  } else {
-    const root = S.nodes[S.rootId];
-    const abCount = root.children.length;
-    let layerCount = 0;
-    const count = (id) => { layerCount += 1; (S.nodes[id]?.children || []).forEach(count); };
-    root.children.forEach(count);
-    rightHead.innerHTML = `
-      <div class="right-id" data-kind="page">
-        <span class="right-title" title="${esc(root.name)}">${esc(root.name)}</span>
-      </div>
-      <span class="right-meta">${abCount} ${abCount === 1 ? "artboard" : "artboards"} · ${layerCount.toLocaleString()} ${layerCount === 1 ? "layer" : "layers"}</span>`;
-  }
+function renderRightHead() {
+  window.weft.events.dispatchEvent(new Event("right-head"));
 }
 
 // Placement stays on the layer; everything else can become a shared class.
@@ -1954,14 +1762,27 @@ function renderInspector(force = false) {
   const a = document.activeElement;
   if (!force && inspector.contains(a) && a.matches("input:not([type=checkbox]):not([type=color]), textarea, select")) { inspectorDirty = true; return; }
   inspectorDirty = false;
-  const n = sel && S.nodes[sel];
-  const scroll = inspector.scrollTop;
-  renderRightHead(n);
-  inspector.innerHTML = n ? nodePanel(n) : pagePanel();
+  renderRightHead();
   // Copy actions live in the context bar and the Export menu; the footer stays empty.
   inspectorFoot.hidden = true;
   inspectorFoot.innerHTML = "";
-  inspector.scrollTop = scroll;
+  window.weft.events.dispatchEvent(new CustomEvent("inspector", { detail: { force } }));
+}
+
+// What the inspector components show (see ui/src/components/inspector/Inspector.svelte).
+function inspectorModel() {
+  if (!S) return null;
+  const n = sel && S.nodes[sel];
+  return {
+    node: n || null,
+    artboard: Boolean(n && n.parentId === S.rootId),
+    page: S.nodes[S.rootId],
+    cssJsonOpen,
+    fontLib,
+    rootCss: rootOf(),
+    definedClasses: definedClassList(),
+    mcpUrl: `${location.origin}/mcp`,
+  };
 }
 
 function parseVal(raw, kind) {
@@ -3471,6 +3292,11 @@ window.weft = {
   // Command palette (CommandPalette.svelte)
   cmdkEntries: () => buildCmdkEntries(),
   closeCmdk: () => openCmdk(false),
+  // Inspector (inspector/*.svelte): its data and the helpers its templates use
+  inspectorModel: () => inspectorModel(),
+  h: { px, num, hex6, resolveVars, baseStylesOf, rulesUsing, kebabCss, fontStack, classableStyles, TAGS, TEXT_TAGS, VOID_TAGS, SVG_TAGS },
+  // Inspector header (RightHead.svelte)
+  rightHeadModel: () => rightHeadModel(),
   // Layers tree (LayersPanel.svelte)
   layerRows: () => layerRows(),
   select: (id) => select(id),
@@ -3582,7 +3408,7 @@ function connect() {
       if (agentNodes.length) chip.textContent = `Agent editing ${plural(agentNodes.length, "layer")}`;
     }
     renderLayers();
-    if (S) renderRightHead(sel && S.nodes[sel]);
+    if (S) renderRightHead();
     if (!commentsPanelEl.hidden) renderCommentsPanel();
     updateOverlay();
     if (followAgent && agentNodes.length && S) {
