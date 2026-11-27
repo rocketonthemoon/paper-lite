@@ -1,6 +1,6 @@
 <script>
   // A project's thumbnail. The editor's loadThumb() fetches the project's preview and draws it into .dash-thumb-world;
-  // it runs again only when the project changed since it was drawn.
+  // it runs again only when the project changed since it was drawn. Clicking it opens the project.
   import { weft } from "../../lib/bridge.svelte.js";
   let { p, compact = false } = $props();
   function draw(el, project) {
@@ -16,7 +16,8 @@
   }
 </script>
 
-<div class="dash-thumb" data-open-project={p.id} style="background:{p.bg || '#eef2f6'}" use:draw={p}>
+<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+<div class="dash-thumb" data-open-project={p.id} onclick={() => weft.openProject(p.id)} style="background:{p.bg || '#eef2f6'}" use:draw={p}>
   {#if !p.artboards}
     <div class="dash-empty-thumb">{#if compact}<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="3" y="4" width="18" height="16" rx="2" stroke-dasharray="3 2" /></svg>{:else}<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="3" y="4" width="18" height="16" rx="2" stroke-dasharray="3 2" /></svg><span>Empty canvas</span>{/if}</div>
   {:else}

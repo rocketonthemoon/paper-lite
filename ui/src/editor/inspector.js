@@ -1,5 +1,6 @@
 // Inspector (right panel, Design tab): the models its Svelte components render (../components/inspector)
-// and the delegated listeners that commit their fields (input, change, keydown, click on #inspector / #right).
+// and what their fields and buttons do: Inspector.svelte and RightHead.svelte pass their events to the functions
+// below (inspectorChange, inspectorKeydown, inspectorAction, …).
 import { ed } from "./state.js";
 import { $, api, elOf, inspector, inspectorFoot, num, patch, patchStyles, toast } from "./core.js";
 import { classUsage, definedClassList, rootOf } from "./render.js";
@@ -171,137 +172,145 @@ export async function downloadZip(projectId = ed.S?.id, format = "html") {
   }
 }
 
+// Typing in a color picker previews the color on its swatch and in the text field next to it.
+export function inspectorInput(e) {
+  if (e.target.matches('.swatch input[type="color"]')) {
+    const sw = e.target.closest(".swatch");
+    const txt = e.target.closest(".fld")?.querySelector('input:not([type="color"])');
+    if (sw) { sw.classList.remove("empty"); sw.style.background = e.target.value; }
+    if (txt) txt.value = e.target.value;
+  }
+}
+
+// A field was committed (Enter, blur, a select or checkbox change): save it to the selected layer or the page.
+export function inspectorChange(e) {
+  const t = e.target;
+  if (t === cancellingField) return;
+  if (t.id === "font-file") return uploadFonts([...t.files]);
+  if (t.id === "google-family") return;
+  if (t.id === "css-json") return;
+  if (t.dataset.page) return patchStyles(ed.S.rootId, { backgroundColor: t.value || null });
+  if (t.id === "root-css") return;
+  if (!ed.sel) return;
+  if (t.dataset.classAdd !== undefined) {
+    if (t.value) patch(ed.sel, { classes: [...(ed.S.nodes[ed.sel].classes || []), t.value] });
+    return;
+  }
+  if (t.dataset.style) {
+    const key = t.dataset.style;
+    let value = t.type === "checkbox" ? (t.checked ? t.value : null) : parseVal(t.value, t.dataset.kind);
+    if (key === "lineHeight" && typeof value === "number" && value >= 4) value = `${value}px`;
+    const styles = { [key]: value };
+    if (key === "position" && value === "absolute") {
+      const el = elOf(ed.sel);
+      if (el) Object.assign(styles, { left: Math.round(el.offsetLeft), top: Math.round(el.offsetTop) });
+    }
+    if (key === "position" && value !== "absolute") Object.assign(styles, { left: null, top: null });
+    patchStyles(ed.sel, styles);
+  } else if (t.dataset.field) {
+    patch(ed.sel, { [t.dataset.field]: t.value });
+  } else if (t.dataset.attr) {
+    patch(ed.sel, { attrs: { [t.dataset.attr]: t.value || null } });
+  }
+}
+
+// Field keys: Ctrl/Cmd+Enter applies CSS, arrows step numbers (Shift = 10), Enter commits, Escape cancels.
+export function inspectorKeydown(e) {
+  if (e.key === "Enter" && e.target.id === "css-json" && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    inspector.querySelector('[data-action="apply-css"]')?.click();
+    return;
+  }
+  if (e.key === "Enter" && e.target.id === "root-css" && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    inspector.querySelector('[data-action="apply-root-css"]')?.click();
+    return;
+  }
+  if ((e.key === "ArrowUp" || e.key === "ArrowDown") && e.target.matches("input[data-style]") && STEP_KEYS.has(e.target.dataset.style)) {
+    const raw = e.target.value.trim();
+    if (/^-?\d+(\.\d+)?$/.test(raw)) {
+      e.preventDefault();
+      const step = (e.key === "ArrowUp" ? 1 : -1) * (e.shiftKey ? 10 : 1);
+      const next = Math.round((Number(raw) + step) * 100) / 100;
+      e.target.value = String(e.target.dataset.kind === "percent" ? Math.max(0, Math.min(100, next)) : next);
+      e.target.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    return;
+  }
+  if (e.key === "Enter" && e.target.id === "google-family") { e.preventDefault(); $("#right").querySelector('[data-action="add-google"]')?.click(); return; }
+  if (e.key === "Enter" && e.target.matches("input")) e.target.blur();
+  if (e.key === "Escape" && e.target.matches("input, textarea")) {
+    cancellingField = e.target;
+    e.target.blur();
+    cancellingField = null;
+    renderInspector(true); // fresh fields show the saved values again
+  }
+}
+
+// Updates held back while a field had focus are shown once focus leaves the inspector.
+export function inspectorFocusout() {
+  setTimeout(() => {
+    if (ed.inspectorDirty && !inspector.contains(document.activeElement)) renderInspector(true);
+  });
+}
+
+// Buttons in the inspector and its header (data-action, plus their other data-* values).
+export async function inspectorAction(b) {
+  const act = b.dataset.action;
+  if (act === "copy") return copyExport(b.dataset.format, ed.sel);
+  if (act === "export-zip") return downloadZip(ed.S?.id, b.dataset.format || "html");
+  if (act === "copy-mcp") return copyText($("#mcp-cmd").textContent, "Copied MCP command");
+  if (act === "page-bg") return patchStyles(ed.S.rootId, { backgroundColor: b.dataset.bg });
+  if (act === "toggle-css-json") { ed.cssJsonOpen = !ed.cssJsonOpen; return renderInspector(true); }
+  if (act === "remove-font") {
+    const f = ed.fontLib.find((x) => x.id === b.dataset.id);
+    if (f && confirm(`Remove ${f.family} from the font library? Layers using it fall back to their fallback fonts.`)) await api("DELETE", `/api/fonts/${encodeURIComponent(f.id)}`);
+    return;
+  }
+  if (act === "apply-root-css") return applyRootCssText($("#root-css").value);
+  if (act === "add-google") {
+    const family = $("#google-family").value.trim();
+    if (!family) return toast("Type a Google Fonts family name");
+    if (await api("POST", "/api/fonts/google", { family })) toast(`Added ${family}`);
+    return;
+  }
+  if (!ed.sel) return;
+  if (act === "zoom-sel") return zoomCmd("selection");
+  if (act === "preview") return openPreview(ed.sel);
+  if (act === "preset-size") {
+    const styles = { height: b.dataset.h === "fit-content" ? "fit-content" : Number(b.dataset.h) };
+    if (b.dataset.w) styles.width = Number(b.dataset.w);
+    return patchStyles(ed.sel, styles);
+  }
+  if (act === "remove-class") return patch(ed.sel, { classes: (ed.S.nodes[ed.sel].classes || []).filter((c) => c !== b.dataset.class) });
+  if (act === "make-class") return makeClassFrom(ed.sel);
+  if (act === "delete") return removeSelected();
+  if (act === "duplicate") return duplicateSelected();
+  if (act === "flex" || act === "unflex") return toggleFlex(ed.sel);
+  if (act === "dir") return patchStyles(ed.sel, { flexDirection: b.dataset.dir });
+  if (act === "align") return patchStyles(ed.sel, { justifyContent: b.dataset.j, alignItems: b.dataset.a });
+  if (act === "textAlign") return patchStyles(ed.sel, { textAlign: b.dataset.v === "left" ? null : b.dataset.v });
+  if (act === "clear") return patchStyles(ed.sel, { [b.dataset.key]: null });
+  if (act === "apply-css") {
+    let styles;
+    try { styles = JSON.parse($("#css-json").value); } catch (err) { return toast(`Invalid JSON: ${err.message}`); }
+    if (!styles || typeof styles !== "object" || Array.isArray(styles)) return toast("CSS must be a JSON object");
+    if (await patch(ed.sel, { styles, replaceStyles: true })) toast("CSS applied");
+  }
+}
+
+// The context bar's buttons (../components/canvas/ContextBar.svelte), on the selected layer.
+export function ctxAction(act) {
+  if (!ed.sel) return;
+  if (act === "copy") return copyExport("html", ed.sel);
+  if (act === "preview") return openPreview(ed.sel);
+  if (act === "duplicate") return duplicateSelected();
+  if (act === "flex") return toggleFlex(ed.sel);
+  if (act === "comment") return openNewComment(ed.sel);
+}
+
 // Listeners and initial state; ./index.js runs each module's setup() once, in startup order.
 export function setup() {
-  inspector.addEventListener("input", (e) => {
-    if (e.target.matches('.swatch input[type="color"]')) {
-      const sw = e.target.closest(".swatch");
-      const txt = e.target.closest(".fld")?.querySelector('input:not([type="color"])');
-      if (sw) { sw.classList.remove("empty"); sw.style.background = e.target.value; }
-      if (txt) txt.value = e.target.value;
-    }
-  });
-  inspector.addEventListener("change", (e) => {
-    const t = e.target;
-    if (t === cancellingField) return;
-    if (t.id === "font-file") return uploadFonts([...t.files]);
-    if (t.id === "google-family") return;
-    if (t.id === "css-json") return;
-    if (t.dataset.page) return patchStyles(ed.S.rootId, { backgroundColor: t.value || null });
-    if (t.id === "root-css") return;
-    if (!ed.sel) return;
-    if (t.dataset.classAdd !== undefined) {
-      if (t.value) patch(ed.sel, { classes: [...(ed.S.nodes[ed.sel].classes || []), t.value] });
-      return;
-    }
-    if (t.dataset.style) {
-      const key = t.dataset.style;
-      let value = t.type === "checkbox" ? (t.checked ? t.value : null) : parseVal(t.value, t.dataset.kind);
-      if (key === "lineHeight" && typeof value === "number" && value >= 4) value = `${value}px`;
-      const styles = { [key]: value };
-      if (key === "position" && value === "absolute") {
-        const el = elOf(ed.sel);
-        if (el) Object.assign(styles, { left: Math.round(el.offsetLeft), top: Math.round(el.offsetTop) });
-      }
-      if (key === "position" && value !== "absolute") Object.assign(styles, { left: null, top: null });
-      patchStyles(ed.sel, styles);
-    } else if (t.dataset.field) {
-      patch(ed.sel, { [t.dataset.field]: t.value });
-    } else if (t.dataset.attr) {
-      patch(ed.sel, { attrs: { [t.dataset.attr]: t.value || null } });
-    }
-  });
-  inspector.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && e.target.id === "css-json" && (e.ctrlKey || e.metaKey)) {
-      e.preventDefault();
-      inspector.querySelector('[data-action="apply-css"]')?.click();
-      return;
-    }
-    if (e.key === "Enter" && e.target.id === "root-css" && (e.ctrlKey || e.metaKey)) {
-      e.preventDefault();
-      inspector.querySelector('[data-action="apply-root-css"]')?.click();
-      return;
-    }
-    if ((e.key === "ArrowUp" || e.key === "ArrowDown") && e.target.matches("input[data-style]") && STEP_KEYS.has(e.target.dataset.style)) {
-      const raw = e.target.value.trim();
-      if (/^-?\d+(\.\d+)?$/.test(raw)) {
-        e.preventDefault();
-        const step = (e.key === "ArrowUp" ? 1 : -1) * (e.shiftKey ? 10 : 1);
-        const next = Math.round((Number(raw) + step) * 100) / 100;
-        e.target.value = String(e.target.dataset.kind === "percent" ? Math.max(0, Math.min(100, next)) : next);
-        e.target.dispatchEvent(new Event("change", { bubbles: true }));
-      }
-      return;
-    }
-    if (e.key === "Enter" && e.target.id === "google-family") { e.preventDefault(); $("#right").querySelector('[data-action="add-google"]')?.click(); return; }
-    if (e.key === "Enter" && e.target.matches("input")) e.target.blur();
-    if (e.key === "Escape" && e.target.matches("input, textarea")) {
-      cancellingField = e.target;
-      e.target.blur();
-      cancellingField = null;
-      renderInspector(true); // fresh fields show the saved values again
-    }
-  });
-  inspector.addEventListener("focusout", () => setTimeout(() => {
-    if (ed.inspectorDirty && !inspector.contains(document.activeElement)) renderInspector(true);
-  }));
-
-  $("#right").addEventListener("click", async (e) => {
-    const b = e.target.closest("[data-action]");
-    if (!b) return;
-    const act = b.dataset.action;
-    if (act === "copy") return copyExport(b.dataset.format, ed.sel);
-    if (act === "export-zip") return downloadZip(ed.S?.id, b.dataset.format || "html");
-    if (act === "copy-mcp") return copyText($("#mcp-cmd").textContent, "Copied MCP command");
-    if (act === "page-bg") return patchStyles(ed.S.rootId, { backgroundColor: b.dataset.bg });
-    if (act === "toggle-css-json") { ed.cssJsonOpen = !ed.cssJsonOpen; return renderInspector(true); }
-    if (act === "remove-font") {
-      const f = ed.fontLib.find((x) => x.id === b.dataset.id);
-      if (f && confirm(`Remove ${f.family} from the font library? Layers using it fall back to their fallback fonts.`)) await api("DELETE", `/api/fonts/${encodeURIComponent(f.id)}`);
-      return;
-    }
-    if (act === "apply-root-css") return applyRootCssText($("#root-css").value);
-    if (act === "add-google") {
-      const family = $("#google-family").value.trim();
-      if (!family) return toast("Type a Google Fonts family name");
-      if (await api("POST", "/api/fonts/google", { family })) toast(`Added ${family}`);
-      return;
-    }
-    if (!ed.sel) return;
-    if (act === "zoom-sel") return zoomCmd("selection");
-    if (act === "preview") return openPreview(ed.sel);
-    if (act === "preset-size") {
-      const styles = { height: b.dataset.h === "fit-content" ? "fit-content" : Number(b.dataset.h) };
-      if (b.dataset.w) styles.width = Number(b.dataset.w);
-      return patchStyles(ed.sel, styles);
-    }
-    if (act === "remove-class") return patch(ed.sel, { classes: (ed.S.nodes[ed.sel].classes || []).filter((c) => c !== b.dataset.class) });
-    if (act === "make-class") return makeClassFrom(ed.sel);
-    if (act === "delete") return removeSelected();
-    if (act === "duplicate") return duplicateSelected();
-    if (act === "flex" || act === "unflex") return toggleFlex(ed.sel);
-    if (act === "dir") return patchStyles(ed.sel, { flexDirection: b.dataset.dir });
-    if (act === "align") return patchStyles(ed.sel, { justifyContent: b.dataset.j, alignItems: b.dataset.a });
-    if (act === "textAlign") return patchStyles(ed.sel, { textAlign: b.dataset.v === "left" ? null : b.dataset.v });
-    if (act === "clear") return patchStyles(ed.sel, { [b.dataset.key]: null });
-    if (act === "apply-css") {
-      let styles;
-      try { styles = JSON.parse($("#css-json").value); } catch (err) { return toast(`Invalid JSON: ${err.message}`); }
-      if (!styles || typeof styles !== "object" || Array.isArray(styles)) return toast("CSS must be a JSON object");
-      if (await patch(ed.sel, { styles, replaceStyles: true })) toast("CSS applied");
-    }
-  });
-
-  // Contextual Bar actions
+  // The context bar is placed over the canvas; a press on it must not reach the canvas or close menus.
   $("#ctx-bar").addEventListener("pointerdown", (e) => e.stopPropagation());
-  $("#ctx-bar").addEventListener("click", (e) => {
-    const b = e.target.closest("[data-ctx]");
-    if (!b || !ed.sel) return;
-    const act = b.dataset.ctx;
-    if (act === "copy") return copyExport("html", ed.sel);
-    if (act === "preview") return openPreview(ed.sel);
-    if (act === "duplicate") return duplicateSelected();
-    if (act === "flex") return toggleFlex(ed.sel);
-    if (act === "comment") return openNewComment(ed.sel);
-  });
 }

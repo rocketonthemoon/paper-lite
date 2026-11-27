@@ -6,7 +6,6 @@ import { render, updateOverlay } from "./render.js";
 import { finishEdit, pathTo, pickTarget, select, setTool, startEdit } from "./selection.js";
 import { startPan } from "./view.js";
 import { startCreate } from "./draw.js";
-import { renameRow } from "./layers.js";
 import { closeCommentThread, openNewComment } from "./comments.js";
 
 function releasePointer() {
@@ -15,6 +14,13 @@ function releasePointer() {
   if (ed.pendingRender && !ed.busy && !ed.editingId) render();
 }
 function pickHover(deepest) { const p = pathTo(deepest); const i = p.indexOf(ed.sel); return i >= 0 ? p[Math.min(i + 1, p.length - 1)] : pickTarget(deepest); }
+
+// Pressing an artboard label (../components/canvas/ArtboardLabels.svelte) selects the artboard, or pans with the
+// Hand tool, Space or the middle button. Dragging it is interact.js (./drag.js); double-click renames (renameRow).
+export function labelPointerDown(e, id) {
+  if (ed.spaceDown || ed.tool === "hand" || e.button === 1) return startPan(e);
+  select(id);
+}
 
 // Listeners and initial state; ./index.js runs each module's setup() once, in startup order.
 export function setup() {
@@ -81,12 +87,4 @@ export function setup() {
     if (id !== ed.hoverId) { ed.hoverId = id; updateOverlay(); }
   });
   stage.addEventListener("pointerleave", () => { ed.hoverId = null; const p = $("#comment-placing"); if (p) p.style.display = "none"; updateOverlay(); });
-
-  $("#labels").addEventListener("pointerdown", (e) => {
-    const l = e.target.closest(".ab-label");
-    if (!l) return;
-    if (ed.spaceDown || ed.tool === "hand" || e.button === 1) return startPan(e);
-    select(l.dataset.id);
-  });
-  $("#labels").addEventListener("dblclick", (e) => { const l = e.target.closest(".ab-label"); if (l) renameRow(l.dataset.id); });
 }

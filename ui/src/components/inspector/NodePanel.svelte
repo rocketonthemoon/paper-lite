@@ -1,6 +1,6 @@
 <script>
   // Inspector for the selected layer or artboard. Fields and buttons carry the same data-* attributes as before and
-  // are handled by the editor engine's listeners on #inspector / #right (input, change, keydown, click).
+  // are passed by Inspector.svelte to the editor engine (input, change, keydown, click).
   import { weft } from "../../lib/bridge.svelte.js";
   import Fld from "./Fld.svelte";
   import ColorFld from "./ColorFld.svelte";

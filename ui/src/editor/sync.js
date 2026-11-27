@@ -3,17 +3,18 @@
 import { ed } from "./state.js";
 import { $, GENERIC_FONTS, SVG_TAGS, TAGS, TEXT_TAGS, VOID_TAGS, ago, api, clock, commentsPanelEl, elOf, expanded, inspector, num, plural, px, rightHead, toast, viewKey, world } from "./core.js";
 import { applyView, baseStylesOf, kebabCss, layerRows, render, renderLayers, resolveVars, rootOf, rulesUsing, updateOverlay } from "./render.js";
-import { classableStyles, copyText, downloadZip, hex6, inspectorModel, renderInspector, renderRightHead, rightHeadModel } from "./inspector.js";
+import { classableStyles, copyText, ctxAction, downloadZip, hex6, inspectorAction, inspectorChange, inspectorFocusout, inspectorInput, inspectorKeydown, inspectorModel, renderInspector, renderRightHead, rightHeadModel } from "./inspector.js";
 import { createNode, select, shareSelection } from "./selection.js";
 import { fitTo, worldBounds } from "./view.js";
-import { canNestIn, dropLayer, hoverLayer, renameLayer, toggleExpanded } from "./layers.js";
+import { labelPointerDown } from "./pointer.js";
+import { canNestIn, dropLayer, hoverLayer, renameLayer, renameRow, toggleExpanded } from "./layers.js";
 import { fontStack, renderFontList } from "./fonts.js";
 import { pagesModel } from "./pages.js";
 import { openProjectMenu, projectMenuModel } from "./projects.js";
 import { buildCmdkEntries, openCmdk } from "./cmdk.js";
-import { clearDashSearch, closeDashModal, dashEl, dashModel, loadThumb, openDashboard, renderDashActivity, renderDashboard } from "./dashboard.js";
+import { clearDashSearch, closeDashModal, dashEl, dashMenuAction, dashModel, loadThumb, openDashMenu, openDashboard, openProjectFromDash, renderDashActivity, renderDashboard, revertSession } from "./dashboard.js";
 import { exportAction, exportMenuModel, openExportMenu } from "./chrome.js";
-import { closeCommentThread, commentPins, commentRows, commentThread, openCommentThread, renderCommentPins, renderCommentThread, renderCommentsPanel, submitComment, updateCommentsBadge } from "./comments.js";
+import { closeCommentThread, commentPins, commentRows, commentThread, focusAgentNode, openCommentThread, renderCommentPins, renderCommentThread, renderCommentsPanel, submitComment, updateCommentsBadge } from "./comments.js";
 
 let hist = { entries: [], cursor: -1, limit: 60, checkpoints: [] };
 const historyEl = $("#history-panel");
@@ -214,6 +215,20 @@ export function setup() {
     closeDashModal: () => closeDashModal(),
     dashMenuModel: () => ({ onlyProject: ed.projects.length < 2 }),
     overlay: { labels: [], ctx: null, agents: { boxes: [], cursors: [] }, crumbs: { page: "Page 1", artboard: "" } },
+    ctxAction: (act) => ctxAction(act),
+    // Inspector and its header (inspector/Inspector.svelte, RightHead.svelte): field events and data-action buttons
+    inspectorInput: (e) => inspectorInput(e),
+    inspectorChange: (e) => inspectorChange(e),
+    inspectorKeydown: (e) => inspectorKeydown(e),
+    inspectorFocusout: () => inspectorFocusout(),
+    inspectorAction: (button) => inspectorAction(button),
+    openProject: (id) => openProjectFromDash(id),
+    openDashMenu: (pid, btn) => openDashMenu(pid, btn),
+    dashMenuAction: (act) => dashMenuAction(act),
+    revertSession: (id) => revertSession(id),
+    focusAgentNode: (id) => focusAgentNode(id),
+    labelPointerDown: (e, id) => labelPointerDown(e, id),
+    renameRow: (id) => renameRow(id),
   };
   $("#right-tabs").addEventListener("click", (e) => { const b = e.target.closest("[data-tab]"); if (b) setRightTab(b.dataset.tab); });
 
