@@ -53,7 +53,12 @@ export default [
     languageOptions: {
       ecmaVersion: 2024,
       sourceType: "module",
-      globals: { window: "readonly", document: "readonly", console: "readonly", fetch: "readonly", setTimeout: "readonly", clearTimeout: "readonly", EventTarget: "readonly", CustomEvent: "readonly", confirm: "readonly" },
+      globals: {
+        window: "readonly", document: "readonly", console: "readonly", fetch: "readonly", setTimeout: "readonly",
+        clearTimeout: "readonly", EventTarget: "readonly", Event: "readonly", confirm: "readonly",
+        // Svelte 5 runes, available in .svelte.js modules
+        $state: "readonly", $derived: "readonly", $effect: "readonly", $props: "readonly",
+      },
     },
     rules: {
       "no-unused-vars": ["error", { caughtErrors: "none", argsIgnorePattern: "^_" }],
@@ -75,6 +80,7 @@ export default [
         Element: "readonly",
         Event: "readonly",
         EventSource: "readonly",
+        EventTarget: "readonly",
         FileReader: "readonly",
         FormData: "readonly",
         HTMLElement: "readonly",

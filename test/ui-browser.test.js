@@ -561,3 +561,95 @@ test("browser: edits arrive as patches and only changed canvas elements are rebu
   assert.equal(await cdp.evalJs("JSON.stringify(S.nodes)"), JSON.stringify(server.nodes));
   assert.equal(await cdp.evalJs("document.querySelectorAll('#world [data-node-id]').length"), Object.keys(server.nodes).length - server.pages.length);
 });
+
+test("browser: History panel (Svelte) shows steps, saves and restores checkpoints, filters, keeps git drafts", { timeout: 120_000 }, async (t) => {
+  const browserBin = findBrowser();
+  if (!browserBin) {
+    t.skip("No headless Chromium/Chrome binary found");
+    return;
+  }
+  const srv = await startTestServer();
+  t.after(() => srv.stop());
+  const cdp = await startBrowser(browserBin);
+  t.after(() => cdp.stop());
+  const rest = async (method, url, body) => {
+    const res = await fetch(srv.baseUrl + url, { method, headers: { "content-type": "application/json" }, body: body && JSON.stringify(body) });
+    assert.ok(res.ok, `${method} ${url} → ${res.status}`);
+    return res.json();
+  };
+  const waitFor = async (expr, label) => {
+    for (let i = 0; i < 100; i++) { if (await cdp.evalJs(expr)) return; await sleep(50); }
+    assert.fail(`timed out waiting for ${label}`);
+  };
+  const click = (sel) => cdp.evalJs(`document.querySelector(${JSON.stringify(sel)}).click()`);
+  const type = (sel, value) => cdp.evalJs(`(() => { const el = document.querySelector(${JSON.stringify(sel)}); el.value = ${JSON.stringify(value)}; el.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+  const key = (sel, k) => cdp.evalJs(`document.querySelector(${JSON.stringify(sel)}).dispatchEvent(new KeyboardEvent("keydown", { key: ${JSON.stringify(k)}, bubbles: true, cancelable: true }))`);
+  const count = (sel) => cdp.evalJs(`document.querySelectorAll(${JSON.stringify(sel)}).length`);
+
+  const s0 = await rest("GET", "/api/state");
+  const board = await rest("POST", "/api/nodes", { parentId: s0.rootId, tag: "div", name: "Board" });
+  await rest("PATCH", `/api/nodes/${board.id}`, { name: "Board 2" });
+  await mcpCall(srv.baseUrl, "rename_nodes", { updates: [{ nodeId: board.id, name: "Agent board" }] });
+
+  await cdp.send("Page.navigate", { url: srv.baseUrl });
+  await waitFor(`document.querySelector("#live.live") && document.querySelector('#right-tabs [data-tab="history"]')`, "app");
+  await click('#right-tabs [data-tab="history"]');
+  await waitFor(`!document.querySelector("#history-panel").hidden && document.querySelectorAll("#history-panel .hist-step").length === 3`, "three steps");
+  assert.equal(await cdp.evalJs(`document.querySelector("#history-panel .hist-step.cur .hist-av").textContent`), "AI", "newest (agent) step is current");
+  assert.equal(await cdp.evalJs(`document.querySelector(".hist-count").textContent`), "3 / 60");
+
+  // Jump back by clicking the oldest step; the server moves and the panel follows.
+  await click('#history-panel .hist-step[data-index="0"]');
+  await waitFor(`document.querySelector(".hist-count").textContent === "1 / 60"`, "jump");
+  assert.equal((await rest("GET", "/api/history")).cursor, 0);
+  assert.equal(await count("#history-panel .hist-step.undone"), 2);
+  await rest("POST", "/api/history/jump", { index: 2 });
+  await waitFor(`document.querySelector(".hist-count").textContent === "3 / 60"`, "jump forward");
+
+  // Save a checkpoint: the name field appears focused with a default, Enter saves.
+  await click('[data-hist="cp-new"]');
+  await waitFor(`document.activeElement?.id === "cp-name" && /^Checkpoint /.test(document.activeElement.value)`, "name field focused");
+  await type("#cp-name", "Before experiment");
+  await key("#cp-name", "Enter");
+  await waitFor(`[...document.querySelectorAll(".hist-cps .cp-name")].some((e) => e.textContent === "Before experiment")`, "checkpoint listed");
+  const cp = (await rest("GET", "/api/checkpoints")).find((c) => c.name === "Before experiment");
+  assert.ok(cp, "saved on the server");
+  // Escape cancels naming without saving.
+  await click('[data-hist="cp-new"]');
+  await waitFor(`document.activeElement?.id === "cp-name"`, "name field again");
+  await key("#cp-name", "Escape");
+  await waitFor(`!document.querySelector("#cp-name")`, "naming cancelled");
+
+  // Restore it after a change.
+  await rest("PATCH", `/api/nodes/${board.id}`, { name: "Changed" });
+  await click(`[data-hist="cp-restore"][data-id="${cp.id}"]`);
+  for (let i = 0; i < 100 && (await rest("GET", "/api/state")).nodes[board.id].name !== "Agent board"; i++) await sleep(50);
+  assert.equal((await rest("GET", "/api/state")).nodes[board.id].name, "Agent board");
+
+  // Filter: Agent shows only MCP steps; closing the filter resets it.
+  const steps = await count("#history-panel .hist-step");
+  await click('[data-hist="filter-toggle"]');
+  await click('[data-hist="filter"][data-f="agent"]');
+  await waitFor(`[...document.querySelectorAll("#history-panel .hist-step .hist-av")].every((a) => a.textContent === "AI")`, "agent filter");
+  assert.ok((await count("#history-panel .hist-step")) < steps);
+  await click('[data-hist="filter-toggle"]');
+  await waitFor(`document.querySelectorAll("#history-panel .hist-step").length === ${steps}`, "filter reset");
+
+  // Git form: what you type survives live updates; Escape closes it.
+  await click('[data-hist="git-edit"]');
+  await waitFor(`document.activeElement?.id === "git-url"`, "git form focused");
+  await type("#git-url", "https://github.com/you/design.git");
+  await type("#git-token", "secret-token");
+  await rest("PATCH", `/api/nodes/${board.id}`, { name: "Live update" }); // sends a history event
+  await waitFor(`document.querySelector(".hist-count").textContent.startsWith("${steps + 1} ")`, "history event arrived");
+  assert.equal(await cdp.evalJs(`document.querySelector("#git-url").value`), "https://github.com/you/design.git");
+  assert.equal(await cdp.evalJs(`document.querySelector("#git-token").value`), "secret-token");
+  await key("#git-token", "Escape");
+  await waitFor(`!document.querySelector(".git-form") && document.querySelector('[data-hist="git-edit"]')`, "git form closed");
+
+  // Undo last agent run is enabled while an agent step is in effect, and undoes back to before it.
+  assert.equal(await cdp.evalJs(`document.querySelector('[data-hist="undo-agent"]').disabled`), false);
+  await click('[data-hist="undo-agent"]');
+  await waitFor(`document.querySelector('[data-hist="undo-agent"]').disabled`, "agent run undone");
+  assert.equal((await rest("GET", "/api/history")).cursor, 1);
+});
