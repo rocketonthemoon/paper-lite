@@ -1138,3 +1138,56 @@ test("browser: canvas overlay (Svelte): artboard labels, context bar, breadcrumb
   assert.equal(await cdp.evalJs(`Boolean(document.querySelector("#export-menu .exp-code"))`), false, "no selection section");
   assert.ok(await cdp.evalJs(`document.querySelector('#export-menu [data-exp-fmt="jsx"]').classList.contains("on")`), "format kept");
 });
+
+test("browser: toast and dashboard dialog / card menu (Svelte)", { timeout: 120_000 }, async (t) => {
+  const browserBin = findBrowser();
+  if (!browserBin) {
+    t.skip("No headless Chromium/Chrome binary found");
+    return;
+  }
+  const srv = await startTestServer();
+  t.after(() => srv.stop());
+  const cdp = await startBrowser(browserBin);
+  t.after(() => cdp.stop());
+  const waitFor = async (expr, label) => {
+    for (let i = 0; i < 100; i++) { if (await cdp.evalJs(expr)) return; await sleep(50); }
+    assert.fail(`timed out waiting for ${label}`);
+  };
+  await cdp.send("Page.navigate", { url: `${srv.baseUrl}/#dashboard` });
+  await waitFor(`document.querySelector("#live.live") && document.querySelector("#dash-content [data-dash-menu]")`, "dashboard");
+
+  // Toast: text is escaped, the action runs its callback and hides the toast.
+  await cdp.evalJs(`toast("<b>Saved</b>", { agent: true, action: "Undo", onAction: () => { window.__acted = true; } })`);
+  assert.equal(await cdp.evalJs(`document.querySelector("#toast .toast-msg").textContent`), "<b>Saved</b>");
+  assert.ok(await cdp.evalJs(`Boolean(document.querySelector("#toast .toast-dot")) && document.getElementById("toast").classList.contains("show")`));
+  await cdp.evalJs(`document.querySelector("#toast .toast-act").click()`);
+  assert.equal(await cdp.evalJs(`window.__acted === true && !document.getElementById("toast").classList.contains("show")`), true);
+  await cdp.evalJs(`toast("Plain")`);
+  assert.equal(await cdp.evalJs(`document.querySelector("#toast .toast-act")`), null, "no action button");
+
+  // Card menu: the only project can't be deleted.
+  await cdp.evalJs(`document.querySelector("#dash-content [data-dash-menu]").click()`);
+  assert.equal(await cdp.evalJs(`document.querySelector('#dash-menu [data-dact="delete"]').disabled`), true);
+  // Rename dialog: prefilled and selected; Escape closes. A new dialog starts from its own value, not leftover typing.
+  await cdp.evalJs(`document.querySelector('#dash-menu [data-dact="rename"]').click()`);
+  assert.equal(await cdp.evalJs(`document.activeElement.id`), "dash-modal-input");
+  assert.equal(await cdp.evalJs(`document.getElementById("dash-modal-input").value`), "Untitled");
+  await cdp.evalJs(`document.getElementById("dash-modal-input").value = "typed"`);
+  await cdp.evalJs(`document.getElementById("dash-modal-input").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))`);
+  assert.equal(await cdp.evalJs(`document.getElementById("dash-modal").hidden && !document.querySelector(".dash-dialog")`), true);
+  await cdp.evalJs(`document.getElementById("dash-new").click()`);
+  assert.equal(await cdp.evalJs(`document.getElementById("dash-modal-input").value`), "Untitled");
+  // An empty name is refused; Enter with a name creates the project.
+  await cdp.evalJs(`document.getElementById("dash-modal-input").value = "  "; document.getElementById("dash-modal-ok").click()`);
+  assert.equal(await cdp.evalJs(`document.getElementById("dash-modal").hidden`), false, "empty name keeps the dialog open");
+  await cdp.evalJs(`(() => { const i = document.getElementById("dash-modal-input"); i.value = "Made here"; i.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); })()`);
+  await waitFor(`document.getElementById("project-name").textContent === "Made here"`, "project created");
+  // With two projects, delete is allowed and confirms without an input.
+  await cdp.evalJs(`openDashboard(true)`);
+  await waitFor(`document.querySelectorAll("#dash-content [data-dash-menu]").length === 2`, "two cards");
+  await cdp.evalJs(`document.querySelector("#dash-content [data-dash-menu]").click()`);
+  assert.equal(await cdp.evalJs(`document.querySelector('#dash-menu [data-dact="delete"]').disabled`), false);
+  await cdp.evalJs(`document.querySelector('#dash-menu [data-dact="delete"]').click()`);
+  assert.equal(await cdp.evalJs(`document.getElementById("dash-modal-input")`), null);
+  assert.match(await cdp.evalJs(`document.querySelector(".dash-dialog h3").textContent`), /^Delete /);
+});

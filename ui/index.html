@@ -1241,7 +1241,6 @@ const $ = (s, r = document) => r.querySelector(s);
 const app = $("#app"), stage = $("#stage"), world = $("#world"),
   inspector = $("#inspector"), rightHead = $("#right-head"), inspectorFoot = $("#inspector-foot"),
   commentsPanelEl = $("#comments-panel"), commentThreadEl = $("#comment-thread");
-const esc = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 const px = (v) => (v == null ? "" : String(v).replace(/^(-?[\d.]+)px$/, "$1"));
 const num = (v, fallback = 0) => { const n = parseFloat(v); return Number.isFinite(n) ? n : fallback; };
 const elOf = (id) => world.querySelector(`[data-node-id="${CSS.escape(id)}"]`);
@@ -1255,15 +1254,12 @@ const isDarkColor = (c) => {
   return lum < 0.45;
 };
 
+// The toast's contents are ui/src/components/Toast.svelte; this shows and hides it.
+let toastNow = null;
 function toast(msg, { agent = false, action = null, onAction = null, ms = 1600 } = {}) {
   const t = $("#toast");
-  t.innerHTML = `${agent ? `<span class="toast-dot"></span>` : ""}<span class="toast-msg"></span>${action ? `<button type="button" class="toast-act"></button>` : ""}`;
-  t.querySelector(".toast-msg").textContent = msg;
-  if (action) {
-    const b = t.querySelector(".toast-act");
-    b.textContent = action;
-    b.onclick = () => { t.classList.remove("show"); onAction?.(); };
-  }
+  toastNow = { msg: String(msg), agent, action, onAction };
+  window.weft?.events.dispatchEvent(new Event("toast")); // before window.weft exists, main.js replays it
   t.classList.add("show");
   clearTimeout(toast.timer);
   toast.timer = setTimeout(() => t.classList.remove("show"), action ? Math.max(ms, 5000) : ms);
@@ -1446,7 +1442,7 @@ function render() {
   $("#stage-page-name").textContent = S.nodes[S.rootId].name || "Page 1";
   renderPages();
   renderCanvasCss();
-  $("#root-vars").innerHTML = Object.keys(rootOf().vars).map((k) => `<option value="var(${esc(k)})">`).join("");
+  window.weft.events.dispatchEvent(new Event("root-vars")); // RootVars.svelte
   syncChildEls(S.nodes, S.nodes[S.rootId].children, world, world);
   for (const el of world.querySelectorAll(".is-selected")) el.classList.remove("is-selected");
   const onb = $("#empty-onboarding");
@@ -2716,37 +2712,18 @@ function renderDashboard() {
   window.weft.events.dispatchEvent(new Event("dashboard"));
 }
 
+// The dialog is ui/src/components/dashboard/DashDialog.svelte; this shows and hides it and holds its options.
+let dashModalOpts = null;
 function closeDashModal() {
   dashModal.hidden = true;
-  dashModal.innerHTML = "";
+  dashModalOpts = null;
+  window.weft.events.dispatchEvent(new Event("dash-modal"));
 }
 
 function openDashModal({ title, message = "", value = "", okText, danger = false, input = true, onOk }) {
-  dashModal.innerHTML = `<div class="dash-dialog">
-    <div class="dash-dialog-head">
-      ${danger ? `<span class="dash-dialog-ic"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 4.5h10M6 4.5V3h4v1.5M4.5 4.5l.7 8.5h5.6l.7-8.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span>` : ""}
-      <div><h3>${esc(title)}</h3>${message ? `<p>${esc(message)}</p>` : ""}</div>
-    </div>
-    ${input ? `<label class="fld"><input id="dash-modal-input" value="${esc(value)}"></label>` : ""}
-    <div class="dash-dialog-acts">
-      <button class="btn" id="dash-modal-cancel">Cancel</button>
-      <button class="btn ${danger ? "danger-solid" : "primary"}" id="dash-modal-ok">${esc(okText)}</button>
-    </div>
-  </div>`;
+  dashModalOpts = { title, message, value, okText, danger, input, onOk };
   dashModal.hidden = false;
-  const field = $("#dash-modal-input");
-  const submit = async () => {
-    const v = field ? field.value.trim() : true;
-    if (field && !v) return field.focus();
-    closeDashModal();
-    await onOk(v);
-  };
-  $("#dash-modal-ok").onclick = submit;
-  $("#dash-modal-cancel").onclick = closeDashModal;
-  if (field) {
-    field.focus(); field.select();
-    field.addEventListener("keydown", (k) => { k.stopPropagation(); if (k.key === "Enter") submit(); if (k.key === "Escape") closeDashModal(); });
-  }
+  window.weft.events.dispatchEvent(new Event("dash-modal"));
 }
 
 async function openProjectFromDash(id) {
@@ -2798,13 +2775,7 @@ dashContent.addEventListener("click", (e) => {
     closeDashMenu();
     menuBtn.setAttribute("aria-expanded", "true");
     dashMenu.dataset.pid = pid;
-    dashMenu.innerHTML = `
-      <button data-dact="open" class="dash-open-item">Open</button>
-      <button data-dact="rename">Rename…</button>
-      <button data-dact="duplicate">Duplicate</button>
-      <button data-dact="export-zip"><span class="pn">Export .zip</span><span class="meta">HTML · JSX</span></button>
-      <div class="sep"></div>
-      <button data-dact="delete" class="danger" ${projects.length < 2 ? "disabled title='The only project cannot be deleted'" : ""}>Delete…</button>`;
+    window.weft.events.dispatchEvent(new Event("dash-menu")); // DashMenu.svelte
     const r = menuBtn.getBoundingClientRect();
     dashMenu.hidden = false;
     dashMenu.style.left = `${Math.max(8, Math.min(window.innerWidth - 208, r.right - 200))}px`;
@@ -3082,6 +3053,14 @@ window.weft = {
   closeExportMenu: () => openExportMenu(false),
   exportAction: (act, zipFmt) => exportAction(act, zipFmt),
   fontFamilies: () => [...new Set([...fontLib.map((f) => f.family), ...GENERIC_FONTS])],
+  // Toast (Toast.svelte), CSS variable suggestions (RootVars.svelte)
+  toastModel: () => toastNow,
+  toastAction: () => { $("#toast").classList.remove("show"); toastNow?.onAction?.(); },
+  rootVarNames: () => (S ? Object.keys(rootOf().vars) : []),
+  // Dashboard dialog and card menu (dashboard/DashDialog.svelte, DashMenu.svelte)
+  dashModal: () => dashModalOpts,
+  closeDashModal: () => closeDashModal(),
+  dashMenuModel: () => ({ onlyProject: projects.length < 2 }),
   overlay: { labels: [], ctx: null, agents: { boxes: [], cursors: [] }, crumbs: { page: "Page 1", artboard: "" } },
 };
 function renderHistory() {

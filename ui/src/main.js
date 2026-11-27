@@ -20,6 +20,10 @@ import AgentsLayer from "./components/canvas/AgentsLayer.svelte";
 import Crumbs from "./components/canvas/Crumbs.svelte";
 import ExportMenu from "./components/ExportMenu.svelte";
 import FontList from "./components/FontList.svelte";
+import Toast from "./components/Toast.svelte";
+import RootVars from "./components/RootVars.svelte";
+import DashMenu from "./components/dashboard/DashMenu.svelte";
+import DashDialog from "./components/dashboard/DashDialog.svelte";
 
 mount(HistoryPanel, { target: document.getElementById("history-panel") });
 mount(CommentsPanel, { target: document.getElementById("comments-panel") });
@@ -40,6 +44,10 @@ mount(AgentsLayer, { target: document.getElementById("agents") });
 mount(Crumbs, { target: document.getElementById("crumbs") });
 mount(ExportMenu, { target: document.getElementById("export-menu") });
 mount(FontList, { target: document.getElementById("font-families") });
+mount(Toast, { target: document.getElementById("toast") });
+mount(RootVars, { target: document.getElementById("root-vars") });
+mount(DashMenu, { target: document.getElementById("dash-menu") });
+mount(DashDialog, { target: document.getElementById("dash-modal") });
 
 // The legacy script starts first (this module loads after it), so it may already have sent data, or the user may
 // have opened the palette, before these components listened. Replay the current state now.
@@ -54,6 +62,9 @@ replay("right-head");
 replay("inspector");
 replay("overlay");
 replay("fonts");
+replay("toast");
+replay("root-vars");
+if (!document.getElementById("dash-modal").hidden) replay("dash-modal");
 if (!document.getElementById("export-menu").hidden) replay("export-menu");
 replay("comment-pins");
 replay("comment-thread");
