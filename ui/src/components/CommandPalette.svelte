@@ -1,7 +1,7 @@
 <script>
-  // Command palette (Ctrl/Cmd+K): search, highlight matches, arrows / Tab / Enter. The entries come from the legacy
-  // script (weft.cmdkEntries()) because they depend on the editor's state; each has { group, label, dim, kbd, isKbd,
-  // icon (trusted SVG markup), pinNum, mcp, isAgentReply, search, run }. Opening is driven by the legacy openCmdk(),
+  // Command palette (Ctrl/Cmd+K): search, highlight matches, arrows / Tab / Enter. The entries come from the editor engine
+  // (weft.cmdkEntries()) because they depend on the editor's state; each has { group, label, dim, kbd, isKbd,
+  // icon (trusted SVG markup), pinNum, mcp, isAgentReply, search, run }. Opening is driven by the editor's openCmdk(),
   // which shows #cmdk and fires "cmdk-open".
   // The DOM updates synchronously (flushSync) on open and on input, as it did before the move to Svelte: code that
   // types into the palette and clicks the first result in the same step sees the filtered list.

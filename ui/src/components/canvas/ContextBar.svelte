@@ -1,5 +1,5 @@
 <script>
-  // Quick actions above the selection. The legacy script shows, hides and places the bar (#ctx-bar) and handles
+  // Quick actions above the selection. The editor engine (src/editor) shows, hides and places the bar (#ctx-bar) and handles
   // its clicks (data-ctx); this renders what is in it for the selected layer.
   import { flushSync } from "svelte";
   import { weft } from "../../lib/bridge.svelte.js";

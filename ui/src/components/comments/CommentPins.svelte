@@ -1,5 +1,5 @@
 <script>
-  // Numbered comment pins over the canvas. Positions are measured by the legacy script (it owns the canvas DOM and
+  // Numbered comment pins over the canvas. Positions are measured by the editor engine (src/editor) (it owns the canvas DOM and
   // the view transform) and handed over through weft.commentPins() whenever the canvas, view or comments change.
   import { flushSync } from "svelte";
   import { weft } from "../../lib/bridge.svelte.js";

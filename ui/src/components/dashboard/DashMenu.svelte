@@ -1,5 +1,5 @@
 <script>
-  // A project card's menu on the dashboard (#dash-menu). The legacy script opens it for a card, places it and
+  // A project card's menu on the dashboard (#dash-menu). The editor engine (src/editor) opens it for a card, places it and
   // handles its clicks (data-dact); this renders the items.
   import { flushSync } from "svelte";
   import { weft } from "../../lib/bridge.svelte.js";

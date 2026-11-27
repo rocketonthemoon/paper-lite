@@ -1,6 +1,6 @@
 <script>
   // Dashboard → Agent activity: recent edit sessions, filtered by who made them. "Revert session" is handled by the
-  // legacy listener on #dash-activity (data-act-revert).
+  // editor engine's listener on #dash-activity (data-act-revert).
   import { weft, clock } from "../../lib/bridge.svelte.js";
   import { dash } from "../../lib/dashboard.svelte.js";
 

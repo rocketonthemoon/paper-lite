@@ -1,6 +1,6 @@
 <script>
   // Where MCP agents are working: a dashed box around each layer they are editing, and a cursor with the agent's
-  // name and current tool. Clicking a cursor (data-agent-node) is handled by the legacy script.
+  // name and current tool. Clicking a cursor (data-agent-node) is handled by the editor engine (src/editor).
   import { flushSync } from "svelte";
   import { weft } from "../../lib/bridge.svelte.js";
 

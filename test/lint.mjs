@@ -20,10 +20,8 @@ for (const file of jsFiles) {
   execFileSync(process.execPath, ["--check", file], { stdio: "inherit" });
 }
 
-// The editor page source (Svelte components are checked by the build: npm run build).
+// The editor page's markup and CSS (its scripts are ui/src, linted above; Svelte components are checked by the build).
 const html = fs.readFileSync(path.join(ROOT, "ui", "index.html"), "utf8");
-const scriptMatch = html.match(/<script>([\s\S]*?)<\/script>/);
-if (!scriptMatch) throw new Error("Missing inline <script> in ui/index.html");
 
 const styleMatch = html.match(/<style>([\s\S]*?)<\/style>/);
 if (!styleMatch) throw new Error("Missing <style> block in ui/index.html");
@@ -38,33 +36,18 @@ for (const ch of styleMatch[1]) {
 if (cssDepth !== 0) throw new Error(`Unbalanced CSS braces in ui/index.html (depth=${cssDepth})`);
 
 const bodyStart = html.indexOf("<body>");
-const scriptStart = html.indexOf("<script>");
-const markup = html.slice(bodyStart, scriptStart);
+const markup = html.slice(bodyStart, html.indexOf("</body>"));
 const seenIds = new Set();
 for (const m of markup.matchAll(/\sid="([^"]+)"/g)) {
   if (seenIds.has(m[1])) throw new Error(`Duplicate DOM id="#${m[1]}" in ui/index.html`);
   seenIds.add(m[1]);
 }
 
-const tmpUi = path.join(ROOT, ".tmp-ui-lint.js");
-fs.writeFileSync(tmpUi, scriptMatch[1], "utf8");
-try {
-  execFileSync(process.execPath, ["--check", tmpUi], { stdio: "inherit" });
-  const eslintArgs = [
-    "--yes",
-    "eslint@9",
-    "--config",
-    path.join(ROOT, "eslint.config.mjs"),
-    ...jsFiles,
-    tmpUi,
-  ];
-  if (process.platform === "win32") {
-    execFileSync(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", "npx", ...eslintArgs], { cwd: ROOT, stdio: "inherit" });
-  } else {
-    execFileSync("npx", eslintArgs, { cwd: ROOT, stdio: "inherit" });
-  }
-} finally {
-  fs.rmSync(tmpUi, { force: true });
+const eslintArgs = ["--yes", "eslint@9", "--config", path.join(ROOT, "eslint.config.mjs"), ...jsFiles];
+if (process.platform === "win32") {
+  execFileSync(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", "npx", ...eslintArgs], { cwd: ROOT, stdio: "inherit" });
+} else {
+  execFileSync("npx", eslintArgs, { cwd: ROOT, stdio: "inherit" });
 }
 
-console.log(`Lint passed (${jsFiles.length} JS modules + ui/index.html CSS/DOM/${seenIds.size} IDs/inline script).`);
+console.log(`Lint passed (${jsFiles.length} JS modules + ui/index.html CSS/DOM/${seenIds.size} IDs).`);

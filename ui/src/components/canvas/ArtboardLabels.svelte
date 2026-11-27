@@ -1,5 +1,5 @@
 <script>
-  // Artboard name + size labels above each screen. Positions are measured by the legacy script, which also keeps
+  // Artboard name + size labels above each screen. Positions are measured by the editor engine (src/editor), which also keeps
   // the pointer handlers (select, rename on double-click, drag with interact.js) delegated on #labels.
   import { flushSync } from "svelte";
   import { weft } from "../../lib/bridge.svelte.js";

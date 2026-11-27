@@ -1,5 +1,5 @@
 <script>
-  // Left panel → Layers: the tree of artboards and layers on the current page. Rows come from the legacy script
+  // Left panel → Layers: the tree of artboards and layers on the current page. Rows come from the editor engine (src/editor)
   // (weft.layerRows()); selecting, expanding, renaming and moving layers call back into it, which also enforces the
   // tree's rules (canNestIn / dropLayer). The filter box above the tree is still in ui/index.html.
   import { flushSync, tick } from "svelte";
@@ -11,7 +11,7 @@
   // Leaving the whole tree clears the canvas hover box (not each 1px gap between rows).
   list.addEventListener("pointerleave", () => weft.hoverLayer(null));
 
-  // Rows update synchronously, as the legacy tree did (typing in the filter and reading the tree in the same step).
+  // Rows update synchronously, as the old string-built tree did (typing in the filter and reading the tree in the same step).
   function refresh() {
     ({ rows, filtered } = weft.layerRows());
     flushSync();

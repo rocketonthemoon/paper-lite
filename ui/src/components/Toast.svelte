@@ -1,5 +1,5 @@
 <script>
-  // The toast's contents (#toast). The legacy toast() decides what to say and shows / hides it (the .show class
+  // The toast's contents (#toast). The editor's toast() decides what to say and shows / hides it (the .show class
   // and its timer); an action button runs its callback and hides the toast.
   import { flushSync } from "svelte";
   import { weft } from "../lib/bridge.svelte.js";

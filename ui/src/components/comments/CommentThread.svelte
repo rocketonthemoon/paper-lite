@@ -1,6 +1,6 @@
 <script>
   // The comment thread popover on the canvas: a new comment's composer, or an existing thread with its replies.
-  // Which thread is open, and where the popover sits, is decided by the legacy script; this renders it and keeps
+  // Which thread is open, and where the popover sits, is decided by the editor engine (src/editor); this renders it and keeps
   // what you are typing (and the More menu) while replies arrive over SSE.
   import { flushSync } from "svelte";
   import { weft, api } from "../../lib/bridge.svelte.js";
