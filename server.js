@@ -19,6 +19,7 @@ import { FontLibrary, familiesIn, renameWithRetry } from "./fonts.js";
 import { htmlToSpecs } from "./html-import.js";
 import { Renderer } from "./renderer.js";
 import { registerTools, SERVER_INSTRUCTIONS } from "./mcp-tools.js";
+import { CheckpointRepo } from "./checkpoint-store.js";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.DATA_DIR || path.join(ROOT, "data");
@@ -50,7 +51,8 @@ let workspace = { activeProjectId: null, projects: [] }; // projects: [{ id, nam
 let state; // { version, id, name, pages: [pageRootId], rootId: activePageId, nodes, comments }
 let historyTimeline = []; // [{ id, patch: { before, after }, source, tool, target, label, nodeIds, layerCount, at }]
 let historyCursor = -1;
-let projectCheckpoints = []; // [{ id, name, auto, kind, at, historyId, layerCount, snapshot }]
+let projectCheckpoints = []; // [{ id, name, auto, kind, at, historyId, layerCount, commit }] — snapshots live in git
+let projectRemote = { connected: false }; // open project's git remote, as the browser may see it (no token)
 let projectSessions = []; // [{ id, projectId, projectName, source, agentName, title, artboard, startedAt, updatedAt, editCount, toolCounts, checkpointId, live, reverted }]
 let lastMcpWriteAt = 0;
 let lastCheckpointHistoryKey = null;
@@ -66,10 +68,25 @@ const projectFile = (id) => {
   if (!ID_RE.test(id)) throw new HttpError(400, "Invalid project id");
   return path.join(PROJECTS_DIR, `${id}.json`);
 };
-const checkpointFile = (id) => {
+// Before checkpoints moved to git they were stored here, snapshots included; read once to migrate.
+const legacyCheckpointFile = (id) => {
   if (!ID_RE.test(id)) throw new HttpError(400, "Invalid project id");
   return path.join(PROJECTS_DIR, `${id}.checkpoints.json`);
 };
+const repoDir = (id) => {
+  if (!ID_RE.test(id)) throw new HttpError(400, "Invalid project id");
+  return path.join(PROJECTS_DIR, `${id}.git`);
+};
+// Git remote settings and token for a project. Kept outside the repo so they are never pushed.
+const remoteFile = (id) => {
+  if (!ID_RE.test(id)) throw new HttpError(400, "Invalid project id");
+  return path.join(PROJECTS_DIR, `${id}.remote.json`);
+};
+const repos = new Map(); // projectId -> CheckpointRepo (one git job queue per repo)
+function repoOf(id) {
+  if (!repos.has(id)) repos.set(id, new CheckpointRepo(repoDir(id), remoteFile(id)));
+  return repos.get(id);
+}
 const sessionsFile = (id) => {
   if (!ID_RE.test(id)) throw new HttpError(400, "Invalid project id");
   return path.join(PROJECTS_DIR, `${id}.sessions.json`);
@@ -118,10 +135,6 @@ function flushWrites() {
 const saveWorkspace = () => {
   const text = JSON.stringify(workspace, null, 2);
   return queueDisk(() => writeAtomic(WORKSPACE_FILE, text));
-};
-const saveCheckpoints = (id = state.id, list = projectCheckpoints) => {
-  const text = JSON.stringify(list);
-  return queueDisk(() => writeAtomic(checkpointFile(id), text));
 };
 const saveSessions = (id = state.id, list = projectSessions) =>
   scheduleWrite(`sessions:${id}`, sessionsFile(id), () => JSON.stringify(list));
@@ -302,21 +315,43 @@ function docSnapshot(doc = state) {
 }
 
 function publicCheckpoints(list = projectCheckpoints) {
-  return list.map(({ snapshot: _snap, ...rest }) => rest);
+  return list.map(({ id, name, auto, kind, at, historyId, layerCount, commit }) => ({ id, name, auto, kind, at, historyId, layerCount, commit: commit || null }));
 }
 
 function historyPayload() {
   const entries = historyTimeline.map(({ patch: _p, ...rest }) => rest);
-  return { entries, cursor: historyCursor, limit: HISTORY_LIMIT, checkpoints: publicCheckpoints() };
+  return { entries, cursor: historyCursor, limit: HISTORY_LIMIT, checkpoints: publicCheckpoints(), remote: projectRemote };
 }
 
 function sendHistory() {
   sendEvent("history", historyPayload());
 }
 
+// Move checkpoints from the old JSON file (full snapshots) into the project's git repo, oldest first.
+// Safe to re-run after a crash: checkpoints already in the repo are skipped. The old file is kept as *.migrated.
+async function migrateLegacyCheckpoints(id) {
+  const file = legacyCheckpointFile(id);
+  if (!existsSync(file)) return;
+  const legacy = await readJsonSafe(file, []);
+  const repo = repoOf(id);
+  const have = new Set((await repo.list()).map((c) => c.id));
+  for (const c of Array.isArray(legacy) ? legacy : []) {
+    if (!c?.id || !c.snapshot || have.has(c.id)) continue;
+    const { snapshot, ...cp } = c;
+    await repo.commit({ ...cp, name: cleanName(cp.name, "Checkpoint"), kind: cp.kind || (cp.auto ? "auto" : "manual") }, snapshot);
+  }
+  await fs.rename(file, `${file}.migrated`);
+}
+
 async function loadProjectExtras(id) {
-  const cps = await readJsonSafe(checkpointFile(id), []);
-  projectCheckpoints = Array.isArray(cps) ? cps.filter((c) => c && c.id && c.snapshot) : [];
+  try {
+    await migrateLegacyCheckpoints(id);
+    projectCheckpoints = await repoOf(id).list();
+  } catch (err) {
+    console.error(`[weft] could not read checkpoints for ${id}: ${err.message}`);
+    projectCheckpoints = [];
+  }
+  projectRemote = await repoOf(id).publicRemote();
   projectSessions = await sessionsOf(id);
   sessionsCache.delete(id);
 }
@@ -359,8 +394,24 @@ function makeCheckpointEntry(name, { auto = false, kind = auto ? "auto" : "manua
     at: new Date().toISOString(),
     historyId,
     layerCount: layerCountOf(doc),
-    snapshot: docSnapshot(doc),
+    commit: null,
   };
+}
+
+// Commit a checkpoint to the project's repo in the background. The document is copied now, so later edits
+// don't leak into it; restore waits for the commit (pendingCommits) if it hasn't landed yet.
+const pendingCommits = new Map(); // checkpointId -> Promise<oid>
+function commitCheckpoint(projectId, cp, doc) {
+  const job = repoOf(projectId).commit(cp, docSnapshot(doc))
+    .then((oid) => {
+      cp.commit = oid;
+      autoPush(projectId);
+      return oid;
+    })
+    .finally(() => pendingCommits.delete(cp.id));
+  pendingCommits.set(cp.id, job);
+  job.catch((err) => console.error(`[weft] checkpoint "${cp.name}" could not be saved: ${err.message}`));
+  return job;
 }
 
 async function createProject(name, { open = true, source = "api" } = {}) {
@@ -370,9 +421,9 @@ async function createProject(name, { open = true, source = "api" } = {}) {
   const initCp = makeCheckpointEntry("Project created", { auto: true, kind: "init", doc, historyId: null });
   await queueDisk(async () => {
     await writeAtomic(projectFile(id), JSON.stringify(doc));
-    await writeAtomic(checkpointFile(id), JSON.stringify([initCp]));
     await writeAtomic(sessionsFile(id), JSON.stringify([]));
   });
+  await commitCheckpoint(id, initCp, doc);
   sessionsCache.set(id, []);
   const accentColor = PROJECT_COLORS[workspace.projects.length % PROJECT_COLORS.length];
   workspace.projects.push({ id, name: doc.name, accentColor, createdAt: now, updatedAt: now, ...projectSummary(doc) });
@@ -410,9 +461,9 @@ async function duplicateProject(id, name) {
   const initCp = makeCheckpointEntry("Project created", { auto: true, kind: "init", doc, historyId: null });
   await queueDisk(async () => {
     await writeAtomic(projectFile(copyId), JSON.stringify(doc));
-    await writeAtomic(checkpointFile(copyId), JSON.stringify([initCp]));
     await writeAtomic(sessionsFile(copyId), JSON.stringify([]));
   });
+  await commitCheckpoint(copyId, initCp, doc);
   sessionsCache.set(copyId, []);
   const accentColor = PROJECT_COLORS[workspace.projects.length % PROJECT_COLORS.length];
   workspace.projects.push({ id: copyId, name: doc.name, accentColor, createdAt: now, updatedAt: now, ...projectSummary(doc) });
@@ -435,9 +486,13 @@ async function deleteProject(id, source = "api") {
   for (const key of [`project:${id}`, `sessions:${id}`]) pendingWrites.delete(key);
   await queueDisk(async () => {
     await fs.rm(projectFile(id), { force: true });
-    await fs.rm(checkpointFile(id), { force: true });
+    await repoOf(id).queue; // let in-flight git work finish before removing the repo
+    await fs.rm(repoDir(id), { recursive: true, force: true });
+    await fs.rm(legacyCheckpointFile(id), { force: true });
+    await fs.rm(remoteFile(id), { force: true });
     await fs.rm(sessionsFile(id), { force: true });
   });
+  repos.delete(id);
   await saveWorkspace();
   sendEvent("projects", { projects: projectList() });
   sendActivity();
@@ -465,7 +520,7 @@ function createCheckpoint(name, { auto = false, kind = auto ? "auto" : "manual" 
   const cp = makeCheckpointEntry(name, { auto, kind, doc: state, historyId: currentHistoryId() });
   projectCheckpoints.push(cp);
   lastCheckpointHistoryKey = currentStateKey();
-  saveCheckpoints();
+  commitCheckpoint(state.id, cp, state).then(sendHistory, () => {});
   sendHistory();
   return cp;
 }
@@ -495,7 +550,7 @@ function ensureAgentStartCheckpoint(beforeState) {
   });
   projectCheckpoints.push(cp);
   lastCheckpointHistoryKey = curKey;
-  saveCheckpoints();
+  commitCheckpoint(state.id, cp, beforeState).catch(() => {});
   return cp.id;
 }
 
@@ -867,17 +922,82 @@ function undoLastAgentRun(source) {
   return { ok: true, undone: res.moved, cursor: res.cursor };
 }
 
-function restoreCheckpointById(id, source = "api") {
+async function restoreCheckpointById(id, source = "api") {
   const cp = projectCheckpoints.find((c) => c.id === id);
   if (!cp) throw new HttpError(404, `Checkpoint "${id}" not found`);
+  const projectId = state.id;
+  const oid = cp.commit || (await pendingCommits.get(cp.id));
+  if (!oid) throw new HttpError(409, `Checkpoint "${cp.name}" was not saved and can't be restored`);
+  const snap = await repoOf(projectId).read(oid);
+  if (state.id !== projectId) throw new HttpError(409, "The open project changed while restoring; try again");
   mutate(source, (s) => {
-    const snap = structuredClone(cp.snapshot);
     s.pages = snap.pages;
     s.rootId = snap.pages.includes(s.rootId) ? s.rootId : snap.rootId;
     s.nodes = snap.nodes;
+    if (snap.rootCss) s.rootCss = snap.rootCss;
     return cp;
   }, { tool: "Restore checkpoint", target: cp.name, label: `Restore checkpoint · ${cp.name}` });
   return { id: cp.id, name: cp.name };
+}
+
+// ---------------------------------------------------------------------------
+// Git remote: push/pull a project's checkpoint repo to GitHub, GitLab, Bitbucket, Gitea, … over HTTPS
+// ---------------------------------------------------------------------------
+async function refreshRemote(projectId) {
+  if (state?.id !== projectId) return;
+  projectRemote = await repoOf(projectId).publicRemote();
+  sendHistory();
+}
+
+const gitApi = {
+  status: async () => ({ ...(await repoOf(state.id).publicRemote()), branch: "main", checkpoints: projectCheckpoints.length }),
+  connect: async (body = {}) => {
+    const id = state.id;
+    const out = await repoOf(id).setRemote({ url: body.url, token: body.token, username: body.username, autoPush: body.autoPush });
+    await refreshRemote(id);
+    return out;
+  },
+  disconnect: async () => {
+    const id = state.id;
+    const out = await repoOf(id).clearRemote();
+    await refreshRemote(id);
+    return out;
+  },
+  push: async () => {
+    const id = state.id;
+    try {
+      return await repoOf(id).push();
+    } finally {
+      await refreshRemote(id);
+    }
+  },
+  // Pull brings in checkpoints only; the open document stays as it is until one is restored.
+  pull: async () => {
+    const id = state.id;
+    try {
+      const repo = repoOf(id);
+      const res = await repo.pull();
+      const before = new Set(projectCheckpoints.map((c) => c.id));
+      const list = await repo.list();
+      if (state.id === id) projectCheckpoints = list;
+      return { ...res, added: list.filter((c) => !before.has(c.id)).map(({ id: cid, name, at }) => ({ id: cid, name, at })) };
+    } finally {
+      await refreshRemote(id);
+    }
+  },
+};
+
+// After a checkpoint commit: push in the background when the project's remote asks for it.
+async function autoPush(projectId) {
+  const repo = repoOf(projectId);
+  const cfg = await repo.readRemote();
+  if (!cfg?.autoPush || !cfg.token) return;
+  try {
+    await repo.push();
+  } catch (err) {
+    console.error(`[weft] auto-push failed: ${err.message}`);
+  }
+  await refreshRemote(projectId).catch(() => {});
 }
 
 // ---------------------------------------------------------------------------
@@ -2003,6 +2123,7 @@ const mcpContext = {
     },
     restore: (id) => restoreCheckpointById(id, "mcp"),
   },
+  git: { status: gitApi.status, push: gitApi.push, pull: gitApi.pull },
   comments: {
     openCount: openCommentCount,
     list: mcpGetComments,
@@ -2120,6 +2241,13 @@ app.post("/api/checkpoints", wrap((req) => {
 }));
 app.post("/api/checkpoints/:id/restore", wrap((req) => restoreCheckpointById(req.params.id, who(req))));
 
+// Git remote for the open project's checkpoints (the token is write-only: never returned)
+app.get("/api/git", wrap(() => gitApi.status()));
+app.put("/api/git/remote", wrap((req) => gitApi.connect(req.body || {})));
+app.delete("/api/git/remote", wrap(() => gitApi.disconnect()));
+app.post("/api/git/push", wrap(() => gitApi.push()));
+app.post("/api/git/pull", wrap(() => gitApi.pull()));
+
 // Comments (§3)
 app.get("/api/comments", wrap((req) => listComments({
   status: req.query.status ? String(req.query.status) : undefined,
@@ -2148,7 +2276,7 @@ app.post("/api/activity/:id/revert", wrap(async (req) => {
   if (!targetSession) throw new HttpError(404, `Session "${sid}" not found`);
   if (!targetSession.checkpointId) throw new HttpError(400, "No checkpoint recorded for this session");
   if (state.id !== targetProject) await openProject(targetProject, who(req));
-  const restored = restoreCheckpointById(targetSession.checkpointId, who(req));
+  const restored = await restoreCheckpointById(targetSession.checkpointId, who(req));
   const activeSession = projectSessions.find((s) => s.id === sid);
   if (activeSession) {
     activeSession.reverted = true;
