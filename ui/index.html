@@ -1249,7 +1249,7 @@ const clock = (iso) => { const d = new Date(iso); return Number.isNaN(+d) ? "" :
 const $ = (s, r = document) => r.querySelector(s);
 const app = $("#app"), stage = $("#stage"), world = $("#world"),
   inspector = $("#inspector"), rightHead = $("#right-head"), inspectorFoot = $("#inspector-foot"),
-  commentsPanelEl = $("#comments-panel"), commentPinsEl = $("#comment-pins"), commentThreadEl = $("#comment-thread");
+  commentsPanelEl = $("#comments-panel"), commentThreadEl = $("#comment-thread");
 const esc = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 const px = (v) => (v == null ? "" : String(v).replace(/^(-?[\d.]+)px$/, "$1"));
 const num = (v, fallback = 0) => { const n = parseFloat(v); return Number.isFinite(n) ? n : fallback; };
@@ -3158,6 +3158,11 @@ window.weft = {
   openCommentThread: (id) => openCommentThread(id),
   get showResolvedPins() { return showResolvedPins; },
   set showResolvedPins(on) { showResolvedPins = Boolean(on); renderCommentPins(); },
+  // Pins and thread popover on the canvas (comments/*.svelte)
+  commentPins: () => commentPins(),
+  commentThread: () => commentThread(),
+  submitComment: (text, agentsCanSee) => submitComment(text, agentsCanSee),
+  closeCommentThread: () => closeCommentThread(),
 };
 function renderHistory() {
   window.weft.history = hist;
@@ -3340,20 +3345,21 @@ function updateCommentsBadge() {
   if (b) { b.textContent = String(openCount); b.hidden = openCount === 0; }
 }
 
-function renderCommentPins() {
-  if (!S || !commentPinsEl) return;
+// The pins and the thread popover are ui/src/components/comments/*.svelte. This script decides which thread is open
+// and where things sit on the stage (it owns the canvas DOM and view), and tells them when to re-read that.
+function commentPins() {
+  if (!S) return [];
   const pinMap = commentPinMap();
-  const visible = pageCommentsList().filter((c) => S.nodes[c.nodeId] && (showResolvedPins || c.status !== "resolved"));
-  commentPinsEl.innerHTML = visible.map((c) => {
+  return pageCommentsList().filter((c) => S.nodes[c.nodeId] && (showResolvedPins || c.status !== "resolved")).flatMap((c) => {
     const el = elOf(c.nodeId);
-    if (!el) return "";
+    if (!el) return [];
     const r = rectOnStage(el);
-    const cls = ["cmt-pin", c.status, activeThreadId === c.id ? "sel" : ""].filter(Boolean).join(" ");
-    const content = c.status === "resolved"
-      ? `<svg width="11" height="11" viewBox="0 0 12 12" fill="none"><path d="M2.5 6.2l2.3 2.3 4.7-5" stroke="#6b6b68" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`
-      : String(pinMap.get(c.id) || "");
-    return `<button type="button" class="${cls}" data-pin-id="${esc(c.id)}" style="left:${Math.round(r.x)}px;top:${Math.round(r.y)}px" title="${esc(S.nodes[c.nodeId].name)}">${content}</button>`;
-  }).join("");
+    return [{ id: c.id, status: c.status, sel: activeThreadId === c.id, x: Math.round(r.x), y: Math.round(r.y), title: S.nodes[c.nodeId].name, pin: String(pinMap.get(c.id) || "") }];
+  });
+}
+function renderCommentPins() {
+  if (!S) return;
+  window.weft.events.dispatchEvent(new Event("comment-pins"));
   if (activeThreadId || draftCommentNodeId) positionCommentThread();
 }
 
@@ -3376,8 +3382,7 @@ function closeCommentThread() {
   activeThreadId = null;
   draftCommentNodeId = null;
   commentThreadEl.hidden = true;
-  commentThreadEl.dataset.threadKey = "";
-  commentThreadEl.innerHTML = "";
+  renderCommentThread();
   renderCommentPins();
 }
 
@@ -3411,141 +3416,62 @@ async function openCommentThread(id) {
   renderCommentPins();
 }
 
-function threadHeadHtml(c, isNew) {
-  const node = S?.nodes?.[c.nodeId];
-  const layerName = node?.name || c.layerName || "Deleted layer";
-  const isResolved = c.status === "resolved";
-  const headIcon = node ? `<span class="ct-ic">${iconFor(node)}</span>` : "";
-  const resolveBtn = !isNew
-    ? `<button type="button" class="btn ct-res-btn" data-ct="${isResolved ? "reopen" : "resolve"}"><svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2.5 6.2l2.3 2.3 4.7-5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span>${isResolved ? "Reopen" : "Resolve"}</span></button>`
-    : "";
-  const moreMenu = !isNew
-    ? `<div class="ct-more-wrap"><button type="button" class="icon-btn" data-ct="more-toggle" aria-haspopup="menu" aria-expanded="false" title="More actions" aria-label="More actions"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><circle cx="3.5" cy="8" r="1.3"/><circle cx="8" cy="8" r="1.3"/><circle cx="12.5" cy="8" r="1.3"/></svg></button><div class="menu ct-more-menu" id="ct-more-menu" role="menu" hidden><button type="button" data-ct="delete" class="danger">Delete thread</button><button type="button" data-ct="close">Close</button></div></div>`
-    : `<button type="button" class="icon-btn" data-ct="close" aria-label="Close" title="Close">×</button>`;
-  return `${headIcon}<strong>${esc(layerName)}</strong>${resolveBtn}${moreMenu}`;
-}
-
-function threadMsgsHtml(c) {
-  return (c.messages || []).map((m) => {
-    const isAi = m.author !== "you";
-    const stepSuffix = m.linkedStep?.step ? ` · step ${m.linkedStep.step}` : "";
-    return `<div class="ct-msg">
-      <span class="ct-av${isAi ? " ai" : ""}">${isAi ? esc((m.author || "C")[0].toUpperCase()) : "Y"}</span>
-      <div class="ct-body">
-        <div class="ct-meta"><strong>${isAi ? esc(m.author) : "You"}</strong>${isAi ? '<span class="mcp-badge">MCP</span>' : ""}<span>${esc(clock(m.at))}</span></div>
-        <div class="ct-text">${esc(m.text)}</div>
-        ${m.linkedStep ? `<div class="ct-link"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 6.5H10a3.5 3.5 0 010 7H7M6.5 4l-2.5 2.5L6.5 9"/></svg><code>${esc(m.linkedStep.label)}${esc(stepSuffix)}</code><button type="button" class="link-toggle" data-ct="jump-step" data-hid="${esc(m.linkedStep.historyId)}">View</button><button type="button" class="link-toggle" style="color:var(--text-2)" data-ct="undo-step">Undo</button></div>` : ""}
-      </div>
-    </div>`;
-  }).join("");
-}
-
-function renderCommentThread() {
-  if (!activeThreadId && !draftCommentNodeId) { commentThreadEl.hidden = true; return; }
+function commentThread() {
+  if (!activeThreadId && !draftCommentNodeId) return null;
   const isNew = Boolean(draftCommentNodeId);
   const c = isNew ? { nodeId: draftCommentNodeId, status: "open", agentsCanSee: true, messages: [] } : comments.find((x) => x.id === activeThreadId);
-  if (!c) return closeCommentThread();
-  const threadKey = isNew ? `new:${draftCommentNodeId}` : `t:${activeThreadId}`;
-  const taExisting = $("#ct-input");
-  const headEl = commentThreadEl.querySelector(".ct-head");
-  const msgsEl = commentThreadEl.querySelector(".ct-msgs");
-  if (!commentThreadEl.hidden && commentThreadEl.dataset.threadKey === threadKey && taExisting && headEl && msgsEl) {
-    const moreOpen = !$("#ct-more-menu")?.hidden;
-    headEl.innerHTML = threadHeadHtml(c, isNew);
-    if (moreOpen) {
-      const m = $("#ct-more-menu");
-      const btn = headEl.querySelector('[data-ct="more-toggle"]');
-      if (m) m.hidden = false;
-      if (btn) btn.setAttribute("aria-expanded", "true");
-    }
-    msgsEl.innerHTML = threadMsgsHtml(c);
-    return;
-  }
-  commentThreadEl.dataset.threadKey = threadKey;
-  commentThreadEl.innerHTML = `
-    <div class="ct-head">${threadHeadHtml(c, isNew)}</div>
-    <div class="ct-msgs">${threadMsgsHtml(c)}</div>
-    <div class="ct-comp">
-      <textarea id="ct-input" placeholder="${isNew ? "Leave a note for your agent…" : "Reply, or resolve if this looks right…"}"></textarea>
-      <div class="ct-comp-acts">
-        <button type="button" class="ct-vis${c.agentsCanSee !== false ? " on" : ""}" id="ct-vis"><i></i>Agents can see this</button>
-        <span class="kbd" style="margin-left:auto">Ctrl Enter</span>
-        <button type="button" class="btn primary" style="height:28px;padding:0 12px" data-ct="send">${isNew ? "Comment" : "Reply"}</button>
-      </div>
-    </div>`;
+  if (!c) return null;
+  const node = S?.nodes?.[c.nodeId];
+  return {
+    key: isNew ? `new:${draftCommentNodeId}` : `t:${activeThreadId}`,
+    id: c.id,
+    isNew,
+    resolved: c.status === "resolved",
+    agentsCanSee: c.agentsCanSee !== false,
+    layerName: node?.name || c.layerName || "Deleted layer",
+    icon: node ? iconFor(node) : "",
+    messages: (c.messages || []).map((m) => {
+      const isAi = m.author !== "you";
+      return {
+        isAi,
+        initial: isAi ? (m.author || "C")[0].toUpperCase() : "Y",
+        author: isAi ? m.author : "You",
+        clock: clock(m.at),
+        text: m.text,
+        link: m.linkedStep ? { label: `${m.linkedStep.label}${m.linkedStep.step ? ` · step ${m.linkedStep.step}` : ""}`, historyId: m.linkedStep.historyId } : null,
+      };
+    }),
+  };
+}
+function renderCommentThread() {
+  if ((activeThreadId || draftCommentNodeId) && !commentThread()) return closeCommentThread();
+  window.weft.events.dispatchEvent(new Event("comment-thread"));
 }
 
-async function submitCommentComposer() {
-  const ta = $("#ct-input");
-  const text = (ta?.value || "").trim();
-  if (!text) return;
-  const agentsCanSee = $("#ct-vis")?.classList.contains("on") !== false;
+// Called by the composer with what was typed; true when it was saved (so the composer clears).
+async function submitComment(text, agentsCanSee) {
   if (draftCommentNodeId) {
-    const nid = draftCommentNodeId;
-    const created = await api("POST", "/api/comments", { nodeId: nid, text, agentsCanSee });
-    if (created) {
-      if (!comments.some((x) => x.id === created.id)) comments = [...comments, created];
-      draftCommentNodeId = null;
-      activeThreadId = created.id;
-      updateCommentsBadge();
-      renderLayers();
-      renderCommentPins();
-      renderCommentsPanel();
-      renderCommentThread();
-    }
+    const created = await api("POST", "/api/comments", { nodeId: draftCommentNodeId, text, agentsCanSee });
+    if (!created) return false;
+    if (!comments.some((x) => x.id === created.id)) comments = [...comments, created];
+    draftCommentNodeId = null;
+    activeThreadId = created.id;
   } else if (activeThreadId) {
     const res = await api("POST", `/api/comments/${encodeURIComponent(activeThreadId)}/reply`, { text, agentsCanSee });
-    if (res) {
-      comments = comments.map((x) => (x.id === res.id ? res : x));
-      if (ta) ta.value = "";
-      updateCommentsBadge();
-      renderLayers();
-      renderCommentPins();
-      renderCommentsPanel();
-      renderCommentThread();
-    }
-  }
+    if (!res) return false;
+    comments = comments.map((x) => (x.id === res.id ? res : x));
+  } else return false;
+  updateCommentsBadge();
+  renderLayers();
+  renderCommentPins();
+  renderCommentsPanel();
+  renderCommentThread();
+  return true;
 }
 
-commentPinsEl.addEventListener("pointerdown", (e) => e.stopPropagation());
-commentPinsEl.addEventListener("click", (e) => {
-  const pin = e.target.closest("[data-pin-id]");
-  if (pin) openCommentThread(pin.dataset.pinId);
-});
 commentThreadEl.addEventListener("pointerdown", (e) => e.stopPropagation());
-commentThreadEl.addEventListener("click", async (e) => {
-  const moreMenu = $("#ct-more-menu");
-  if (moreMenu && !moreMenu.hidden && !e.target.closest(".ct-more-wrap")) {
-    moreMenu.hidden = true;
-    commentThreadEl.querySelector('[data-ct="more-toggle"]')?.setAttribute("aria-expanded", "false");
-  }
-  if (e.target.closest("#ct-vis")) { $("#ct-vis").classList.toggle("on"); return; }
-  const b = e.target.closest("[data-ct]");
-  if (!b) return;
-  const act = b.dataset.ct;
-  if (act === "more-toggle" && moreMenu) {
-    const nextOpen = moreMenu.hidden;
-    moreMenu.hidden = !nextOpen;
-    b.setAttribute("aria-expanded", String(nextOpen));
-    return;
-  }
-  if (act === "close") return closeCommentThread();
-  if (act === "send") return submitCommentComposer();
-  if (act === "resolve" && activeThreadId) { await api("PATCH", `/api/comments/${encodeURIComponent(activeThreadId)}`, { status: "resolved" }); return closeCommentThread(); }
-  if (act === "reopen" && activeThreadId) { await api("PATCH", `/api/comments/${encodeURIComponent(activeThreadId)}`, { status: "open" }); return renderCommentThread(); }
-  if (act === "delete" && activeThreadId) { await api("DELETE", `/api/comments/${encodeURIComponent(activeThreadId)}`); return closeCommentThread(); }
-  if (act === "jump-step" && b.dataset.hid) { await api("POST", "/api/history/jump", { id: b.dataset.hid }); return; }
-  if (act === "undo-step") { await api("POST", "/api/undo"); return; }
-});
-commentThreadEl.addEventListener("keydown", (e) => {
-  if (e.target.id !== "ct-input") return;
-  e.stopPropagation();
-  if (e.key === "Escape") { e.preventDefault(); closeCommentThread(); }
-  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submitCommentComposer(); }
-});
-
 // The Comments tab is ui/src/components/CommentsPanel.svelte; it asks for these rows (via window.weft) whenever
-// renderCommentsPanel() says they changed. Pins and the thread popover on the canvas stay in this script.
+// renderCommentsPanel() says they changed.
 function commentRows() {
   if (!S) return [];
   const pinMap = commentPinMap();

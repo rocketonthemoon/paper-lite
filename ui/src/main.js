@@ -12,6 +12,8 @@ import DashRecent from "./components/dashboard/DashRecent.svelte";
 import DashActivity from "./components/dashboard/DashActivity.svelte";
 import RightHead from "./components/RightHead.svelte";
 import Inspector from "./components/inspector/Inspector.svelte";
+import CommentPins from "./components/comments/CommentPins.svelte";
+import CommentThread from "./components/comments/CommentThread.svelte";
 
 mount(HistoryPanel, { target: document.getElementById("history-panel") });
 mount(CommentsPanel, { target: document.getElementById("comments-panel") });
@@ -24,6 +26,8 @@ mount(DashRecent, { target: document.getElementById("dash-recent-list") });
 mount(DashActivity, { target: document.getElementById("dash-activity") });
 mount(RightHead, { target: document.getElementById("right-head") });
 mount(Inspector, { target: document.getElementById("inspector") });
+mount(CommentPins, { target: document.getElementById("comment-pins") });
+mount(CommentThread, { target: document.getElementById("comment-thread") });
 
 // The legacy script starts first (this module loads after it), so it may already have sent data, or the user may
 // have opened the palette, before these components listened. Replay the current state now.
@@ -36,4 +40,6 @@ if (!document.getElementById("project-menu").hidden) replay("project-menu");
 if (!document.getElementById("dashboard").hidden) replay("dashboard");
 replay("right-head");
 replay("inspector");
+replay("comment-pins");
+replay("comment-thread");
 if (!document.getElementById("cmdk").hidden) replay("cmdk-open");

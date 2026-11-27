@@ -746,8 +746,36 @@ test("browser: Comments panel (Svelte): open/resolved tabs, rows open threads, l
   await cdp.evalJs(`document.querySelector('#comments-panel .cmt-row[data-open-cmt="${ca.id}"]').click()`);
   await waitFor(`!document.getElementById("comment-thread").hidden && document.querySelector("#comment-thread .ct-text")?.textContent === "Fix alpha"`, "thread opened");
   // A new comment from elsewhere shows up live.
-  await rest("POST", "/api/comments", { nodeId: b.id, text: "Another" });
+  const cc = await rest("POST", "/api/comments", { nodeId: b.id, text: "Another" });
   await waitFor(`document.querySelector('#comments-panel [data-cf="open"]').textContent === "Open · 2"`, "live update");
+
+  // Thread popover (comments/CommentThread.svelte): the More menu opens and closes on a click elsewhere in it.
+  const q = (s) => `document.querySelector('#comment-thread ${s}')`;
+  await cdp.evalJs(`${q('[data-ct="more-toggle"]')}.click()`);
+  assert.equal(await cdp.evalJs(`${q("#ct-more-menu")}.hidden`), false);
+  assert.equal(await cdp.evalJs(`${q('[data-ct="more-toggle"]')}.getAttribute("aria-expanded")`), "true");
+  await cdp.evalJs(`${q(".ct-msgs")}.click()`);
+  assert.equal(await cdp.evalJs(`${q("#ct-more-menu")}.hidden`), true, "click elsewhere closes the menu");
+  // A draft and the visibility toggle survive live updates to the same thread, and reset for another thread.
+  const typeDraft = (v) => cdp.evalJs(`(() => { const ta = document.getElementById("ct-input"); ta.value = ${JSON.stringify(v)}; ta.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+  await typeDraft("half-written");
+  await cdp.evalJs(`document.getElementById("ct-vis").click()`);
+  await mcpCall(srv.baseUrl, "reply_to_comment", { id: ca.id, text: "On it" });
+  await waitFor(`document.querySelectorAll("#comment-thread .ct-msg").length === 2`, "reply arrives");
+  assert.equal(await cdp.evalJs(`document.getElementById("ct-input").value`), "half-written");
+  assert.equal(await cdp.evalJs(`document.getElementById("ct-vis").classList.contains("on")`), false);
+  await cdp.evalJs(`document.querySelector('#comment-pins [data-pin-id="${cc.id}"]').click()`);
+  await waitFor(`document.querySelector("#comment-thread .ct-text")?.textContent === "Another"`, "other thread");
+  assert.equal(await cdp.evalJs(`document.getElementById("ct-input").value`), "", "fresh composer for another thread");
+  assert.equal(await cdp.evalJs(`document.getElementById("ct-vis").classList.contains("on")`), true);
+  assert.ok(await cdp.evalJs(`document.querySelector('#comment-pins [data-pin-id="${cc.id}"]').classList.contains("sel")`), "its pin is highlighted");
+  // Ctrl+Enter replies and clears; Escape closes.
+  await typeDraft("Thanks");
+  await cdp.evalJs(`document.getElementById("ct-input").dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true }))`);
+  await waitFor(`document.querySelectorAll("#comment-thread .ct-msg").length === 2 && document.getElementById("ct-input").value === ""`, "reply sent");
+  assert.equal((await rest("GET", "/api/comments")).find((c) => c.id === cc.id).messages[1].text, "Thanks");
+  await cdp.evalJs(`document.getElementById("ct-input").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))`);
+  await waitFor(`document.getElementById("comment-thread").hidden && !document.querySelector("#comment-thread .ct-head")`, "closed");
 });
 
 test("browser: Layers panel (Svelte): rename cancel / live updates / artboard label, hover box, refused drops", { timeout: 120_000 }, async (t) => {
