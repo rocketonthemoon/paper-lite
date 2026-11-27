@@ -1,6 +1,6 @@
 // Entry for the editor page. editor/ is the canvas engine and editor state; it runs first and exposes window.weft
 // (see lib/bridge.svelte.js), which the panels and menus mounted below read.
-import "./editor/editor.js"; // first: it sets up window.weft, which the components read
+import "./editor/index.js"; // first: it sets up window.weft, which the components read
 import { mount } from "svelte";
 import HistoryPanel from "./components/HistoryPanel.svelte";
 import CommentsPanel from "./components/CommentsPanel.svelte";
