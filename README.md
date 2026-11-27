@@ -9,7 +9,7 @@ A self-hosted HTML/CSS design canvas with a built-in MCP server. AI agents build
 - **Live collaboration.** Agent edits, live cursors, selections, comments, checkpoints, and labelled undo history sync to the browser over SSE.
 - **Screenshots.** Headless Chrome renders artboards for `get_screenshot` and `get_computed_styles`.
 - **Export.** Export to React JSX, standalone HTML, or a ZIP bundle (comments are excluded from all exports).
-- **Plain JSON storage.** Projects, checkpoints, and activity sessions are saved as JSON files in `DATA_DIR`.
+- **Plain files on disk.** Projects and activity sessions are JSON files in `DATA_DIR`; each project's checkpoints are commits in its own git repo (`projects/<id>.git`), one file per layer, so unchanged layers are stored once.
 - **No build step.** The UI is a single vanilla HTML file.
 
 ## Quickstart
@@ -85,6 +85,7 @@ If your client only supports stdio, start the server first, then use the relay:
 | [`model.js`](model.js) | Project/node/comment normalization, CSS and attribute validation |
 | [`html-import.js`](html-import.js) | `parse5`-based HTML → node converter used by `write_html` |
 | [`renderer.js`](renderer.js) | Chrome DevTools Protocol client for screenshots and computed styles |
+| [`checkpoint-store.js`](checkpoint-store.js) | Checkpoints as commits in a per-project bare git repo ([isomorphic-git](https://isomorphic-git.org)) |
 | [`fonts.js`](fonts.js) | Uploaded fonts (WOFF2/WOFF/TTF/OTF), Google Fonts, and `/fonts.css` |
 | [`public/index.html`](public/index.html) | Browser canvas UI |
 
@@ -113,11 +114,12 @@ Requests are restricted by `Host`/`Origin` checks (see `ALLOWED_HOSTS`).
 | --- | --- | --- |
 | `HOST` | `127.0.0.1` (`0.0.0.0` in Docker) | Bind address |
 | `PORT` | `3000` | HTTP port |
-| `DATA_DIR` | `./data` (`/app/data` in Docker) | Stores `workspace.json`, `projects/*.json`, `fonts/` |
+| `DATA_DIR` | `./data` (`/app/data` in Docker) | Stores `workspace.json`, `projects/*.json`, `projects/*.git`, `fonts/` |
 | `PUBLIC_URL` | `http://localhost:<PORT>` | URL reported by `get_basic_info` |
 | `ALLOWED_HOSTS` | `localhost,127.0.0.1,[::1]` | Extra allowed `Host`/`Origin` hostnames, comma-separated (e.g. `host.docker.internal`) |
 | `CHROME_PATH` | auto-detected | Chrome/Chromium/`chrome-headless-shell` binary |
 | `CHROME_FLAGS` | empty (`--no-sandbox --disable-dev-shm-usage --disable-gpu` in Docker) | Extra Chrome flags, space-separated |
+| `PERSIST_THROTTLE_MS` | `300` | Edits apply in memory at once; disk writes are coalesced to at most one per this interval (`0` writes immediately). Pending writes are flushed on shutdown |
 | `WEFT_URL` (or `PAPER_LITE_URL`) | `http://localhost:3000/mcp` | Server URL used by `mcp-stdio.js` |
 
 ## Development

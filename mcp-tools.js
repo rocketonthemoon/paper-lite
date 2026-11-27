@@ -463,10 +463,10 @@ export function registerTools(server, ctx) {
   }, async () => text(ctx.checkpoints.list()));
 
   server.registerTool("restore_checkpoint", {
-    description: "Restore the open project's pages and layers to a saved checkpoint as one undoable step.",
+    description: "Restore the open project's pages, layers and root CSS to a saved checkpoint as one undoable step.",
     inputSchema: { id: z.string() },
     annotations: WRITE,
-  }, async ({ id }) => text(ctx.checkpoints.restore(id)));
+  }, async ({ id }) => text(await ctx.checkpoints.restore(id)));
 
   // ---------------------------------------------------------------- projects
   server.registerTool("list_projects", {
