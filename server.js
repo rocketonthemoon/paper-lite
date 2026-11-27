@@ -1932,24 +1932,118 @@ function componentName(name) {
   return /^[A-Z]/.test(base) ? base : `Layer${base}`;
 }
 
-function toJsx(nodeId, { filesBase, doc = state, sheet, cssHref = "../styles.css" } = {}) {
-  const roots = exportRoots(nodeId, doc);
+// JSX for a set of screens. Repeated identical subtrees (a sidebar on every screen, the same icon twice) become one
+// component, and without a shared sheet repeated inline styles become one entry in a `styles` object.
+// `roots` are the exported top-level nodes (artboards or a single layer); they themselves are never folded.
+function jsxBuilder(doc, roots, { sheet } = {}) {
+  const keyOf = subtreeKeys(doc);
+  // Count every subtree under the roots, then walk again so a subtree inside a repeated one is only counted once
+  // per distinct parent (icons inside three identical sidebars aren't "used three times").
+  const raw = new Map();
+  const countAll = (id) => { raw.set(keyOf(id), (raw.get(keyOf(id)) || 0) + 1); doc.nodes[id].children.forEach(countAll); };
+  roots.forEach((r) => doc.nodes[r].children.forEach(countAll));
+  const uses = new Map(), firstId = new Map();
+  const visit = (id) => {
+    const k = keyOf(id), n = doc.nodes[id];
+    if (raw.get(k) > 1 && n.children.length) {
+      uses.set(k, (uses.get(k) || 0) + 1);
+      if (uses.get(k) > 1) return;
+      firstId.set(k, id);
+    }
+    n.children.forEach(visit);
+  };
+  roots.forEach((r) => doc.nodes[r].children.forEach(visit));
+  const names = new Set(roots.map((r) => componentName(doc.nodes[r].name)));
+  const comps = new Map(); // key -> { name, id, body, deps }
+  // Named after the first layer, without a trailing number ("Nav item 3" → NavItem); unnamed SVGs are Icon.
+  const compBase = (n) => {
+    if (n.tag === "svg" && (!n.name || n.name.toLowerCase() === "svg")) return "Icon";
+    const trimmed = String(n.name).replace(/[\s\d_-]+$/, "");
+    return componentName(trimmed || n.name);
+  };
+  for (const [k, count] of uses) {
+    if (count < 2) continue;
+    const base = compBase(doc.nodes[firstId.get(k)]);
+    let name = base, i = 2;
+    while (names.has(name)) name = `${base}${i++}`;
+    names.add(name);
+    comps.set(k, { name, id: firstId.get(k), body: null, deps: new Set() });
+  }
+
+  const styleEntries = []; // { json, inline, count, name, hint }
+  const styleIdx = new Map();
+  const styleToken = (n) => {
+    const styles = exportStyles(n, doc);
+    if (sheet || !Object.keys(styles).length) return "";
+    const inline = Object.entries(styles).map(([k, v]) => `${k}: ${JSON.stringify(v)}`).join(", ");
+    if (!styleIdx.has(inline)) { styleIdx.set(inline, styleEntries.length); styleEntries.push({ inline, count: 0, hint: n.name }); }
+    const i = styleIdx.get(inline);
+    styleEntries[i].count += 1;
+    return ` style={\u0000${i}\u0000}`;
+  };
+
   const jsxText = (t) => `{${JSON.stringify(t)}}`;
   const jsxName = (k) => (k.startsWith("aria-") ? k : k.replace(/-([a-z])/g, (_, c) => c.toUpperCase()));
-  const markup = (id, depth) => {
+  const render = (id, depth, deps, self = null) => {
     const n = doc.nodes[id];
     const pad = "  ".repeat(depth);
-    const styles = exportStyles(n, doc);
+    const comp = id !== self && !roots.includes(id) ? comps.get(keyOf(id)) : null;
+    if (comp) {
+      deps.add(comp);
+      if (!comp.body) {
+        comp.body = "…"; // being rendered
+        comp.body = render(comp.id, 2, comp.deps, comp.id);
+      }
+      return `${pad}<${comp.name} />`;
+    }
     const cls = [...layerClasses(n, doc), sheet && sheet.classFor(n)].filter(Boolean).join(" ");
     const classProp = cls ? ` className="${cls}"` : "";
-    const styleProp = !sheet && Object.keys(styles).length ? ` style={{ ${Object.entries(styles).map(([k, v]) => `${k}: ${JSON.stringify(v)}`).join(", ")} }}` : "";
     const attrs = Object.entries(n.attrs || {}).map(([k, v]) => ` ${jsxName(k)}=${JSON.stringify(v)}`).join("");
-    const open = `${pad}<${n.tag}${classProp}${attrs}${styleProp}`;
+    const open = `${pad}<${n.tag}${classProp}${attrs}${styleToken(n)}`;
     if (VOID_TAGS.has(n.tag)) return `${open} />`;
     if (!n.children.length) return n.text ? `${open}>${jsxText(n.text)}</${n.tag}>` : `${open} />`;
     const text = n.text ? [`${pad}  ${jsxText(n.text)}`] : [];
-    return [`${open}>`, ...text, ...n.children.map((c) => markup(c, depth + 1)), `${pad}</${n.tag}>`].join("\n");
+    return [`${open}>`, ...text, ...n.children.map((c) => render(c, depth + 1, deps)), `${pad}</${n.tag}>`].join("\n");
   };
+
+  const fn = (name, body, exported = true) => `${exported ? "export " : ""}function ${name}() {\n  return (\n${body}\n  );\n}`;
+  return {
+    // Render one root as an exported component; returns { code, deps } (code still holds style tokens).
+    screen(id) {
+      const deps = new Set();
+      const body = render(id, 2, deps, id);
+      return { code: fn(componentName(doc.nodes[id].name), body), deps };
+    },
+    components: () => [...comps.values()].filter((c) => c.body),
+    component: (c, exported) => fn(c.name, c.body, exported),
+    // Replace style tokens: styles used more than once point at one `styles` entry, others stay inline.
+    finishStyles(chunks) {
+      const used = new Set(["styles"]);
+      for (const e of styleEntries) {
+        if (e.count < 2) continue;
+        // Named after the first layer that used it, without a trailing number; "1000" (a text layer) → style.
+        const words = String(e.hint || "").replace(/[^A-Za-z0-9]+/g, " ").replace(/[\s\d]+$/, "").trim().split(/\s+/).filter(Boolean);
+        const camel = words.map((w, j) => (j ? w[0].toUpperCase() + w.slice(1) : w[0].toLowerCase() + w.slice(1))).join("");
+        const base = /^[A-Za-z_]/.test(camel) ? camel : "style";
+        let name = base, i = 2;
+        while (used.has(name)) name = `${base}${i++}`;
+        used.add(name);
+        e.name = name;
+      }
+      const shared = styleEntries.filter((e) => e.name);
+      const decl = shared.length ? `const styles = {\n${shared.map((e) => `  ${e.name}: { ${e.inline} },`).join("\n")}\n};\n\n` : "";
+      const fill = (code) => code.replace(/\u0000(\d+)\u0000/g, (_, i) => (styleEntries[i].name ? `styles.${styleEntries[i].name}` : `{ ${styleEntries[i].inline} }`));
+      return { decl, chunks: chunks.map(fill) };
+    },
+  };
+}
+
+function toJsx(nodeId, { filesBase, doc = state, sheet, cssHref = "../styles.css" } = {}) {
+  const roots = exportRoots(nodeId, doc);
+  const b = jsxBuilder(doc, roots, { sheet });
+  const screens = roots.map((id) => b.screen(id).code);
+  const comps = b.components().map((c) => b.component(c, false));
+  const { decl, chunks } = b.finishStyles([...comps, ...screens]);
   let header = "";
   if (sheet) header = `import "${cssHref}";\n\n`;
   else {
@@ -1959,7 +2053,7 @@ function toJsx(nodeId, { filesBase, doc = state, sheet, cssHref = "../styles.css
     if (root) header += `/* Root CSS used by these components; put it in your global stylesheet:\n${root}\n*/\n\n`;
     if (fam.length) header += `/* Fonts used: ${fam.join(", ")}. Load them with:\n${fonts.css({ families: fam, baseUrl: PUBLIC_URL, filesBase })}\n*/\n\n`;
   }
-  return header + roots.map((id) => `export function ${componentName(doc.nodes[id].name)}() {\n  return (\n${markup(id, 2)}\n  );\n}`).join("\n\n") + "\n";
+  return header + decl + chunks.join("\n\n") + "\n";
 }
 
 function exportCode(format = "html", nodeId) {
@@ -2063,11 +2157,13 @@ async function exportProjectZip(projectId, format = "html") {
   const wantHtml = format === "html" || format === "both";
   const wantJsx = format === "jsx" || format === "both";
   const entries = [];
-  const usedPageDirs = new Set(["fonts"]);
+  const usedPageDirs = new Set(["fonts", "components"]);
   // Every screen links one root stylesheet instead of carrying its own copy of the CSS.
   const sheet = sharedSheet(doc);
   const allFamilies = new Set();
   const manifest = [];
+  // JSX: one builder across every screen, so a sidebar shared by several screens is one components/ file.
+  const jsx = wantJsx ? jsxBuilder(doc, doc.pages.flatMap((pid) => doc.nodes[pid]?.children || []), { sheet }) : null;
 
   for (let pi = 0; pi < doc.pages.length; pi++) {
     const pid = doc.pages[pi];
@@ -2090,11 +2186,21 @@ async function exportProjectZip(projectId, format = "html") {
         entries.push({ name: `${pageDir}/${slug}.html`, data: html });
       }
       if (wantJsx) {
-        entries.push({ name: `${pageDir}/${slug}.jsx`, data: toJsx(abId, { doc, sheet }) });
+        const { code, deps } = jsx.screen(abId);
+        const imports = [...deps].map((c) => `import { ${c.name} } from "../components/${c.name}.jsx";\n`).join("");
+        entries.push({ name: `${pageDir}/${slug}.jsx`, data: `import "../styles.css";\n${imports}\n${code}\n` });
       }
       items.push({ name: ab.name, fileBase: `${pageDir}/${slug}`, width: ab.styles.width || "auto", height: ab.styles.height || "auto" });
     }
     manifest.push({ name: page.name, dir: pageDir, items });
+  }
+
+  if (jsx && jsx.components().length) {
+    entries.push({ name: "components/" });
+    for (const c of jsx.components()) {
+      const imports = [...c.deps].map((d) => `import { ${d.name} } from "./${d.name}.jsx";\n`).join("");
+      entries.push({ name: `components/${c.name}.jsx`, data: `${imports}${imports ? "\n" : ""}${jsx.component(c, true)}\n` });
+    }
   }
 
   const fontCss = allFamilies.size ? fonts.css({ families: [...allFamilies], filesBase: "fonts" }) : "";
