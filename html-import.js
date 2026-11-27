@@ -82,6 +82,8 @@ export function htmlToSpecs(html) {
       if (name === "style") Object.assign(spec.styles, parseInlineStyle(value));
       else if (name === "data-name" || name === "data-label" || name === "aria-label" && !spec.name) spec.name = value;
       else if (name === "class") spec.classes = value.split(/\s+/).filter(Boolean); // shared classes from the root CSS
+      else if (name === "data-component") { if (value.trim()) spec.component = value.trim(); }
+      else if (name === "data-slot") { if (value.trim()) spec.slot = value.trim(); }
       else if (name === "id" || name.startsWith("data-") || name.startsWith("on")) continue;
       else spec.attrs[name] = value;
     }

@@ -4,8 +4,8 @@
 // Shared by the server (validation, exports) and the editor (canvas rendering, the Root CSS text editor):
 // loaded as a classic script in the browser (window.WeftRootCss) and imported for its side effect in Node.
 (function (global) {
-  const VAR_NAME_RE = /^--[a-zA-Z][\w-]{0,63}$/;
-  const CLASS_NAME_RE = /^[a-zA-Z][\w-]{0,63}$/;
+  const VAR_NAME_RE = /^--[a-zA-Z][\w-]{0,127}$/;
+  const CLASS_NAME_RE = /^[a-zA-Z][\w-]{0,127}$/;
   const TAGS = new Set([
     "div", "section", "header", "footer", "nav", "main", "article", "aside",
     "h1", "h2", "h3", "h4", "h5", "h6", "p", "span", "strong", "em", "small", "label",
@@ -124,7 +124,12 @@
   const checkSelector = (sel) => splitTop(sel, ",").map((p) => checkComplex(p)).join(", ");
 
   function checkMedia(raw) {
-    const q = String(raw ?? "").trim().replace(/\s+/g, " ");
+    const q = String(raw ?? "")
+      .trim()
+      .replace(/\s+/g, " ")
+      .replace(/\(\s+/g, "(")
+      .replace(/\s+\)/g, ")")
+      .replace(/\s*:\s*/g, ": ");
     if (!q) fail("@media needs a query, e.g. @media (max-width: 640px)");
     if (!/^[\w\s:().,<>=/-]+$/.test(q) || q.includes("</")) fail(`Unsupported characters in @media ${q.slice(0, 40)}`);
     let depth = 0;

@@ -21,6 +21,8 @@ const UNITLESS = new Set(["opacity", "zIndex", "flexGrow", "flexShrink", "fontWe
 const SAFE_URL = /^(https?:\/\/|data:image\/(png|jpe?g|gif|webp|svg\+xml);|\/|#|\.\/)/i;
 export const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 export const ICON_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
+export const COMPONENT_NAME_RE = /^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/;
+export const SLOT_NAME_RE = /^[a-zA-Z0-9_-]{1,64}$/;
 const COMMENT_STATUSES = new Set(["open", "read", "replied", "resolved"]);
 
 export class HttpError extends Error {
@@ -96,6 +98,15 @@ const MAX_VARS = 400, MAX_RULES = 800, MAX_LAYER_CLASSES = 12;
 
 export const emptyRootCss = () => ({ vars: {}, rules: [] });
 
+// Validate raw property keys directly (trimming outer whitespace and accidental matching quotes, never JSON-stringifying).
+function cleanCssMapKey(raw) {
+  let k = String(raw ?? "").trim();
+  if (k.length >= 2 && ((k.startsWith("\"") && k.endsWith("\"")) || (k.startsWith("'") && k.endsWith("'")))) {
+    k = k.slice(1, -1).trim();
+  }
+  return k;
+}
+
 function cleanVarValue(name, value) {
   if (!VAR_NAME_RE.test(name)) throw new HttpError(400, `CSS variable names look like --color-primary: "${name}"`);
   return cleanStyleValue(name, typeof value === "number" ? String(value) : value);
@@ -131,40 +142,83 @@ function cleanRule(rule) {
 
 const sameRule = (a, b) => a.selector === b.selector && (a.media || "") === (b.media || "");
 
+function coalesceMatchingRule(rules, rule) {
+  let first = null;
+  const kept = [];
+  for (const r of rules) {
+    if (sameRule(r, rule)) {
+      if (!first) {
+        first = r;
+        kept.push(r);
+      } else {
+        first.styles = mergeRuleStyles(first.styles, r.styles, r.selector);
+      }
+    } else {
+      kept.push(r);
+    }
+  }
+  if (first) {
+    first.styles = mergeRuleStyles(first.styles, rule.styles, rule.selector);
+    return kept;
+  }
+  kept.push(rule);
+  return kept;
+}
+
 /**
  * Apply a root-CSS patch.
- * - css: root CSS text. With replace it becomes the whole root CSS, in order; otherwise each rule merges into the
- *   existing rule with the same selector and @media (or is appended) and :root variables merge.
+ * - css: root CSS text. With replace it becomes the whole root CSS, in order (coalescing duplicate @media rules);
+ *   otherwise each rule merges into the existing rule with the same selector and @media (or is appended) and :root variables merge.
  * - vars: { "--name": value | null }.
  * - classes: { name: { camelCase: value | null } | null }: the plain `.name { }` rule; null removes it.
  */
-export function mergeRootCss(base, { css, vars, classes } = {}, { replace = false } = {}) {
+export function mergeRootCss(base, { css, vars, classes, rules } = {}, { replace = false } = {}) {
   const out = replace ? emptyRootCss() : structuredClone(base || emptyRootCss());
   out.vars ||= {};
   out.rules ||= [];
   if (css !== undefined && css !== null) {
     const parsed = asHttp(() => RC.parse(css));
-    for (const [k, v] of Object.entries(parsed.vars)) out.vars[k] = cleanVarValue(k, v);
+    for (const [rawK, v] of Object.entries(parsed.vars)) {
+      const k = cleanCssMapKey(rawK);
+      out.vars[k] = cleanVarValue(k, v);
+    }
     for (const raw of parsed.rules) {
       const rule = cleanRule(raw);
-      const hit = replace ? null : out.rules.find((r) => sameRule(r, rule));
-      if (hit) hit.styles = mergeRuleStyles(hit.styles, rule.styles, rule.selector);
-      else out.rules.push(rule);
+      if (!replace || rule.media) {
+        out.rules = coalesceMatchingRule(out.rules, rule);
+      } else {
+        out.rules.push(rule);
+      }
     }
   }
-  for (const [name, value] of Object.entries(vars || {})) {
+  if (Array.isArray(rules)) {
+    for (const raw of rules) {
+      const rule = cleanRule(raw);
+      if (!replace || rule.media) {
+        out.rules = coalesceMatchingRule(out.rules, rule);
+      } else {
+        out.rules.push(rule);
+      }
+    }
+  }
+  for (const [rawName, value] of Object.entries(vars || {})) {
+    const name = cleanCssMapKey(rawName);
+    if (!VAR_NAME_RE.test(name)) throw new HttpError(400, `CSS variable names look like --color-primary: "${name}"`);
     if (value === null || value === "") {
-      if (!VAR_NAME_RE.test(name)) throw new HttpError(400, `CSS variable names look like --color-primary: "${name}"`);
       delete out.vars[name];
     } else {
       out.vars[name] = cleanVarValue(name, value);
     }
   }
-  for (const [name, styles] of Object.entries(classes || {})) {
+  for (const [rawName, styles] of Object.entries(classes || {})) {
+    const name = cleanCssMapKey(rawName);
     if (!CLASS_NAME_RE.test(name)) throw new HttpError(400, `Class names start with a letter and use letters, digits, - or _: "${name}"`);
     const selector = `.${name}`;
-    if (styles === null) { out.rules = out.rules.filter((r) => !(r.selector === selector && !r.media)); continue; }
-    if (typeof styles !== "object") throw new HttpError(400, `Class "${name}" must be an object of camelCase styles`);
+    if (styles === null || styles === "") {
+      out.rules = out.rules.filter((r) => !(r.selector === selector && !r.media));
+      continue;
+    }
+    if (typeof styles !== "object" || Array.isArray(styles)) throw new HttpError(400, `Class "${name}" must be an object of camelCase styles`);
     const hit = out.rules.find((r) => r.selector === selector && !r.media);
     if (hit) hit.styles = mergeRuleStyles(hit.styles, styles, selector);
     else out.rules.push({ selector, styles: mergeRuleStyles({}, styles, selector) });
@@ -199,6 +253,66 @@ export function cleanClassList(value) {
 /** Variables referenced by a style value, e.g. "1px solid var(--line)" → ["--line"]. */
 export const varsIn = (value) => [...String(value ?? "").matchAll(/var\(\s*(--[\w-]+)/g)].map((m) => m[1]);
 
+// Whether a root CSS rule can match at least one node given the active class usage map.
+function ruleUsedByNodes(rule, usage) {
+  if (rule.selector === ":root") return true;
+  return RC.splitTop(rule.selector, ",").some((part) => {
+    const cls = rootClassesIn(part);
+    return cls.length === 0 || cls.every((c) => usage[c] > 0);
+  });
+}
+
+/** Compute class usage counts, unused classes, and unused :root variables (including transitive var() chains). */
+export function analyzeRootCssUsage(root, nodes = {}) {
+  const r = root || emptyRootCss();
+  const usage = {};
+  for (const n of Object.values(nodes || {})) {
+    for (const c of n?.classes || []) usage[c] = (usage[c] || 0) + 1;
+  }
+  const defined = definedRootClasses(r);
+  const unusedClasses = defined.filter((c) => !usage[c]);
+
+  const usedVars = new Set();
+  const addVars = (val) => {
+    for (const ref of varsIn(val)) {
+      if (usedVars.has(ref)) continue;
+      usedVars.add(ref);
+      if (ref in (r.vars || {})) addVars(r.vars[ref]);
+      for (const rule of r.rules || []) {
+        if (rule.selector === ":root" && ref in (rule.styles || {})) addVars(rule.styles[ref]);
+      }
+    }
+  };
+  for (const n of Object.values(nodes || {})) {
+    for (const val of Object.values(n?.styles || {})) addVars(val);
+  }
+  for (const rule of r.rules || []) {
+    if (rule.selector === ":root" || !ruleUsedByNodes(rule, usage)) continue;
+    for (const val of Object.values(rule.styles || {})) addVars(val);
+  }
+  const unusedVars = Object.keys(r.vars || {}).filter((k) => !usedVars.has(k));
+  return { usage, unusedClasses, unusedVars, usedVars };
+}
+
+/** Return a pruned copy of `root` with unreferenced class rules and unreferenced :root variables removed. */
+export function pruneUnusedRootCss(root, nodes = {}) {
+  const base = structuredClone(root || emptyRootCss());
+  const { usage } = analyzeRootCssUsage(base, nodes);
+  base.rules = (base.rules || []).filter((rule) => rule.selector === ":root" || ruleUsedByNodes(rule, usage));
+  const { usedVars } = analyzeRootCssUsage(base, nodes);
+  for (const k of Object.keys(base.vars || {})) {
+    if (!usedVars.has(k)) delete base.vars[k];
+  }
+  base.rules = base.rules.filter((rule) => {
+    if (rule.selector !== ":root") return true;
+    for (const k of Object.keys(rule.styles || {})) {
+      if (!usedVars.has(k)) delete rule.styles[k];
+    }
+    return Object.keys(rule.styles || {}).length > 0;
+  });
+  return base;
+}
+
 // Validate one property at a time so a single bad value is dropped (with a warning) instead of failing a whole import.
 export function lenientMerge(merge, obj, warnings, where) {
   const out = {};
@@ -221,7 +335,7 @@ export function emptyPage(name = "Page 1", id = newId()) {
 /** A new, empty project document: one empty page and an empty comments list. */
 export function emptyProject(id, name) {
   const page = emptyPage("Page 1");
-  return { version: 1, id, name: cleanName(name, "Untitled"), pages: [page.id], rootId: page.id, nodes: { [page.id]: page }, rootCss: emptyRootCss(), icons: {}, comments: [] };
+  return { version: 1, id, name: cleanName(name, "Untitled"), pages: [page.id], rootId: page.id, nodes: { [page.id]: page }, rootCss: emptyRootCss(), icons: {}, components: {}, comments: [] };
 }
 
 function normalizeComments(rawComments) {
@@ -315,6 +429,11 @@ export function normalizeProject(raw, { id, name, warnings = null } = {}) {
       }
       if (classes.length) nodes[nid].classes = classes;
     }
+    if (typeof n.componentId === "string" && COMPONENT_NAME_RE.test(n.componentId)) nodes[nid].componentId = n.componentId;
+    if (typeof n.componentRootId === "string" && ID_RE.test(n.componentRootId)) nodes[nid].componentRootId = n.componentRootId;
+    if (typeof n.componentKey === "string" && SLOT_NAME_RE.test(n.componentKey)) nodes[nid].componentKey = n.componentKey;
+    const ov = normalizeOverrides(n.componentOverrides);
+    if (ov) nodes[nid].componentOverrides = ov;
     for (const cid of Array.isArray(n.children) ? n.children : []) if (walk(cid, nid)) nodes[nid].children.push(cid);
     return nodes[nid];
   };
@@ -329,6 +448,7 @@ export function normalizeProject(raw, { id, name, warnings = null } = {}) {
     nodes,
     rootCss: normalizeRootCss(raw.rootCss, warnings),
     icons: normalizeIcons(raw.icons, warnings),
+    components: normalizeComponents(raw.components, warnings),
     comments: normalizeComments(raw.comments),
   };
 }
@@ -386,6 +506,92 @@ function normalizeRootCss(raw, warnings) {
       const rule = cleanRule(r);
       if (Object.keys(rule.styles).length) out.rules.push(rule);
     } catch (err) { report(String(r.selector ?? "rule").slice(0, 60), err); }
+  }
+  return out;
+}
+
+function normalizeOverrides(raw) {
+  if (!raw || typeof raw !== "object") return undefined;
+  const out = {};
+  if (raw.text) out.text = true;
+  if (raw.tag) out.tag = true;
+  if (raw.name) out.name = true;
+  if (raw.classes) out.classes = true;
+  if (Array.isArray(raw.styles)) {
+    const s = [...new Set(raw.styles.filter((k) => typeof k === "string" && /^[a-zA-Z][a-zA-Z0-9]*$/.test(k)))];
+    if (s.length) out.styles = s;
+  }
+  if (Array.isArray(raw.attrs)) {
+    const a = [...new Set(raw.attrs.filter((k) => typeof k === "string" && /^[a-zA-Z][a-zA-Z0-9-]*$/.test(k)))];
+    if (a.length) out.attrs = a;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+export function normalizeComponentTree(raw, { warnings = null, depth = 0, usedKeys = new Set(), counter = { n: 0 } } = {}) {
+  if (!raw || typeof raw !== "object" || depth > 50) throw new HttpError(400, "Invalid component tree node");
+  const label = cleanName(raw.name, String(raw.tag || "Frame"));
+  let tag;
+  try {
+    tag = cleanTag(raw.tag);
+  } catch (err) {
+    if (!warnings) throw err;
+    warnings.push(`${label}: ${err.message}; using div`);
+    tag = "div";
+  }
+  let key = typeof raw.key === "string" && SLOT_NAME_RE.test(raw.key) ? raw.key : "";
+  if (!key || usedKeys.has(key)) {
+    do { counter.n += 1; key = `k${counter.n}`; } while (usedKeys.has(key));
+  }
+  usedKeys.add(key);
+  const slot = typeof raw.slot === "string" && SLOT_NAME_RE.test(raw.slot) ? raw.slot : undefined;
+  const noText = SVG_TAGS.has(tag) || VOID_TAGS.has(tag);
+  const styles = warnings ? lenientMerge(mergeStyles, raw.styles, warnings, label) : mergeStyles({}, raw.styles);
+  const attrs = warnings ? lenientMerge((b, p) => mergeAttrs(b, p, tag), raw.attrs, warnings, label) : mergeAttrs({}, raw.attrs, tag);
+  let classes = [];
+  if (raw.classes !== undefined) {
+    if (!warnings) classes = cleanClassList(raw.classes);
+    else {
+      for (const c of Array.isArray(raw.classes) ? raw.classes : String(raw.classes ?? "").split(/\s+/)) {
+        try { classes = cleanClassList([...classes, c]); } catch (err) { warnings.push(`${label}: ${err.message}`); }
+      }
+    }
+  }
+  const children = [];
+  if (!VOID_TAGS.has(tag) && Array.isArray(raw.children)) {
+    for (const child of raw.children) {
+      if (!child || typeof child !== "object") continue;
+      children.push(normalizeComponentTree(child, { warnings, depth: depth + 1, usedKeys, counter }));
+    }
+  }
+  return {
+    key,
+    ...(slot ? { slot } : {}),
+    tag,
+    name: label,
+    text: noText ? "" : String(raw.text ?? ""),
+    styles,
+    attrs,
+    ...(classes.length ? { classes } : {}),
+    children,
+  };
+}
+
+function normalizeComponents(raw, warnings) {
+  if (!raw || typeof raw !== "object") return {};
+  const out = {};
+  for (const [compId, def] of Object.entries(raw)) {
+    if (!COMPONENT_NAME_RE.test(compId) || !def || typeof def !== "object" || !def.tree) continue;
+    try {
+      out[compId] = {
+        id: compId,
+        name: cleanName(def.name, compId),
+        tree: normalizeComponentTree(def.tree, { warnings }),
+      };
+    } catch (err) {
+      if (!warnings) throw err;
+      warnings.push(`Component "${compId}": ${err.message}`);
+    }
   }
   return out;
 }
