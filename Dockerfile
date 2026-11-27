@@ -3,7 +3,10 @@ WORKDIR /app
 
 # Headless Chromium (chrome-headless-shell) powers MCP get_screenshot / get_computed_styles
 # without pulling full desktop Chromium, GTK, GStreamer, or LLVM/Mesa bloat.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# `apt-get upgrade` pulls Debian security fixes the base image doesn't have yet (e.g. libpam, CVE-2025-6020),
+# so the image scan doesn't depend on when node:22-slim was last rebuilt.
+RUN apt-get update && apt-get upgrade -y --no-install-recommends \
+    && apt-get install -y --no-install-recommends \
       ca-certificates curl unzip \
       libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
       libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 \
