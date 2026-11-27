@@ -258,21 +258,22 @@ export function registerTools(server, ctx) {
 
   // ---------------------------------------------------------------- root css
   server.registerTool("get_root_css", {
-    description: "The project's root CSS: variables (vars), plain classes (classes, camelCase styles), every other rule (rules: states, @media, nested; { selector, media?, styles }), all class names layers can use (definedClasses), the whole thing as nested CSS text (css), and how many layers use each class (usage). Build with these instead of raw values.",
+    description: "The project's root CSS: variables (vars), plain classes (classes, camelCase styles), every other rule (rules: states, @media, nested; { selector, media?, styles }), all class names layers can use (definedClasses), the whole thing as nested CSS text (css), class usage counts (usage), and unreferenced unusedClasses / unusedVars. Build with these instead of raw values.",
     inputSchema: {},
     annotations: READ,
   }, async () => text(ctx.rootCss.get()));
 
   server.registerTool("update_root_css", {
-    description: "Add or change the root CSS in one undo step. Pass css text, real CSS with nesting, states and @media (\":root { --x: 1px; } .card { padding: var(--x); &:hover { opacity: .9; } @media (max-width: 640px) { padding: 8px; } }\"), and/or vars { \"--name\": value | null } and classes { name: { camelCase: value | null } | null }. Merges into the existing root CSS unless replace: true. Every layer using a changed variable or class updates everywhere.",
+    description: "Add or change the root CSS in one undo step. Pass css text, real CSS with nesting, states and @media (\":root { --x: 1px; } .card { padding: var(--x); &:hover { opacity: .9; } @media (max-width: 640px) { padding: 8px; } }\"), and/or vars { \"--name\": value | null } and classes { name: { camelCase: value | null } | null }. Merges into the existing root CSS unless replace: true. Pass pruneUnused: true to remove unreferenced classes and variables. Returns a concise confirmation summary (addedClasses, updatedClasses, removedClasses, warnings).",
     inputSchema: {
       css: z.string().optional().describe(":root { --name: value; } plus .class { prop: value; } blocks"),
       vars: z.record(z.string(), z.union([z.string(), z.number(), z.null()])).optional(),
       classes: z.record(z.string(), z.union([styleSchema, z.null()])).optional(),
       replace: z.boolean().optional().describe("Start from an empty root CSS (classes no longer defined are removed from layers)"),
+      pruneUnused: z.boolean().optional().describe("Remove unreferenced classes and variables in one undo step"),
     },
     annotations: WRITE,
-  }, async ({ css, vars, classes, replace }) => text(ctx.rootCss.update({ css, vars, classes, replace })));
+  }, async ({ css, vars, classes, replace, pruneUnused }) => text(await ctx.rootCss.update({ css, vars, classes, replace, pruneUnused })));
 
   server.registerTool("import_root_css", {
     description: "Import root CSS variables, shared classes, states and @media rules from another project into the open project (one undo step). Optionally pass varsOnly: true or classes: [...] to scope the import.",
@@ -299,7 +300,7 @@ export function registerTools(server, ctx) {
       mode: z.enum(["merge", "replace"]).optional().describe("merge (default) adds/updates variables; replace removes existing :root variables not in the imported tokens while keeping classes"),
     },
     annotations: WRITE,
-  }, async ({ tokens, mode = "merge" }) => text(ctx.tokens.import({ tokens, mode })));
+  }, async ({ tokens, mode = "merge" }) => text(await ctx.tokens.import({ tokens, mode })));
 
   // ---------------------------------------------------------------- write
   server.registerTool("write_html", {

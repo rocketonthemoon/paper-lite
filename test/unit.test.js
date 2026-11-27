@@ -21,6 +21,8 @@ import {
   varsIn,
   rootBaseClasses,
   definedRootClasses,
+  analyzeRootCssUsage,
+  pruneUnusedRootCss,
 } from "../model.js";
 import { htmlToSpecs, parseInlineStyle } from "../html-import.js";
 import { FontLibrary, familiesIn, parseFontFileName, renameWithRetry } from "../fonts.js";
@@ -345,11 +347,82 @@ test("root CSS: merging text, vars and classes keeps rule order and validates ev
   assert.throws(() => mergeRootCss(null, { vars: { color: "red" } }), /--color-primary/);
   assert.throws(() => mergeRootCss(null, { classes: { "a b": {} } }), /start with a letter/);
   assert.throws(() => mergeRootCss(null, { classes: { a: { "font-size": "1px" } } }), /camelCase/);
+  assert.throws(() => mergeRootCss(null, { classes: { a: ["bad"] } }), /object of camelCase/);
 
   assert.deepEqual(cleanClassList("card  card primary"), ["card", "primary"]);
   assert.deepEqual(cleanClassList(["a", "", null]), ["a"]);
   assert.throws(() => cleanClassList(["9lives"]), /start with a letter/);
   assert.deepEqual(varsIn("1px solid var(--line, var(--fallback))"), ["--line", "--fallback"]);
+});
+
+test("root CSS: key cleaning, null deletions, @media canonicalization, and unused CSS pruning", () => {
+  // P0 #1: quoted/trimmed keys and null deletions on both vars and classes
+  let root = mergeRootCss(null, {
+    vars: { "\"--nf-border\"": "1px solid #333", " --nf-keep ": "#fff" },
+    classes: { "\"nf-mobile-btn-list\"": { display: "flex", gap: 8 }, "nf-card": { padding: 12 } },
+  });
+  assert.deepEqual(root.vars, { "--nf-border": "1px solid #333", "--nf-keep": "#fff" });
+  assert.deepEqual(rootBaseClasses(root), {
+    "nf-mobile-btn-list": { display: "flex", gap: "8px" },
+    "nf-card": { padding: "12px" },
+  });
+  root = mergeRootCss(root, { vars: { "--nf-border": null }, classes: { "nf-mobile-btn-list": null } });
+  assert.deepEqual(root.vars, { "--nf-keep": "#fff" });
+  assert.deepEqual(rootBaseClasses(root), { "nf-card": { padding: "12px" } });
+
+  root = mergeRootCss(root, { vars: { " \"--nf-keep\" ": null }, classes: { "'nf-card'": null } });
+  assert.deepEqual(root.vars, {});
+  assert.deepEqual(root.rules, []);
+
+  // P0 #2: canonical @media normalization & coalescing between top-level and nested @media
+  const fromTopAndNested = mergeRootCss(null, {
+    css: `
+      .nf-card { padding: 16px; @media (max-width:640px) { padding: 8px; } }
+      @media ( max-width : 640px ) { .nf-card { margin: 4px; gap: 6px; } }
+    `,
+  }, { replace: true });
+  const mediaRules = fromTopAndNested.rules.filter((r) => r.selector === ".nf-card" && r.media);
+  assert.equal(mediaRules.length, 1, "top-level and nested @media coalesce into one canonical rule");
+  assert.equal(mediaRules[0].media, "(max-width: 640px)");
+  assert.deepEqual(mediaRules[0].styles, { padding: "8px", margin: "4px", gap: "6px" });
+
+  // Incremental update into nested @media merges cleanly too
+  const updatedMedia = mergeRootCss(fromTopAndNested, {
+    css: "@media (max-width: 640px) { .nf-card { gap: 10px; } }",
+  });
+  assert.equal(updatedMedia.rules.filter((r) => r.selector === ".nf-card" && r.media).length, 1);
+  assert.equal(updatedMedia.rules[1].styles.gap, "10px");
+
+  // P0 #3: analyzeRootCssUsage (with transitive vars) and pruneUnusedRootCss
+  const sys = mergeRootCss(null, {
+    css: `
+      :root {
+        --base-blue: #0055ff;
+        --brand: var(--base-blue);
+        --dead-base: #999999;
+        --dead-var: var(--dead-base);
+        --inline-only: 14px;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root { --brand: #9ab8ff; --dead-var: #111111; }
+      }
+      .used-btn { color: var(--brand); }
+      .dead-btn { color: var(--dead-var); }
+    `,
+  });
+  const nodes = {
+    a: { id: "a", tag: "button", classes: ["used-btn"], styles: { fontSize: "var(--inline-only)" } },
+  };
+  const report = analyzeRootCssUsage(sys, nodes);
+  assert.deepEqual(report.usage, { "used-btn": 1 });
+  assert.deepEqual(report.unusedClasses, ["dead-btn"]);
+  assert.deepEqual(report.unusedVars.sort(), ["--dead-base", "--dead-var"]);
+
+  const pruned = pruneUnusedRootCss(sys, nodes);
+  assert.deepEqual(Object.keys(pruned.vars).sort(), ["--base-blue", "--brand", "--inline-only"]);
+  assert.deepEqual(definedRootClasses(pruned), ["used-btn"]);
+  const darkVars = pruned.rules.find((r) => r.selector === ":root")?.styles;
+  assert.deepEqual(darkVars, { "--brand": "#9ab8ff" }, "unused dark-mode var is pruned too");
 });
 
 test("normalizeProject keeps root CSS and layer classes, dropping invalid entries leniently", () => {
