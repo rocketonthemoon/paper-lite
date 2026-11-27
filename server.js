@@ -34,6 +34,8 @@ const ALLOWED_HOSTS = new Set(
     .filter(Boolean),
 );
 const HISTORY_LIMIT = 60;
+// Edits update memory at once; their disk writes are coalesced and land at most this often.
+const PERSIST_THROTTLE_MS = Number(process.env.PERSIST_THROTTLE_MS ?? 300);
 const SESSION_GAP_MS = 120_000;
 const CURSOR_TTL_MS = 8_000;
 const PRESENCE_TTL = 90_000;
@@ -46,7 +48,7 @@ const PKG_VERSION = JSON.parse(await fs.readFile(path.join(ROOT, "package.json")
 // ---------------------------------------------------------------------------
 let workspace = { activeProjectId: null, projects: [] }; // projects: [{ id, name, accentColor, createdAt, updatedAt }]
 let state; // { version, id, name, pages: [pageRootId], rootId: activePageId, nodes, comments }
-let historyTimeline = []; // [{ id, before, after, source, tool, target, label, nodeIds, layerCount, at }]
+let historyTimeline = []; // [{ id, patch: { before, after }, source, tool, target, label, nodeIds, layerCount, at }]
 let historyCursor = -1;
 let projectCheckpoints = []; // [{ id, name, auto, kind, at, historyId, layerCount, snapshot }]
 let projectSessions = []; // [{ id, projectId, projectName, source, agentName, title, artboard, startedAt, updatedAt, editCount, toolCounts, checkpointId, live, reverted }]
@@ -58,6 +60,7 @@ const mcpContextStore = new AsyncLocalStorage();
 const sseClients = new Set();
 const fonts = new FontLibrary(path.join(DATA_DIR, "fonts"));
 let diskQueue = Promise.resolve();
+const sessionsCache = new Map(); // projectId -> sessions list, for projects that aren't open
 
 const projectFile = (id) => {
   if (!ID_RE.test(id)) throw new HttpError(400, "Invalid project id");
@@ -88,6 +91,30 @@ function queueDisk(job) {
   diskQueue = diskQueue.then(job).catch((err) => console.error("[weft] write failed:", err.message));
   return diskQueue;
 }
+
+// Throttled writes: a burst of edits to the same file becomes one write. `getText` runs at flush time so the
+// latest content is written; returning null skips the write. flushWrites() runs before anything reads these
+// files back or switches project, and on shutdown.
+const pendingWrites = new Map(); // key -> { file, getText }
+let flushTimer = null;
+function scheduleWrite(key, file, getText) {
+  pendingWrites.set(key, { file, getText });
+  if (PERSIST_THROTTLE_MS <= 0) return flushWrites();
+  if (!flushTimer) flushTimer = setTimeout(flushWrites, PERSIST_THROTTLE_MS);
+  return diskQueue;
+}
+function flushWrites() {
+  clearTimeout(flushTimer);
+  flushTimer = null;
+  const jobs = [...pendingWrites.values()];
+  pendingWrites.clear();
+  for (const { file, getText } of jobs) {
+    const text = getText();
+    if (text != null) queueDisk(() => writeAtomic(file, text));
+  }
+  return diskQueue;
+}
+
 const saveWorkspace = () => {
   const text = JSON.stringify(workspace, null, 2);
   return queueDisk(() => writeAtomic(WORKSPACE_FILE, text));
@@ -96,10 +123,17 @@ const saveCheckpoints = (id = state.id, list = projectCheckpoints) => {
   const text = JSON.stringify(list);
   return queueDisk(() => writeAtomic(checkpointFile(id), text));
 };
-const saveSessions = (id = state.id, list = projectSessions) => {
-  const text = JSON.stringify(list);
-  return queueDisk(() => writeAtomic(sessionsFile(id), text));
-};
+const saveSessions = (id = state.id, list = projectSessions) =>
+  scheduleWrite(`sessions:${id}`, sessionsFile(id), () => JSON.stringify(list));
+
+async function sessionsOf(id) {
+  if (id === state?.id) return projectSessions;
+  if (!sessionsCache.has(id)) {
+    const list = await readJsonSafe(sessionsFile(id), []);
+    sessionsCache.set(id, Array.isArray(list) ? list.filter((x) => x && x.id) : []);
+  }
+  return sessionsCache.get(id);
+}
 
 async function readJsonSafe(file, fallback) {
   try {
@@ -166,7 +200,6 @@ async function projectPreview(id) {
 }
 
 function persist({ touchUpdatedAt = true } = {}) {
-  const doc = JSON.stringify(state);
   const id = state.id;
   const meta = workspace.projects.find((p) => p.id === id);
   if (meta) {
@@ -174,11 +207,8 @@ function persist({ touchUpdatedAt = true } = {}) {
     Object.assign(meta, projectSummary(state));
   }
   previewCache.delete(id);
-  const ws = JSON.stringify(workspace, null, 2);
-  const out = queueDisk(async () => {
-    await writeAtomic(projectFile(id), doc);
-    await writeAtomic(WORKSPACE_FILE, ws);
-  });
+  scheduleWrite(`project:${id}`, projectFile(id), () => (state?.id === id ? JSON.stringify(state) : null));
+  const out = scheduleWrite("workspace", WORKSPACE_FILE, () => JSON.stringify(workspace, null, 2));
   sendEvent("projects", { projects: projectList() });
   return out;
 }
@@ -249,7 +279,7 @@ async function loadWorkspace() {
 async function readProject(id) {
   const meta = metaOf(id);
   if (state?.id === id) return structuredClone(state);
-  await diskQueue;
+  await flushWrites();
   let raw;
   try {
     raw = JSON.parse(await fs.readFile(projectFile(id), "utf8"));
@@ -276,7 +306,7 @@ function publicCheckpoints(list = projectCheckpoints) {
 }
 
 function historyPayload() {
-  const entries = historyTimeline.map(({ before: _b, after: _a, ...rest }) => rest);
+  const entries = historyTimeline.map(({ patch: _p, ...rest }) => rest);
   return { entries, cursor: historyCursor, limit: HISTORY_LIMIT, checkpoints: publicCheckpoints() };
 }
 
@@ -287,14 +317,18 @@ function sendHistory() {
 async function loadProjectExtras(id) {
   const cps = await readJsonSafe(checkpointFile(id), []);
   projectCheckpoints = Array.isArray(cps) ? cps.filter((c) => c && c.id && c.snapshot) : [];
-  const sess = await readJsonSafe(sessionsFile(id), []);
-  projectSessions = Array.isArray(sess) ? sess.filter((s) => s && s.id) : [];
+  projectSessions = await sessionsOf(id);
+  sessionsCache.delete(id);
 }
 
 async function openProject(id, source = "api") {
   metaOf(id);
   if (state?.id === id) return state;
   const doc = await readProject(id);
+  if (state) {
+    flushWrites();
+    sessionsCache.set(state.id, projectSessions);
+  }
   state = doc;
   historyTimeline = [];
   historyCursor = -1;
@@ -339,6 +373,7 @@ async function createProject(name, { open = true, source = "api" } = {}) {
     await writeAtomic(checkpointFile(id), JSON.stringify([initCp]));
     await writeAtomic(sessionsFile(id), JSON.stringify([]));
   });
+  sessionsCache.set(id, []);
   const accentColor = PROJECT_COLORS[workspace.projects.length % PROJECT_COLORS.length];
   workspace.projects.push({ id, name: doc.name, accentColor, createdAt: now, updatedAt: now, ...projectSummary(doc) });
   await saveWorkspace();
@@ -378,6 +413,7 @@ async function duplicateProject(id, name) {
     await writeAtomic(checkpointFile(copyId), JSON.stringify([initCp]));
     await writeAtomic(sessionsFile(copyId), JSON.stringify([]));
   });
+  sessionsCache.set(copyId, []);
   const accentColor = PROJECT_COLORS[workspace.projects.length % PROJECT_COLORS.length];
   workspace.projects.push({ id: copyId, name: doc.name, accentColor, createdAt: now, updatedAt: now, ...projectSummary(doc) });
   await saveWorkspace();
@@ -395,6 +431,8 @@ async function deleteProject(id, source = "api") {
   }
   workspace.projects = workspace.projects.filter((p) => p.id !== id);
   previewCache.delete(id);
+  sessionsCache.delete(id);
+  for (const key of [`project:${id}`, `sessions:${id}`]) pendingWrites.delete(key);
   await queueDisk(async () => {
     await fs.rm(projectFile(id), { force: true });
     await fs.rm(checkpointFile(id), { force: true });
@@ -461,34 +499,86 @@ function ensureAgentStartCheckpoint(beforeState) {
   return cp.id;
 }
 
-function diffNodeIds(before, after) {
-  const changed = [];
-  const beforeIds = new Set(Object.keys(before.nodes));
-  const afterIds = new Set(Object.keys(after.nodes));
-  for (const id of afterIds) {
-    if (after.pages.includes(id)) continue;
-    if (!beforeIds.has(id)) {
-      changed.push(id);
-      continue;
-    }
-    const a = before.nodes[id], b = after.nodes[id];
-    if (
-      a.name !== b.name ||
-      a.tag !== b.tag ||
-      a.text !== b.text ||
-      a.parentId !== b.parentId ||
-      JSON.stringify(a.styles) !== JSON.stringify(b.styles) ||
-      JSON.stringify(a.attrs) !== JSON.stringify(b.attrs) ||
-      JSON.stringify(a.classes) !== JSON.stringify(b.classes) ||
-      JSON.stringify(a.children) !== JSON.stringify(b.children)
-    ) {
-      changed.push(id);
-    }
+// ---------------------------------------------------------------------------
+// Edit tracking: undo stores only the layers an edit touched, not two copies of the whole document.
+// While an edit runs, `state.nodes` is a proxy that copies each node the first time the edit reads or writes it.
+// Afterwards those copies are compared with the live nodes; the ones that differ become the undo patch.
+// ---------------------------------------------------------------------------
+const docMeta = (doc) => ({ pages: [...doc.pages], rootCss: structuredClone(doc.rootCss || emptyRootCss()) });
+const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+function beginTracking() {
+  const raw = state.nodes;
+  const touched = new Map(); // id -> copy of the node before the edit, or null if it didn't exist
+  const remember = (id) => {
+    if (typeof id === "string" && !touched.has(id)) touched.set(id, Object.hasOwn(raw, id) ? structuredClone(raw[id]) : null);
+  };
+  const proxy = new Proxy(raw, {
+    get(t, k, r) {
+      if (typeof k === "string" && Object.hasOwn(t, k)) remember(k);
+      return Reflect.get(t, k, r);
+    },
+    set(t, k, v, r) { remember(k); return Reflect.set(t, k, v, r); },
+    defineProperty(t, k, d) { remember(k); return Reflect.defineProperty(t, k, d); },
+    deleteProperty(t, k) { remember(k); return Reflect.deleteProperty(t, k); },
+  });
+  state.nodes = proxy;
+  return { raw, proxy, touched, meta: docMeta(state) };
+}
+
+// Undo an unfinished edit (it threw): put every touched node and the page list back.
+function rollbackTracking(tr) {
+  state.nodes = tr.raw; // even if the edit swapped in a new map, the original is intact apart from touched nodes
+  for (const [id, prev] of tr.touched) {
+    if (prev) state.nodes[id] = prev;
+    else delete state.nodes[id];
   }
-  for (const id of beforeIds) {
-    if (!afterIds.has(id) && !before.pages.includes(id)) changed.push(id);
+  state.pages = tr.meta.pages;
+  state.rootCss = tr.meta.rootCss;
+}
+
+// Finish an edit: returns { before, after } with only the nodes that changed ({ id: node | null }) and the
+// page list / root CSS when those changed.
+function endTracking(tr) {
+  const replaced = state.nodes !== tr.proxy;
+  if (!replaced) state.nodes = tr.raw;
+  const before = { nodes: {} }, after = { nodes: {} };
+  const ids = replaced ? new Set([...Object.keys(tr.raw), ...Object.keys(state.nodes)]) : tr.touched.keys();
+  for (const id of ids) {
+    const prev = tr.touched.has(id) ? tr.touched.get(id) : (Object.hasOwn(tr.raw, id) ? tr.raw[id] : null);
+    const cur = Object.hasOwn(state.nodes, id) ? state.nodes[id] : null;
+    if (!prev && !cur) continue;
+    if (prev && cur && sameJson(prev, cur)) continue;
+    before.nodes[id] = prev;
+    after.nodes[id] = cur ? structuredClone(cur) : null;
   }
-  return changed.slice(0, 60);
+  const meta = docMeta(state);
+  if (!sameJson(tr.meta, meta)) {
+    before.meta = tr.meta;
+    after.meta = meta;
+  }
+  return { before, after };
+}
+
+// A read-only view of the document as it was before `patch`, for labels (which layer, which artboard).
+function beforeView(patch) {
+  const nodes = new Proxy({}, {
+    get: (_t, k) => (Object.hasOwn(patch.before.nodes, k) ? patch.before.nodes[k] || undefined : state.nodes[k]),
+  });
+  return { pages: patch.before.meta?.pages || state.pages, rootId: state.rootId, nodes };
+}
+
+// Apply one side of a history patch to the live document.
+function applyPatchSide(side) {
+  for (const [id, n] of Object.entries(side.nodes)) {
+    if (n) state.nodes[id] = structuredClone(n);
+    else delete state.nodes[id];
+  }
+  if (side.meta) {
+    state.pages = [...side.meta.pages];
+    state.rootCss = structuredClone(side.meta.rootCss);
+  }
+  if (!state.pages.includes(state.rootId)) state.rootId = state.pages[0];
 }
 
 function artboardNameForNodes(nodeIds, doc = state, prevDoc = null) {
@@ -585,7 +675,7 @@ async function allActivitySessions() {
   const now = Date.now();
   const all = [];
   for (const p of workspace.projects) {
-    const list = p.id === state?.id ? projectSessions : await readJsonSafe(sessionsFile(p.id), []);
+    const list = await sessionsOf(p.id);
     for (const s of list) {
       if (!s || !s.id) continue;
       const isLive = Boolean(
@@ -621,37 +711,37 @@ let batchStartCheckpointId = null;
 function mutate(source, fn, meta = null) {
   if (batchDepth) return fn(state);
   const histSource = source === "mcp" ? "mcp" : "you";
-  const before = docSnapshot(state);
-  const startCpId = histSource === "mcp" ? ensureAgentStartCheckpoint(before) : null;
+  const startCpId = histSource === "mcp" ? ensureAgentStartCheckpoint(state) : null;
+  const tr = beginTracking();
   let result;
   try {
     result = fn(state);
   } catch (err) {
-    applySnapshotRaw(before);
+    rollbackTracking(tr);
     throw err;
   }
-  commit(source, before, meta, startCpId);
+  commit(source, endTracking(tr), meta, startCpId);
   return result;
 }
 
 function batch(source, fn, meta = null) {
   if (batchDepth) return fn();
   const histSource = source === "mcp" ? "mcp" : "you";
-  const before = docSnapshot(state);
-  batchStartCheckpointId = histSource === "mcp" ? ensureAgentStartCheckpoint(before) : null;
+  batchStartCheckpointId = histSource === "mcp" ? ensureAgentStartCheckpoint(state) : null;
+  const tr = beginTracking();
   batchDepth += 1;
   let result;
   try {
     result = fn();
   } catch (err) {
-    applySnapshotRaw(before); // all-or-nothing
+    rollbackTracking(tr); // all-or-nothing
     throw err;
   } finally {
     batchDepth -= 1;
   }
   const cpId = batchStartCheckpointId;
   batchStartCheckpointId = null;
-  commit(source, before, meta, cpId);
+  commit(source, endTracking(tr), meta, cpId);
   return result;
 }
 
@@ -680,12 +770,7 @@ function syncCommentsWithState(stepNum) {
   return changed;
 }
 
-function applySnapshotRaw(snap) {
-  const comments = state?.comments || [];
-  state = { ...structuredClone(snap), comments };
-}
-
-function commit(source, before, meta = null, startCpId = null) {
+function commit(source, patch, meta = null, startCpId = null) {
   if (historyCursor < historyTimeline.length - 1) {
     historyTimeline.length = historyCursor + 1;
   }
@@ -693,14 +778,16 @@ function commit(source, before, meta = null, startCpId = null) {
   const histSource = source === "mcp" ? "mcp" : "you";
   const store = histSource === "mcp" ? mcpContextStore.getStore() : null;
   const tool = meta?.tool || store?.tool || (histSource === "mcp" ? "mcp_edit" : "Edit");
-  const nodeIds = meta?.nodeIds?.length ? meta.nodeIds : diffNodeIds(before, state);
+  const before = beforeView(patch);
+  const nodeIds = meta?.nodeIds?.length
+    ? meta.nodeIds
+    : Object.keys(patch.before.nodes).filter((id) => !state.pages.includes(id) && !before.pages.includes(id)).slice(0, 60);
   const target = targetSummary(nodeIds, before, state, meta);
   const label = meta?.label || `${tool} · ${target}`;
   const at = new Date().toISOString();
   const entry = {
     id: newId(),
-    before,
-    after: docSnapshot(state),
+    patch,
     source: histSource,
     tool,
     target,
@@ -724,34 +811,36 @@ function commit(source, before, meta = null, startCpId = null) {
   if (commentsChanged) sendEvent("comments", { comments: state.comments });
 }
 
-function applyHistoryEntry(snap) {
-  const { version, rootId, comments } = state;
-  const cloned = structuredClone(snap);
-  state = {
-    ...cloned,
-    version: version + 1,
-    rootId: cloned.pages.includes(rootId) ? rootId : cloned.pages[0],
-    comments: comments || [],
-  };
+// Walk the live document to history position `target` (-1 = before the first entry), one patch at a time.
+function moveHistoryCursor(target) {
+  while (historyCursor > target) {
+    applyPatchSide(historyTimeline[historyCursor].patch.before);
+    historyCursor -= 1;
+  }
+  while (historyCursor < target) {
+    historyCursor += 1;
+    applyPatchSide(historyTimeline[historyCursor].patch.after);
+  }
+  state.version += 1;
 }
 
-function stepHistory(source, direction) {
-  if (direction === "undo") {
-    if (historyCursor < 0) return false;
-    const entry = historyTimeline[historyCursor];
-    historyCursor -= 1;
-    applyHistoryEntry(entry.before);
-  } else {
-    if (historyCursor >= historyTimeline.length - 1) return false;
-    historyCursor += 1;
-    const entry = historyTimeline[historyCursor];
-    applyHistoryEntry(entry.after);
-  }
+function afterHistoryMove(source) {
   const commentsChanged = syncCommentsWithState(Math.max(1, historyCursor + 1));
   persist();
   broadcast(source);
   sendHistory();
   if (commentsChanged) sendEvent("comments", { comments: state.comments });
+}
+
+function stepHistory(source, direction) {
+  if (direction === "undo") {
+    if (historyCursor < 0) return false;
+    moveHistoryCursor(historyCursor - 1);
+  } else {
+    if (historyCursor >= historyTimeline.length - 1) return false;
+    moveHistoryCursor(historyCursor + 1);
+  }
+  afterHistoryMove(source);
   return true;
 }
 
@@ -761,19 +850,8 @@ function jumpHistory(source, targetIndex) {
   }
   if (targetIndex === historyCursor) return { cursor: historyCursor, moved: 0 };
   const moved = Math.abs(targetIndex - historyCursor);
-  if (targetIndex < historyCursor) {
-    historyCursor = targetIndex;
-    const snap = targetIndex >= 0 ? historyTimeline[targetIndex].after : historyTimeline[0].before;
-    applyHistoryEntry(snap);
-  } else {
-    historyCursor = targetIndex;
-    applyHistoryEntry(historyTimeline[targetIndex].after);
-  }
-  const commentsChanged = syncCommentsWithState(Math.max(1, historyCursor + 1));
-  persist();
-  broadcast(source);
-  sendHistory();
-  if (commentsChanged) sendEvent("comments", { comments: state.comments });
+  moveHistoryCursor(targetIndex);
+  afterHistoryMove(source);
   return { cursor: historyCursor, moved };
 }
 
@@ -2063,7 +2141,7 @@ app.post("/api/activity/:id/revert", wrap(async (req) => {
   let targetProject = null;
   let targetSession = null;
   for (const p of workspace.projects) {
-    const list = p.id === state.id ? projectSessions : await readJsonSafe(sessionsFile(p.id), []);
+    const list = await sessionsOf(p.id);
     const found = list.find((s) => s.id === sid);
     if (found) { targetProject = p.id; targetSession = found; break; }
   }
@@ -2287,7 +2365,7 @@ const methodNotAllowed = (req, res) =>
 app.get(["/mcp", "/paper-lite/mcp"], methodNotAllowed);
 app.delete(["/mcp", "/paper-lite/mcp"], methodNotAllowed);
 
-for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => { renderer.stop(); setTimeout(() => process.exit(0), 1200); });
+for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => { flushWrites(); renderer.stop(); setTimeout(() => process.exit(0), 1200); });
 
 await fonts.load();
 await loadWorkspace();
