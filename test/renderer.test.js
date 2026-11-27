@@ -77,3 +77,45 @@ test("renderer falls back to the next browser when one fails to start", { timeou
   assert.equal(shot.width, 120);
   assert.notEqual(renderer.executable, process.execPath, "a real browser was used");
 });
+
+test("renderer reuses the loaded page only while the content key and size are unchanged", { timeout: 120_000 }, async (t) => {
+  const probe = new Renderer("http://127.0.0.1:1");
+  if (!probe.available) {
+    t.skip("no Chrome/Chromium available");
+    return;
+  }
+  let color = "#0000ff", loads = 0;
+  const server = http.createServer((req, res) => {
+    if (!req.url.startsWith("/render/")) { res.writeHead(404); return res.end(); } // e.g. /favicon.ico
+    loads += 1;
+    res.writeHead(200, { "content-type": "text/html" });
+    const w = req.url.includes("wide") ? 400 : 300;
+    res.end(`<!doctype html><html><body style="margin:0"><div data-layer="${req.url.split("/").pop()}" style="width:${w}px;height:200px;background:${color}"></div></body></html>`);
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  let version = 1;
+  const renderer = new Renderer(`http://127.0.0.1:${server.address().port}`, { contentKey: () => `v${version}` });
+  t.after(() => { renderer.stop(); server.close(); });
+  const bg = async (id = "board", width = 300) =>
+    (await renderer.computed({ artboardId: id, nodeIds: [id], width, height: 200, properties: ["background-color", "width"] }))[id].styles;
+
+  assert.equal((await bg())["background-color"], "rgb(0, 0, 255)");
+  assert.equal(loads, 1);
+  await bg();
+  await renderer.screenshot({ artboardId: "board", nodeId: "board", width: 300, height: 200 });
+  assert.equal(loads, 1, "unchanged content: no reload");
+
+  color = "#ff0000";
+  version = 2; // an edit
+  assert.equal((await bg())["background-color"], "rgb(255, 0, 0)", "edit shows up on the next call");
+  assert.equal(loads, 2);
+
+  assert.equal((await bg("wide", 400)).width, "400px", "another artboard loads its own page");
+  assert.equal(loads, 3);
+  await bg("wide", 500);
+  assert.equal(loads, 4, "a different viewport size reloads");
+
+  renderer.stop(); // after a restart nothing is assumed to be loaded
+  await bg("wide", 500);
+  assert.equal(loads, 5);
+});

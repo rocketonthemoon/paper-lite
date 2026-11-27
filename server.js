@@ -2058,7 +2058,11 @@ function outline(nodeId = state.rootId, depth = 4) {
 // ---------------------------------------------------------------------------
 // Fonts
 // ---------------------------------------------------------------------------
-const fontsChanged = () => sendEvent("fonts", { fonts: fonts.list(), v: Date.now() });
+let fontsRev = 0; // bumps when the font library changes, so the renderer reloads pages that use fonts
+const fontsChanged = () => {
+  fontsRev += 1;
+  sendEvent("fonts", { fonts: fonts.list(), v: Date.now() });
+};
 async function addFont(input) {
   let entry;
   if (input.source === "google" || (input.family && !input.data && !input.filePath)) entry = await fonts.addGoogle(input);
@@ -2091,7 +2095,7 @@ function setSessionTitle(text) {
 // ---------------------------------------------------------------------------
 // MCP (tools live in mcp-tools.js)
 // ---------------------------------------------------------------------------
-const renderer = new Renderer(`http://127.0.0.1:${PORT}`);
+const renderer = new Renderer(`http://127.0.0.1:${PORT}`, { contentKey: () => `${state.id}:${state.version}:${fontsRev}` });
 const mcpContext = {
   state: () => state,
   urls: { ui: PUBLIC_URL, mcp: `${PUBLIC_URL}/mcp` },

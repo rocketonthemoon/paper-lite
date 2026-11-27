@@ -130,6 +130,7 @@ Each project's checkpoints are commits in a git repo (`DATA_DIR/projects/<id>.gi
 | `PUBLIC_URL` | `http://localhost:<PORT>` | URL reported by `get_basic_info` |
 | `ALLOWED_HOSTS` | `localhost,127.0.0.1,[::1]` | Extra allowed `Host`/`Origin` hostnames, comma-separated (e.g. `host.docker.internal`) |
 | `CHROME_PATH` | auto-detected | Chrome/Chromium/`chrome-headless-shell` binary |
+| `RENDER_IDLE_MS` | `900000` (15 min) | How long headless Chrome stays running after the last screenshot / computed-styles call; starting it again takes ~0.5–1 s |
 | `CHROME_FLAGS` | empty (`--no-sandbox --disable-dev-shm-usage --disable-gpu` in Docker) | Extra Chrome flags, space-separated |
 | `PERSIST_THROTTLE_MS` | `300` | Edits apply in memory at once; disk writes are coalesced to at most one per this interval (`0` writes immediately). Pending writes are flushed on shutdown |
 | `WEFT_URL` (or `PAPER_LITE_URL`) | `http://localhost:3000/mcp` | Server URL used by `mcp-stdio.js` |
