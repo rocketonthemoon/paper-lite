@@ -222,7 +222,7 @@ export class Renderer {
   screenshot({ artboardId, nodeId, width, height, scale = 1, maxSize = 1600 }) {
     return this.run(async () => {
       await this.load(artboardId, width, height);
-      const rect = await this.evaluate(`(() => { const el = document.querySelector('.layer-${nodeId}'); if (!el) return null;
+      const rect = await this.evaluate(`(() => { const el = document.querySelector('[data-layer="${nodeId}"], .layer-${nodeId}'); if (!el) return null;
         const r = el.getBoundingClientRect(); return { x: r.left + scrollX, y: r.top + scrollY, w: r.width, h: r.height }; })()`);
       if (!rect || rect.w < 1 || rect.h < 1) throw new Error("Node has no visible box to capture");
       const s = Math.min(scale, maxSize / Math.max(rect.w, rect.h));
@@ -237,9 +237,9 @@ export class Renderer {
     return this.run(async () => {
       await this.load(artboardId, width, height);
       const props = JSON.stringify(properties);
-      return this.evaluate(`(() => { const root = document.querySelector('.layer-${artboardId}').getBoundingClientRect(); const out = {};
+      return this.evaluate(`(() => { const root = document.querySelector('[data-layer="${artboardId}"], .layer-${artboardId}').getBoundingClientRect(); const out = {};
         for (const id of ${JSON.stringify(nodeIds)}) {
-          const el = document.querySelector('.layer-' + id); if (!el) { out[id] = null; continue; }
+          const el = document.querySelector('[data-layer="' + id + '"], .layer-' + id); if (!el) { out[id] = null; continue; }
           const cs = getComputedStyle(el), r = el.getBoundingClientRect(), styles = {};
           for (const p of ${props}) { const v = cs.getPropertyValue(p); if (v && v !== 'none' && v !== 'normal' && v !== 'auto' && v !== '0px' && v !== 'rgba(0, 0, 0, 0)') styles[p] = v; }
           out[id] = { box: { x: Math.round(r.left - root.left), y: Math.round(r.top - root.top), width: Math.round(r.width), height: Math.round(r.height) }, styles };

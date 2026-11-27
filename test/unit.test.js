@@ -14,6 +14,13 @@ import {
   mergeAttrs,
   mergeStyles,
   normalizeProject,
+  cleanClassList,
+  mergeRootCss,
+  parseRootCss,
+  rootCssText,
+  varsIn,
+  rootBaseClasses,
+  definedRootClasses,
 } from "../model.js";
 import { htmlToSpecs, parseInlineStyle } from "../html-import.js";
 import { FontLibrary, familiesIn, parseFontFileName, renameWithRetry } from "../fonts.js";
@@ -144,8 +151,8 @@ test("html-import: htmlToSpecs parses layout, aliases, SVG namespace, mixed text
     </section>
   `);
   assert.equal(specs.length, 1);
-  assert.equal(warnings.length, 1);
-  assert.match(warnings[0], /classes are ignored/);
+  assert.equal(warnings.length, 0);
+  assert.deepEqual(specs[0].classes, ["hero"], "class names are kept for the root CSS");
 
   const root = specs[0];
   assert.equal(root.name, "Hero Card");
@@ -252,4 +259,113 @@ test("fonts: renameWithRetry renames, and fails fast on errors that aren't trans
   } finally {
     await fs.rm(tmp, { recursive: true, force: true });
   }
+});
+
+test("root CSS: nesting, states and @media parse into ordered rules and round-trip as text", () => {
+  const css = `/* brand */
+    :root { --brand: #0000ff; --pad: 16px }
+    @media (prefers-color-scheme: dark) { :root { --brand: #9ab8ff; } }
+    .card {
+      padding: var(--pad);
+      &:hover { box-shadow: 0 1px 2px #000; }
+      & > .title { font-size: 20px; }
+      .icon, .badge { width: 16px; }
+      &__footer { margin-top: 8px; }
+      &.is-active:not(:first-child) { outline: 1px solid var(--brand); }
+      @media (max-width: 640px) { padding: 8px; &:hover { box-shadow: none; } @media (min-width: 320px) { gap: 4px; } }
+    }
+    ul li:nth-child(2n + 1)::before { content: "•"; }
+    .btn:has(> svg) { gap: 6px; --btn-gap: 6px; }`;
+  const parsed = parseRootCss(css);
+  assert.deepEqual(parsed.vars, { "--brand": "#0000ff", "--pad": "16px" });
+  assert.deepEqual(parsed.rules.map((r) => [r.selector, r.media || ""]), [
+    [":root", "(prefers-color-scheme: dark)"],
+    [".card", ""],
+    [".card:hover", ""],
+    [".card > .title", ""],
+    [".card .icon, .card .badge", ""],
+    [".card__footer", ""],
+    [".card.is-active:not(:first-child)", ""],
+    [".card", "(max-width: 640px)"],
+    [".card:hover", "(max-width: 640px)"],
+    [".card", "(max-width: 640px) and (min-width: 320px)"],
+    ["ul li:nth-child(2n + 1)::before", ""],
+    [".btn:has(> svg)", ""],
+  ]);
+  assert.deepEqual(parsed.rules[11].styles, { gap: "6px", "--btn-gap": "6px" }, "classes can scope their own variables");
+
+  const root = mergeRootCss(null, { css }, { replace: true });
+  const text = rootCssText(root);
+  assert.match(text, /^\.card \{\n {2}padding: var\(--pad\);\n {2}&:hover \{\n {4}box-shadow: 0 1px 2px #000;\n {2}\}\n {2}& > \.title \{/m, "rules nest under their class");
+  assert.match(text, / {2}@media \(max-width: 640px\) \{\n {4}padding: 8px;\n {4}&:hover \{/);
+  assert.deepEqual(mergeRootCss(null, { css: text }, { replace: true }), root, "the text round-trips exactly");
+  assert.deepEqual(definedRootClasses(root).sort(), ["badge", "btn", "card", "card__footer", "icon", "is-active", "title"]);
+  assert.deepEqual(rootBaseClasses(root), { card: { padding: "var(--pad)" }, card__footer: { marginTop: "8px" } });
+
+  for (const [bad, why] of [
+    ["#id { color: red; }", /ids and attribute selectors/],
+    [".a[href] { color: red; }", /ids and attribute selectors/],
+    ["& { color: red; }", /& only works inside a rule/],
+    [".a { color: red;", /Missing "\}"/],
+    [".a { color: red; } }", /Unexpected "\}"/],
+    ["@supports (display: grid) { .a { color: red; } }", /@supports isn't supported/],
+    [".a:hoverx { color: red; }", /:hoverx isn't supported/],
+    ["table { color: red; }", /<table> isn't a canvas tag/],
+    ["color: red;", /needs a selector/],
+    [".a::before .b { color: red; }", /Nothing can follow a pseudo-element/],
+    [":root { color: red; }", /only holds variables/],
+    [".a { :root { --x: 1px; } }", /:root can't be nested/],
+    [".a:nth-child(foo) { color: red; }", /Bad :nth-child\(\) argument/],
+    ["@media { .a { color: red; } }", /needs a query/],
+    ["@media (max-width: 1px), print { .a { @media (min-width: 1px) { color: red; } } }", /comma lists/],
+    [".a { b { c { d { e { f { g { h { i { color: red; } } } } } } } } }", /Nesting is limited|isn't a canvas tag/],
+    [".a { color red; }", /Bad declaration/],
+    ["/* open", /Unclosed/],
+  ]) assert.throws(() => parseRootCss(bad), why, bad);
+  assert.throws(() => mergeRootCss(null, { css: ".a { color: red; } } .b { x: y }" }), (err) => err instanceof HttpError && err.status === 400);
+  assert.throws(() => mergeRootCss(null, { css: ".a { background: url(javascript:alert(1)); }" }), /Unsafe value/);
+  assert.throws(() => mergeRootCss(null, { css: ".a { color: red</style> }" }), /Unsafe value|Bad declaration/);
+});
+
+test("root CSS: merging text, vars and classes keeps rule order and validates everything", () => {
+  let root = mergeRootCss(null, { css: ".card { padding: 4px; &:hover { color: red; } }" });
+  root = mergeRootCss(root, { css: ".card { margin: 0; } .pill { border-radius: 999px; }", vars: { "--gap": 8 } });
+  assert.deepEqual(root.rules.map((r) => r.selector), [".card", ".card:hover", ".pill"], "same selector + media merges in place");
+  assert.deepEqual(root.rules[0].styles, { padding: "4px", margin: "0" });
+  assert.equal(root.vars["--gap"], "8");
+  root = mergeRootCss(root, { classes: { card: { padding: null }, chip: { gap: 4 }, pill: null } });
+  assert.deepEqual(root.rules.map((r) => r.selector), [".card", ".card:hover", ".chip"]);
+  assert.equal(root.rules[2].styles.gap, "4px");
+  assert.deepEqual(mergeRootCss(root, { classes: { card: { margin: null } } }).rules.map((r) => r.selector), [".card:hover", ".chip"], "an emptied rule is removed");
+  const replaced = mergeRootCss(root, { css: ".a { color: red; } .b { color: blue; } .a { color: green; }" }, { replace: true });
+  assert.deepEqual(replaced.rules.map((r) => r.selector), [".a", ".b", ".a"], "replace keeps the author's order exactly");
+  assert.deepEqual(replaced.vars, {});
+  assert.equal(root.rules[0].styles.margin, "0", "merging never mutates the base");
+  assert.throws(() => mergeRootCss(null, { vars: { color: "red" } }), /--color-primary/);
+  assert.throws(() => mergeRootCss(null, { classes: { "a b": {} } }), /start with a letter/);
+  assert.throws(() => mergeRootCss(null, { classes: { a: { "font-size": "1px" } } }), /camelCase/);
+
+  assert.deepEqual(cleanClassList("card  card primary"), ["card", "primary"]);
+  assert.deepEqual(cleanClassList(["a", "", null]), ["a"]);
+  assert.throws(() => cleanClassList(["9lives"]), /start with a letter/);
+  assert.deepEqual(varsIn("1px solid var(--line, var(--fallback))"), ["--line", "--fallback"]);
+});
+
+test("normalizeProject keeps root CSS and layer classes, dropping invalid entries leniently", () => {
+  const raw = {
+    pages: ["p"], rootId: "p",
+    nodes: { p: { name: "Page", tag: "div", children: ["a"] }, a: { name: "A", tag: "div", children: [], classes: ["card", "bad name", "card"] } },
+    rootCss: {
+      vars: { "--ok": "1px", nope: "2px" },
+      rules: [{ selector: ".card:hover", styles: { color: "red" } }, { selector: "#bad", styles: { color: "red" } }, { selector: ".x", media: "(max-width: 1px)", styles: { "bad-key": "1px" } }],
+      classes: { card: { padding: "4px" } },
+    },
+  };
+  const warnings = [];
+  const doc = normalizeProject(raw, { warnings });
+  assert.deepEqual(doc.rootCss, { vars: { "--ok": "1px" }, rules: [{ selector: ".card:hover", styles: { color: "red" } }, { selector: ".card", styles: { padding: "4px" } }] }, "older { classes } saves become rules");
+  assert.deepEqual(doc.nodes.a.classes, ["card"], "valid names are kept, invalid ones reported");
+  assert.ok(warnings.length >= 4, warnings.join("\n"));
+  assert.throws(() => normalizeProject({ ...raw, nodes: { p: raw.nodes.p, a: { ...raw.nodes.a, classes: ["card"] } } }), /look like --color-primary/, "strict loading rejects bad root CSS");
+  assert.deepEqual(normalizeProject({ nodes: { p: { name: "P", tag: "div" } }, pages: ["p"] }).rootCss, { vars: {}, rules: [] }, "older projects get an empty root CSS");
 });

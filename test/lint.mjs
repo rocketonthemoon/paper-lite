@@ -9,6 +9,7 @@ const jsFiles = [
   ...fs.readdirSync(path.join(ROOT, "test"))
     .filter((f) => f.endsWith(".js") || f.endsWith(".mjs"))
     .map((f) => path.join(ROOT, "test", f)),
+  path.join(ROOT, "public", "root-css.js"), // shared by the server and the editor
 ];
 
 for (const file of jsFiles) {

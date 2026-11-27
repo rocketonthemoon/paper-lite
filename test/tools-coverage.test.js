@@ -8,6 +8,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import zlib from "node:zlib";
 
 const PAPER_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -15,15 +16,30 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const EXPECTED_TOOLS = [
   "add_font", "create_artboard", "create_node", "create_page", "create_project", "delete_nodes", "delete_page",
   "delete_project", "duplicate_nodes", "duplicate_project", "find_nodes", "finish_working_on_nodes", "get_basic_info",
-  "get_children", "get_comments", "get_computed_styles", "get_guide", "get_jsx", "get_node_info", "get_screenshot",
-  "get_selection", "get_tree_summary", "list_checkpoints", "list_fonts", "list_projects", "move_nodes", "open_project",
+  "get_children", "get_comments", "get_computed_styles", "get_guide", "get_jsx", "get_node_info", "get_root_css",
+  "get_screenshot", "get_selection", "get_tree_summary", "list_checkpoints", "list_fonts", "list_projects", "move_nodes", "open_project",
   "redo", "remove_font", "rename_nodes", "rename_project", "reply_to_comment", "resolve_comment", "restore_checkpoint",
   "save_checkpoint", "set_selection", "set_session_title", "set_text_content", "switch_page", "undo", "update_node",
-  "update_page", "update_styles", "write_html",
+  "update_page", "update_root_css", "update_styles", "write_html",
 ];
 
 // Markup an attacker could put in layer names / text to break out of exported or rendered HTML.
 const XSS = `</style><script>window.__pwn=1</script><img src=x onerror="window.__pwn=1">*/`;
+
+// Reads a PKZIP buffer (Store/Deflate) into { name: Buffer }.
+function unzip(buf) {
+  const out = {};
+  let o = 0;
+  while (buf.readUInt32LE(o) === 0x04034b50) {
+    const method = buf.readUInt16LE(o + 8), size = buf.readUInt32LE(o + 18);
+    const nameLen = buf.readUInt16LE(o + 26), extraLen = buf.readUInt16LE(o + 28);
+    const name = buf.subarray(o + 30, o + 30 + nameLen).toString("utf8");
+    const data = buf.subarray(o + 30 + nameLen + extraLen, o + 30 + nameLen + extraLen + size);
+    out[name] = method === 8 ? zlib.inflateRawSync(data) : data;
+    o += 30 + nameLen + extraLen + size;
+  }
+  return out;
+}
 
 function findBrowser() {
   const env = process.env.CHROME_PATH;
@@ -145,7 +161,7 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
   t.after(() => srv.stop());
   const B = srv.baseUrl;
 
-  await t.test("tools/list exposes exactly the 44 documented tools with schemas", async () => {
+  await t.test("tools/list exposes exactly the 46 documented tools with schemas", async () => {
     const { tools } = await rpc(B, "tools/list");
     assert.deepEqual(tools.map((x) => x.name).sort(), EXPECTED_TOOLS);
     for (const tool of tools) {
@@ -235,7 +251,7 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
   });
 
   // ---------------------------------------------------------------- authoring
-  let board, section, title, para, button;
+  let board, section, title, para, button, sharedIds = [];
   await t.test("create_artboard places boards side by side", async () => {
     board = (await ok(B, "create_artboard", { name: "Desktop", width: 800, height: "fit-content", styles: { backgroundColor: "#ffffff" } })).id;
     const second = await ok(B, "create_artboard", { name: "Mobile" });
@@ -268,7 +284,7 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
     assert.equal(res.created[0].name, "Hero");
     assert.equal(res.created[0].tag, "section");
     assert.ok(res.layers >= 10, `expected a deep tree, got ${res.layers}`);
-    assert.ok(res.warnings.some((w) => /class/.test(w)), "class attribute warns");
+    assert.ok(res.warnings.some((w) => /\.ignored isn't in the root CSS/.test(w)), "an undefined class warns and is dropped");
     assert.ok(res.warnings.some((w) => /Unsafe URL/.test(w)), "javascript: URL is rejected");
     assert.ok(res.warnings.some((w) => /Unsafe value/.test(w)), "expression() is rejected");
     section = res.created[0].id;
@@ -512,6 +528,183 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
     assert.match(page, /export function Mobile\(\)/);
   });
 
+  await t.test("root CSS: shared variables, classes, states, @media and nesting drive every layer", async () => {
+    assert.deepEqual(await ok(B, "get_root_css"), { vars: {}, classes: {}, rules: [], definedClasses: [], css: "", usage: {} });
+    const set = await ok(B, "update_root_css", {
+      css: `/* tokens */
+        :root { --color-primary: #0000ff; --color-on-primary: #ffffff; --space-3: 12px; --radius: 12px; --font-ui: 'Geist', sans-serif; }
+        .stat-card {
+          padding: var(--space-3); background: var(--color-primary); color: var(--color-on-primary); border-radius: var(--radius);
+          &:hover { background: #000080; }
+          & .stat-value { font-size: 28px; }
+          @media (max-width: 900px) { padding: 20px; & .stat-value { font-size: 18px; } }
+        }
+        .muted-text { font-family: var(--font-ui); -webkit-line-clamp: 2; }`,
+    });
+    assert.deepEqual(set.changed.sort(), ["--color-on-primary", "--color-primary", "--font-ui", "--radius", "--space-3", ".muted-text", ".stat-card",
+      ".stat-card .stat-value", ".stat-card:hover", "@media (max-width: 900px) { .stat-card .stat-value }", "@media (max-width: 900px) { .stat-card }"].sort());
+    assert.equal(set.classes["stat-card"].borderRadius, "var(--radius)", "kebab-case becomes camelCase");
+    assert.equal(set.classes["muted-text"].WebkitLineClamp, "2");
+    assert.deepEqual(set.rules.map((r) => r.selector), [".stat-card:hover", ".stat-card .stat-value", ".stat-card", ".stat-card .stat-value"]);
+    assert.deepEqual(set.definedClasses.sort(), ["muted-text", "stat-card", "stat-value"]);
+    assert.match(set.css, /^\.stat-card \{\n {2}padding: var\(--space-3\);[\s\S]*\n {2}&:hover \{\n {4}background: #000080;/m, "nested text comes back");
+    // vars/classes patches merge; null removes.
+    const merged = await ok(B, "update_root_css", { vars: { "--space-3": "14px", "--unused": "1px" }, classes: { pill: { borderRadius: 999 } } });
+    assert.equal(merged.vars["--space-3"], "14px");
+    assert.equal(merged.classes.pill.borderRadius, "999px", "numbers become px like inline styles");
+    await ok(B, "update_root_css", { vars: { "--unused": null, "--space-3": "12px" }, classes: { pill: null } });
+    assert.equal((await ok(B, "get_root_css")).classes.pill, undefined);
+    const basic = await ok(B, "get_basic_info");
+    assert.deepEqual(basic.rootCss.classes.sort(), ["muted-text", "stat-card", "stat-value"]);
+    assert.ok(basic.rootCss.vars.includes("--color-primary"));
+    assert.match(await ok(B, "get_guide"), /## Root CSS[\s\S]*&:hover[\s\S]*@media/);
+
+    // Bad root CSS fails clearly and changes nothing.
+    const before = (await ok(B, "get_root_css")).css;
+    await fails(B, "update_root_css", { css: "#hero { color: red; }" }, /ids and attribute selectors/);
+    await fails(B, "update_root_css", { css: "@supports (display: grid) { .x { color: red; } }" }, /@supports isn't supported/);
+    await fails(B, "update_root_css", { css: ":root { color: red; }" }, /only holds variables/);
+    await fails(B, "update_root_css", { css: ".x { color: red;" }, /Missing "\}"/);
+    await fails(B, "update_root_css", { vars: { primary: "#000" } }, /--color-primary/);
+    await fails(B, "update_root_css", { vars: { "--x": "red; } body { display: none" } }, /Unsafe value/);
+    await fails(B, "update_root_css", { classes: { "1bad": { color: "red" } } }, /start with a letter/);
+    assert.equal((await ok(B, "get_root_css")).css, before);
+
+    // Layers use the classes and variables; their own styles only hold overrides.
+    const res = await ok(B, "write_html", {
+      parentId: section,
+      html: `<div data-name="Stat Card" class="stat-card" style="gap: 4px"><span data-name="Stat Value" class="stat-value">42</span></div>
+             <div data-name="Stat Card" class="stat-card ghost-class">Two</div>
+             <p data-name="Note" class="muted-text" style="color: #0000FF; margin: var(--nope)">Note</p>`,
+    });
+    const [one, two, note] = res.created.map((c) => c.id);
+    const value = (await ok(B, "get_children", { nodeId: one }))[0].id;
+    assert.deepEqual((await ok(B, "get_node_info", { nodeId: one })).classes, ["stat-card"]);
+    assert.deepEqual((await ok(B, "get_node_info", { nodeId: value })).classes, ["stat-value"], "a class used only in a nested rule is defined");
+    assert.deepEqual((await ok(B, "get_node_info", { nodeId: two })).classes, ["stat-card"], "an undefined class is dropped");
+    assert.ok(res.warnings.some((w) => /\.ghost-class isn't in the root CSS/.test(w)), res.warnings.join("\n"));
+    assert.ok(res.warnings.some((w) => /#0000FF is the root variable --color-primary; use var\(--color-primary\)/.test(w)), "raw value that duplicates a variable is flagged");
+    assert.ok(res.warnings.some((w) => /var\(--nope\) isn't defined/.test(w)), "unknown variable is flagged");
+    const hinted = await ok(B, "update_styles", { updates: [{ nodeIds: [note], styles: { padding: "12px" } }] });
+    assert.ok(hinted.hints.some((h) => /padding: 12px is the root variable --space-3 \/ --radius; use var\(--space-3\) or var\(--radius\)/.test(h)), hinted.hints.join("\n"));
+    assert.deepEqual(await ok(B, "update_styles", { updates: [{ nodeIds: [note], styles: { padding: "var(--space-3)", color: "var(--color-primary)", margin: null } }] }), { updated: 1 });
+
+    // Strict tools reject classes that don't exist.
+    await fails(B, "create_node", { parentId: section, classes: ["nope"] }, /\.nope isn't defined in the root CSS/);
+    await fails(B, "update_node", { nodeId: one, classes: ["Bad Name"] }, /start with a letter/);
+    const extra = await ok(B, "create_node", { parentId: section, tag: "span", text: "Extra", classes: ["muted-text"] });
+    assert.deepEqual((await ok(B, "get_node_info", { nodeId: extra.id })).classes, ["muted-text"]);
+    assert.equal((await ok(B, "get_root_css")).usage["muted-text"], 2);
+    await ok(B, "update_node", { nodeId: extra.id, classes: [] });
+    assert.equal((await ok(B, "get_node_info", { nodeId: extra.id })).classes, undefined, "[] clears the list");
+    await ok(B, "delete_nodes", { nodeIds: [extra.id] });
+
+    // Screenshots/computed styles use the same cascade: base class → layer's own styles → states/@media/nested on top.
+    // The renderer's viewport is the artboard (800px wide), so the (max-width: 900px) breakpoint applies.
+    if (browser) {
+      const c = await ok(B, "get_computed_styles", { nodeIds: [one, two, note, value], properties: ["padding-top", "background-color", "border-top-left-radius", "gap", "color", "font-size"] });
+      assert.equal(c[one].styles["background-color"], "rgb(0, 0, 255)");
+      assert.equal(c[one].styles["padding-top"], "20px", "@media applies at the artboard's width");
+      assert.equal(c[value].styles["font-size"], "18px", "nested rule inside @media");
+      assert.equal(c[one].styles["border-top-left-radius"], "12px");
+      assert.equal(c[one].styles.gap, "4px", "the layer's own override applies on top of its class");
+      assert.equal(c[note].styles.color, "rgb(0, 0, 255)");
+      await ok(B, "update_root_css", { vars: { "--color-primary": "#00aa00" } });
+      const after = await ok(B, "get_computed_styles", { nodeIds: [one, two, note], properties: ["background-color", "color"] });
+      assert.equal(after[one].styles["background-color"], "rgb(0, 170, 0)", "one variable edit restyles every layer");
+      assert.equal(after[two].styles["background-color"], "rgb(0, 170, 0)");
+      assert.equal(after[note].styles.color, "rgb(0, 170, 0)");
+      await ok(B, "update_root_css", { vars: { "--color-primary": "#0000ff" } });
+    }
+
+    // The copy-code snippet carries only the root CSS it uses, in cascade order.
+    const snippet = await ok(B, "get_jsx", { nodeId: one, format: "html" });
+    assert.match(snippet, /--color-primary: #0000ff;/);
+    assert.doesNotMatch(snippet, /--font-ui|\.muted-text/, "unused variables and classes are left out");
+    const pos = (re) => snippet.search(re);
+    assert.ok(pos(/\.stat-card \{/) < pos(new RegExp(`\\.layer-${one} \\{`)) && pos(new RegExp(`\\.layer-${one} \\{`)) < pos(/\.stat-card:hover \{/), "base → own → states");
+    assert.match(snippet, /@media \(max-width: 900px\) \{\n {2}\.stat-card \{\n {4}padding: 20px;/, "exports are plain, un-nested CSS");
+    assert.match(snippet, new RegExp(`<div class="stat-card layer-${one}">`));
+    const jsx = await ok(B, "get_jsx", { nodeId: one, format: "jsx" });
+    assert.match(jsx, /Root CSS used by these components[\s\S]*\.stat-card \{[\s\S]*&:hover/);
+    assert.match(jsx, /className="stat-card" style=\{\{ gap: "4px" \}\}/);
+
+    // Undo puts the root CSS back too.
+    await ok(B, "update_root_css", { vars: { "--radius": "20px" } });
+    await ok(B, "undo");
+    assert.equal((await ok(B, "get_root_css")).vars["--radius"], "12px");
+    await ok(B, "redo");
+    await ok(B, "update_root_css", { vars: { "--radius": "12px" } });
+
+    // Removing a class takes it off every layer, in the same undo step.
+    await ok(B, "update_root_css", { classes: { "muted-text": null } });
+    assert.equal((await ok(B, "get_node_info", { nodeId: note })).classes, undefined);
+    await ok(B, "undo");
+    assert.deepEqual((await ok(B, "get_node_info", { nodeId: note })).classes, ["muted-text"], "undo restores the class and its use");
+    sharedIds = [one, two, note];
+  });
+
+  await t.test("project zip: every screen links one root styles.css", async () => {
+    const files = unzip(Buffer.from(await (await fetch(`${B}/api/export/zip?format=both`)).arrayBuffer()));
+    const names = Object.keys(files);
+    assert.deepEqual(names.filter((n) => n.endsWith(".css")), ["styles.css"], "exactly one stylesheet, at the root");
+    const css = files["styles.css"].toString();
+    const at = (re) => css.search(re);
+    assert.ok(at(/Root CSS: shared variables and classes/) < at(/box-sizing/) && at(/box-sizing/) < at(/Layer overrides/)
+      && at(/Layer overrides/) < at(/states, breakpoints and nested rules/), "root, reset, overrides, then states / media / nested");
+    assert.match(css, /:root \{[^}]*--color-primary: #0000ff;[^}]*--font-ui: 'Geist', sans-serif;/);
+    assert.equal((css.match(/^\.stat-card \{/gm) || []).length, 1, "the base class is defined once");
+    assert.match(css, /\.stat-card \{\n {2}padding: var\(--space-3\);\n {2}background: var\(--color-primary\);/);
+    assert.match(css, /\.stat-card:hover \{\n {2}background: #000080;\n\}/);
+    assert.match(css, /@media \(max-width: 900px\) \{\n {2}\.stat-card \{\n {4}padding: 20px;\n {2}\}\n\n {2}\.stat-card \.stat-value \{/);
+    assert.match(css, /body \{ margin: 0; \}/);
+    assert.doesNotMatch(css, /\{\s*\n\s*\}/, "no empty rules");
+    assert.match(css, /\/\* Layer overrides \*\/[\s\S]*\n\.stat-card-2 \{\n {2}gap: 4px;\n\}/, "an override gets its own name and never redefines the root class");
+
+    const screens = names.filter((n) => n.endsWith(".html") && n !== "index.html");
+    assert.ok(screens.length >= 2, "both artboards exported");
+    for (const n of screens) {
+      const html = files[n].toString();
+      assert.match(html, /<link rel="stylesheet" href="\.\.\/styles\.css">/, `${n} links the root stylesheet`);
+      assert.doesNotMatch(html, /<style|style="/, `${n} carries no CSS of its own`);
+    }
+    const desktop = files[screens.find((n) => n.endsWith("desktop.html"))].toString();
+    assert.match(desktop, /<div class="stat-card">Two<\/div>/, "a layer with no overrides only uses the shared class");
+    assert.match(desktop, /<div class="stat-card stat-card-2">\n\s*<span class="stat-value">42<\/span>/, "an override adds one extra class");
+    assert.match(desktop, /<p class="muted-text note">Note<\/p>/);
+    assert.match(css, /\.note \{\n {2}color: var\(--color-primary\);\n {2}padding: var\(--space-3\);\n\}/);
+    const jsx = files[screens.find((n) => n.endsWith("desktop.html")).replace(/html$/, "jsx")].toString();
+    assert.match(jsx, /^import "\.\.\/styles\.css";/);
+    assert.match(jsx, /className="stat-card">\{"Two"\}/);
+    assert.doesNotMatch(jsx, /style=\{\{/);
+    await ok(B, "delete_nodes", { nodeIds: sharedIds });
+  });
+
+  await t.test("preview: a screen opens as a live page sized to its artboard", async () => {
+    const shell = await fetch(`${B}/preview/${board}`);
+    assert.equal(shell.status, 200);
+    assert.match(shell.headers.get("cache-control") || "", /no-store/);
+    const html = await shell.text();
+    assert.match(html, new RegExp(`<iframe id="frame" title="Desktop · [^"]+" src="/preview/${board}/frame">`));
+    assert.match(html, /iframe \{[^}]*width: 800px;/, "the frame starts at the artboard's width so breakpoints match the canvas");
+    assert.match(html, /new EventSource\("\/events"\)/, "it listens for live changes");
+    // A layer previews the screen it belongs to.
+    assert.match(await (await fetch(`${B}/preview/${title}`)).text(), new RegExp(`src="/preview/${board}/frame"`));
+
+    const frame = await (await fetch(`${B}/preview/${board}/frame`)).text();
+    assert.match(frame, /^<!doctype html>/);
+    assert.match(frame, /<link rel="stylesheet" href="\/fonts\.css">/, "the font library loads like on the canvas");
+    assert.match(frame, new RegExp(`<div class="layer-${board}" data-layer="${board}">`));
+    assert.match(frame, /<h1 class="layer-\w+" data-layer="\w+">/);
+    assert.doesNotMatch(frame, /width:100%!important/);
+    assert.match(await (await fetch(`${B}/preview/${board}/frame?fill=1`)).text(), /body>\[data-layer\]\{width:100%!important/);
+
+    assert.equal((await fetch(`${B}/preview/ghost`)).status, 404);
+    assert.equal((await fetch(`${B}/preview/ghost/frame`)).status, 404);
+    const page = (await ok(B, "get_basic_info")).page.id;
+    assert.equal((await fetch(`${B}/preview/${page}`)).status, 400, "a page isn't a screen");
+  });
+
   await t.test("presence: edits mark nodes, finish_working_on_nodes clears them", async () => {
     await ok(B, "update_styles", { updates: [{ nodeIds: [title], styles: { color: "#ffffff" } }] });
     assert.ok((await ok(B, "get_basic_info")).agentWorkingOn.includes(title));
@@ -613,6 +806,10 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
     assert.equal((await ok(B, "get_node_info", { nodeId: id })).name.includes("</style>"), true, "the name itself is stored verbatim");
 
     const render = await (await fetch(`${B}/render/${board}`)).text();
+    for (const url of [`${B}/preview/${id}`, `${B}/preview/${id}/frame`]) {
+      const out = await (await fetch(url)).text();
+      assert.doesNotMatch(out, /<script>window\.__pwn|<img src=x onerror/, `${url} escapes names and text`);
+    }
     const html = await ok(B, "get_jsx", { nodeId: board, format: "html" });
     const zipRes = await fetch(`${B}/api/export/zip?format=both`);
     assert.equal(zipRes.status, 200);
@@ -661,6 +858,8 @@ test("persistence: projects and edits survive a restart", { timeout: 60_000 }, a
   const resolved = await ok(B, "resolve_comment", { id: thread.id });
   await ok(B, "delete_nodes", { nodeIds: [gone] });
   await ok(B, "add_font", { family: "Inter" });
+  await ok(B, "update_root_css", { css: ":root { --brand: #0000ff; } .saved { color: var(--brand); &:hover { color: #000; } @media (max-width: 600px) { color: red; } }" });
+  await ok(B, "write_html", { parentId: ab.id, html: `<p data-name="Shared text" class="saved">Shared</p>` });
   await sleep(300);
 
   // Restart against the same data directory.
@@ -697,6 +896,12 @@ test("persistence: projects and edits survive a restart", { timeout: 60_000 }, a
   assert.equal(reloaded.resolvedAt, resolved.resolvedAt, "resolved time survives a restart");
   assert.equal(reloaded.pageId, info.page.id, "page survives a restart");
   assert.equal(reloaded.layerName, "Doomed", "layer name survives a restart");
+  const root = await ok(B2, "get_root_css");
+  assert.deepEqual(root.vars, { "--brand": "#0000ff" }, "root CSS survives a restart");
+  assert.deepEqual(root.classes, { saved: { color: "var(--brand)" } });
+  assert.deepEqual(root.rules, [{ selector: ".saved:hover", styles: { color: "#000" } }, { selector: ".saved", media: "(max-width: 600px)", styles: { color: "red" } }], "states and @media survive a restart");
+  const [shared] = await ok(B2, "find_nodes", { query: "Shared text" });
+  assert.deepEqual((await ok(B2, "get_node_info", { nodeId: shared.id })).classes, ["saved"]);
 });
 
 test("startup survives a corrupt project file and reports it clearly", { timeout: 60_000 }, async (t) => {

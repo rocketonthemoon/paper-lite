@@ -12,7 +12,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
   HttpError, ID_RE, SVG_TAGS, VOID_TAGS, cleanName, cleanTag, emptyPage, emptyProject, lenientMerge, mergeAttrs, mergeStyles,
-  newId, normalizeProject,
+  newId, normalizeProject, emptyRootCss, mergeRootCss, rootCssText, rootCssFlat, rootBaseClasses, definedRootClasses,
+  isBaseRule, rootClassesIn, cleanClassList, varsIn,
 } from "./model.js";
 import { FontLibrary, familiesIn, renameWithRetry } from "./fonts.js";
 import { htmlToSpecs } from "./html-import.js";
@@ -149,7 +150,7 @@ function buildPreview(doc) {
     copySub(id);
     rootIds.push(id);
   }
-  return { bg, rootIds, nodes };
+  return { bg, rootIds, nodes, rootCss: doc.rootCss || emptyRootCss() };
 }
 
 async function projectPreview(id) {
@@ -266,6 +267,7 @@ function docSnapshot(doc = state) {
     pages: doc.pages,
     rootId: doc.rootId,
     nodes: doc.nodes,
+    rootCss: doc.rootCss || emptyRootCss(),
   });
 }
 
@@ -477,6 +479,7 @@ function diffNodeIds(before, after) {
       a.parentId !== b.parentId ||
       JSON.stringify(a.styles) !== JSON.stringify(b.styles) ||
       JSON.stringify(a.attrs) !== JSON.stringify(b.attrs) ||
+      JSON.stringify(a.classes) !== JSON.stringify(b.classes) ||
       JSON.stringify(a.children) !== JSON.stringify(b.children)
     ) {
       changed.push(id);
@@ -1054,11 +1057,13 @@ function createNode(input, source = "api", meta = null) {
   // Top-level nodes on a page are artboards placed in world space, like Paper frames.
   if (isPage(parent.id)) styles = mergeStyles(ARTBOARD_DEFAULTS, styles);
   const attrs = mergeAttrs({}, input.attrs, tag);
+  const classes = input.classes === undefined ? [] : definedClasses(cleanClassList(input.classes));
   const nodeName = cleanName(input.name, tag);
   const toolFallback = isPage(parent.id) ? "Draw Frame" : (tag === "p" && input.text !== undefined ? "Create Text" : "Draw Rect");
   return mutate(source, (s) => {
     const id = newId();
     s.nodes[id] = { id, name: nodeName, tag, parentId: parent.id, children: [], text: String(input.text ?? ""), styles, attrs };
+    if (classes.length) s.nodes[id].classes = classes;
     insertChild(s.nodes[parent.id], id, input.index);
     return s.nodes[id];
   }, meta || { tool: source === "mcp" ? "create_node" : toolFallback, target: nodeName });
@@ -1080,6 +1085,7 @@ function updateNode(id, patch, source = "api", meta = null) {
   if (patch.text !== undefined) next.text = String(patch.text);
   if (patch.styles !== undefined) next.styles = mergeStyles(patch.replaceStyles ? {} : node.styles, patch.styles);
   if (patch.attrs !== undefined) next.attrs = mergeAttrs(node.attrs, patch.attrs, next.tag ?? node.tag);
+  if (patch.classes !== undefined) next.classes = definedClasses(cleanClassList(patch.classes ?? []));
   const moving = patch.parentId !== undefined || patch.index !== undefined;
   if (moving) {
     if (isPage(id)) throw new HttpError(400, "Pages are reordered with update_page");
@@ -1096,10 +1102,12 @@ function updateNode(id, patch, source = "api", meta = null) {
   else if (patch.text !== undefined && patch.styles === undefined) uiTool = "Edit text";
   else if (patch.name !== undefined && patch.styles === undefined) uiTool = "Rename";
   else if (patch.styles !== undefined) uiTool = "Edit styles";
+  else if (patch.classes !== undefined) uiTool = "Edit classes";
   else if (patch.tag !== undefined) uiTool = "Change tag";
   return mutate(source, (s) => {
     const n = s.nodes[id];
     Object.assign(n, next);
+    if (n.classes && !n.classes.length) delete n.classes;
     if (moving) {
       const oldParent = s.nodes[n.parentId];
       oldParent.children = oldParent.children.filter((c) => c !== id);
@@ -1195,6 +1203,79 @@ function createArtboard({ name = "Frame", width = 390, height = 844, x, y, style
   );
 }
 
+// ---------------------------------------------------------------------------
+// Root CSS: project-wide variables + shared classes (see model.js)
+// ---------------------------------------------------------------------------
+function definedClasses(list) {
+  const defined = new Set(definedRootClasses(state.rootCss));
+  const missing = list.filter((c) => !defined.has(c));
+  if (missing.length) throw new HttpError(400, `${missing.map((c) => `.${c}`).join(", ")} ${missing.length === 1 ? "isn't" : "aren't"} defined in the root CSS; add ${missing.length === 1 ? "it" : "them"} with update_root_css first`);
+  return list;
+}
+
+function getRootCss(doc = state) {
+  const root = doc.rootCss || emptyRootCss();
+  const usage = {};
+  for (const n of Object.values(doc.nodes)) for (const c of n.classes || []) usage[c] = (usage[c] || 0) + 1;
+  // classes: the plain `.name { }` rules; rules: everything else (states, @media, nested, element selectors).
+  return { vars: root.vars, classes: rootBaseClasses(root), rules: root.rules.filter((r) => !isBaseRule(r)), definedClasses: definedRootClasses(root), css: rootCssText(root), usage };
+}
+
+// Patch the root CSS. `css` text is parsed and merged like vars/classes; replace: true starts from empty.
+// Removing a class also removes it from every layer that used it, in the same undo step.
+function updateRootCss({ vars, classes, css, replace = false } = {}, source = "api") {
+  const before = state.rootCss || emptyRootCss();
+  const next = mergeRootCss(before, { css, vars, classes }, { replace });
+  // Changed variables and rules, by name (a rule is named by its selector and @media).
+  const ruleKey = (r) => (r.media ? `@media ${r.media} { ${r.selector} }` : r.selector);
+  const ruleMap = (root) => {
+    const m = new Map();
+    for (const r of root.rules) m.set(ruleKey(r), JSON.stringify([m.get(ruleKey(r)), r.styles]));
+    return m;
+  };
+  const rb = ruleMap(before), rn = ruleMap(next);
+  const changed = [
+    ...Object.keys({ ...before.vars, ...next.vars }).filter((k) => before.vars[k] !== next.vars[k]),
+    ...[...new Set([...rb.keys(), ...rn.keys()])].filter((k) => rb.get(k) !== rn.get(k)),
+  ];
+  const stillDefined = new Set(definedRootClasses(next));
+  const dropped = definedRootClasses(before).filter((c) => !stillDefined.has(c));
+  const touchedIds = [];
+  mutate(source, (s) => {
+    s.rootCss = next;
+    if (dropped.length) {
+      for (const n of Object.values(s.nodes)) {
+        if (!n.classes?.some((c) => dropped.includes(c))) continue;
+        n.classes = n.classes.filter((c) => !dropped.includes(c));
+        if (!n.classes.length) delete n.classes;
+        touchedIds.push(n.id);
+      }
+    }
+  }, { tool: source === "mcp" ? "update_root_css" : "Edit root CSS", target: changed.length ? `Root CSS · ${changed.slice(0, 3).join(", ")}${changed.length > 3 ? "…" : ""}` : "Root CSS", nodeIds: touchedIds });
+  return { ...getRootCss(), changed, removedFromLayers: touchedIds.length || undefined };
+}
+
+// Nudges for agents: hard-coded values that already exist as a root variable, and var() names that don't exist.
+function rootCssHints(nodeIds, doc = state) {
+  const root = doc.rootCss || emptyRootCss();
+  // Several variables can share a value (--space-3 and --radius both 12px); name them all.
+  const byValue = new Map();
+  for (const [k, v] of Object.entries(root.vars)) byValue.set(String(v).toLowerCase(), [...(byValue.get(String(v).toLowerCase()) || []), k]);
+  const hints = new Set();
+  for (const id of nodeIds) {
+    const n = doc.nodes[id];
+    if (!n) continue;
+    for (const [k, v] of Object.entries(n.styles)) {
+      if (doc.pages.includes(n.parentId) && (k === "left" || k === "top" || k === "position")) continue;
+      const known = byValue.get(String(v).toLowerCase());
+      if (known) hints.add(`${k}: ${v} is the root variable ${known.join(" / ")}; use ${known.map((x) => `var(${x})`).join(" or ")} so it stays shared`);
+      for (const ref of varsIn(v)) if (!(ref in root.vars)) hints.add(`${n.name}: var(${ref}) isn't defined in the root CSS (add it with update_root_css)`);
+    }
+    if (hints.size >= 20) break;
+  }
+  return [...hints].slice(0, 20);
+}
+
 // Insert a parsed HTML spec tree (lenient: bad tags/styles/attrs are dropped with warnings). Call inside mutate/batch.
 function addSubtree(spec, parentId, index, warnings) {
   const parent = getNode(parentId);
@@ -1217,6 +1298,15 @@ function addSubtree(spec, parentId, index, warnings) {
   const text = String(spec.text ?? "");
   if (noText && text.trim()) warnings.push(`${label}: <${tag}> can't hold text; dropped "${text.length > 40 ? `${text.slice(0, 37)}…` : text}"`);
   state.nodes[id] = { id, name: label, tag, parentId: parent.id, children: [], text: noText ? "" : text, styles, attrs };
+  let classes = [];
+  for (const c of spec.classes || []) {
+    try { classes = cleanClassList([...classes, c]); } catch (err) { warnings.push(`${label}: ${err.message}`); }
+  }
+  const defined = new Set(definedRootClasses(state.rootCss));
+  const missing = classes.filter((c) => !defined.has(c));
+  if (missing.length) warnings.push(`${label}: ${missing.map((c) => `.${c}`).join(", ")} ${missing.length === 1 ? "isn't" : "aren't"} in the root CSS; add ${missing.length === 1 ? "it" : "them"} with update_root_css first. Dropped`);
+  classes = classes.filter((c) => !missing.includes(c));
+  if (classes.length) state.nodes[id].classes = classes;
   insertChild(state.nodes[parent.id], id, index);
   for (const child of spec.children || []) {
     // Lenient like the rest of write_html: a nested element that couldn't render where it was written is skipped
@@ -1260,6 +1350,8 @@ function writeHtml({ html, parentId, targetNodeId, mode = "insert-children", ind
     return specs.map((sp, i) => addSubtree(sp, parent, at === undefined ? undefined : at + i, warnings));
   }, { tool: "write_html", target: targetLabel });
   const countAll = (id) => 1 + state.nodes[id].children.reduce((a, c) => a + countAll(c), 0);
+  const subtree = (id) => [id, ...state.nodes[id].children.flatMap(subtree)];
+  warnings.push(...rootCssHints(created.flatMap(subtree)));
   return {
     created: created.map((id) => ({ id, name: state.nodes[id].name, tag: state.nodes[id].tag })),
     layers: created.reduce((a, id) => a + countAll(id), 0),
@@ -1440,18 +1532,107 @@ function usedFonts(rootIds, doc = state) {
   return [...used].filter((f) => library.has(f.toLowerCase()));
 }
 
-function toHtml(nodeId, { fontBase = PUBLIC_URL, filesBase, doc = state } = {}) {
+const RESET_CSS = "*, *::before, *::after { box-sizing: border-box; }\nbutton { font: inherit; color: inherit; }";
+
+// The part of the root CSS a set of layers actually uses: rules whose classes those layers use (rules without
+// classes, like `li:first-child`, always count), plus every variable they reference (following var() chains).
+function usedRootCss(rootIds, doc = state) {
+  const root = doc.rootCss || emptyRootCss();
+  const used = new Set(), vars = new Set();
+  const addVars = (v) => varsIn(v).forEach((ref) => {
+    if (vars.has(ref)) return;
+    vars.add(ref);
+    if (ref in root.vars) addVars(root.vars[ref]);
+    for (const r of root.rules) if (r.selector === ":root" && ref in r.styles) addVars(r.styles[ref]);
+  });
+  const walk = (id) => {
+    const n = doc.nodes[id];
+    if (!n) return;
+    (n.classes || []).forEach((c) => used.add(c));
+    Object.values(n.styles).forEach(addVars);
+    n.children.forEach(walk);
+  };
+  rootIds.forEach(walk);
+  const applies = (r) => r.selector !== ":root" && r.selector.split(",").some((part) => rootClassesIn(part).every((c) => used.has(c)));
+  const rules = root.rules.filter(applies);
+  for (const r of rules) for (const [k, v] of Object.entries(r.styles)) { if (k.startsWith("--")) vars.add(k); addVars(v); }
+  const keepVars = (st) => Object.fromEntries(Object.entries(st).filter(([k]) => vars.has(k)));
+  const out = [];
+  for (const r of root.rules) {
+    if (r.selector !== ":root") { if (rules.includes(r)) out.push(r); continue; }
+    const styles = keepVars(r.styles); // :root variables inside @media, e.g. a dark theme
+    if (Object.keys(styles).length) out.push({ ...r, styles });
+  }
+  return { vars: keepVars(root.vars), rules: out };
+}
+
+const layerClasses = (n, doc = state) => {
+  const defined = new Set(definedRootClasses(doc.rootCss));
+  return (n.classes || []).filter((c) => defined.has(c));
+};
+
+// Cascade, everywhere a design is rendered (canvas, screenshots, exports):
+//   :root variables → plain .class rules → each layer's own styles → states, @media and nested rules on top.
+// So a layer's own styles override its base classes, and :hover / breakpoints still apply over them.
+function cssLayers(root, ownCss) {
+  const vars = Object.entries(root.vars || {});
+  return {
+    vars: vars.length ? `:root {\n${vars.map(([k, v]) => `  ${k}: ${v};`).join("\n")}\n}` : "",
+    base: rootCssFlat(root.rules.filter(isBaseRule)),
+    own: ownCss,
+    contextual: rootCssFlat(root.rules.filter((r) => !isBaseRule(r))),
+  };
+}
+
+// One stylesheet for a whole export: the root CSS, the reset, layer overrides, then the root's states / media / nested
+// rules. Layers with identical overrides share one rule, named after the first layer that uses it.
+function sharedSheet(doc = state) {
+  const byDecl = new Map(), classNames = new Set(definedRootClasses(doc.rootCss)), rules = [];
+  return {
+    classFor(n) {
+      const decl = Object.entries(exportStyles(n, doc)).map(([k, v]) => `  ${kebab(k)}: ${v};`).join("\n");
+      if (!decl) return null;
+      if (!byDecl.has(decl)) {
+        // Class names must start with a letter; "404 page" becomes "layer-404-page".
+        const raw = /^[a-z]/.test(slugName(n.name, "")) ? n.name : `layer ${n.name}`;
+        const cls = uniqueSlug(classNames, raw, n.tag);
+        byDecl.set(decl, cls);
+        rules.push(`.${cls} {\n${decl}\n}`);
+      }
+      return byDecl.get(decl);
+    },
+    css(fontCss = "") {
+      const l = cssLayers(doc.rootCss || emptyRootCss(), rules.join("\n\n"));
+      return [
+        fontCss,
+        l.vars || l.base ? `/* Root CSS: shared variables and classes */\n${[l.vars, l.base].filter(Boolean).join("\n\n")}` : "",
+        `${RESET_CSS}\nbody { margin: 0; }`,
+        l.own && `/* Layer overrides */\n${l.own}`,
+        l.contextual && `/* Root CSS: states, breakpoints and nested rules (they apply over layer overrides) */\n${l.contextual}`,
+      ].filter(Boolean).join("\n\n") + "\n";
+    },
+  };
+}
+
+// With a shared sheet the markup carries class names only; otherwise it's a self-contained snippet.
+// markIds tags every element with data-layer="<id>" so the renderer can find layers that have no class of their own.
+function toHtml(nodeId, { fontBase = PUBLIC_URL, filesBase, doc = state, sheet, markIds = false } = {}) {
   const roots = exportRoots(nodeId, doc);
   const css = [];
-  const markup = (id, depth) => {
-    const n = doc.nodes[id];
-    const pad = "  ".repeat(depth);
+  const ownClass = sheet ? (n) => sheet.classFor(n) : (n, id) => {
     const decl = Object.entries(exportStyles(n, doc)).map(([k, v]) => `  ${kebab(k)}: ${v};`).join("\n");
     // Unstyled layers get neither an empty rule nor a class nothing targets.
     // Layer names are free text: drop "*/" and angle brackets so a name can't end the comment or the <style> element.
-    if (decl) css.push(`/* ${n.name.replace(/\*\//g, "").replace(/[<>]/g, "")} */\n.layer-${id} {\n${decl}\n}`);
+    if (!decl) return null;
+    css.push(`/* ${n.name.replace(/\*\//g, "").replace(/[<>]/g, "")} */\n.layer-${id} {\n${decl}\n}`);
+    return `layer-${id}`;
+  };
+  const markup = (id, depth) => {
+    const n = doc.nodes[id];
+    const pad = "  ".repeat(depth);
+    const cls = [...layerClasses(n, doc), ownClass(n, id)].filter(Boolean).join(" ");
     const attrs = Object.entries(n.attrs || {}).map(([k, v]) => ` ${k}="${escHtml(v)}"`).join("");
-    const open = `${pad}<${n.tag}${decl ? ` class="layer-${id}"` : ""}${attrs}>`;
+    const open = `${pad}<${n.tag}${cls ? ` class="${cls}"` : ""}${markIds ? ` data-layer="${id}"` : ""}${attrs}>`;
     if (VOID_TAGS.has(n.tag)) return open;
     const kids = n.children.map((c) => markup(c, depth + 1));
     if (!kids.length) return `${open}${escHtml(n.text)}</${n.tag}>`;
@@ -1459,9 +1640,12 @@ function toHtml(nodeId, { fontBase = PUBLIC_URL, filesBase, doc = state } = {}) 
     return [open, ...text, ...kids, `${pad}</${n.tag}>`].join("\n");
   };
   const body = roots.map((id) => markup(id, 0)).join("\n\n");
+  if (sheet) return `${body}\n`;
   const fam = usedFonts(roots, doc);
   const fontCss = fam.length ? `${fonts.css({ families: fam, baseUrl: fontBase, filesBase })}\n\n` : "";
-  return `<style>\n${fontCss}*, *::before, *::after { box-sizing: border-box; }\nbutton { font: inherit; color: inherit; }\n\n${css.join("\n\n")}\n</style>\n\n${body}\n`;
+  const l = cssLayers(usedRootCss(roots, doc), css.join("\n\n"));
+  const styleText = [l.vars, l.base, RESET_CSS, l.own, l.contextual].filter(Boolean).join("\n\n");
+  return `<style>\n${fontCss}${styleText}\n</style>\n\n${body}\n`;
 }
 
 function componentName(name) {
@@ -1469,7 +1653,7 @@ function componentName(name) {
   return /^[A-Z]/.test(base) ? base : `Layer${base}`;
 }
 
-function toJsx(nodeId, { filesBase, doc = state } = {}) {
+function toJsx(nodeId, { filesBase, doc = state, sheet, cssHref = "../styles.css" } = {}) {
   const roots = exportRoots(nodeId, doc);
   const jsxText = (t) => `{${JSON.stringify(t)}}`;
   const jsxName = (k) => (k.startsWith("aria-") ? k : k.replace(/-([a-z])/g, (_, c) => c.toUpperCase()));
@@ -1477,16 +1661,25 @@ function toJsx(nodeId, { filesBase, doc = state } = {}) {
     const n = doc.nodes[id];
     const pad = "  ".repeat(depth);
     const styles = exportStyles(n, doc);
-    const styleProp = Object.keys(styles).length ? ` style={{ ${Object.entries(styles).map(([k, v]) => `${k}: ${JSON.stringify(v)}`).join(", ")} }}` : "";
+    const cls = [...layerClasses(n, doc), sheet && sheet.classFor(n)].filter(Boolean).join(" ");
+    const classProp = cls ? ` className="${cls}"` : "";
+    const styleProp = !sheet && Object.keys(styles).length ? ` style={{ ${Object.entries(styles).map(([k, v]) => `${k}: ${JSON.stringify(v)}`).join(", ")} }}` : "";
     const attrs = Object.entries(n.attrs || {}).map(([k, v]) => ` ${jsxName(k)}=${JSON.stringify(v)}`).join("");
-    const open = `${pad}<${n.tag}${attrs}${styleProp}`;
+    const open = `${pad}<${n.tag}${classProp}${attrs}${styleProp}`;
     if (VOID_TAGS.has(n.tag)) return `${open} />`;
     if (!n.children.length) return n.text ? `${open}>${jsxText(n.text)}</${n.tag}>` : `${open} />`;
     const text = n.text ? [`${pad}  ${jsxText(n.text)}`] : [];
     return [`${open}>`, ...text, ...n.children.map((c) => markup(c, depth + 1)), `${pad}</${n.tag}>`].join("\n");
   };
-  const fam = usedFonts(roots, doc);
-  const header = fam.length ? `/* Fonts used: ${fam.join(", ")}. Load them with:\n${fonts.css({ families: fam, baseUrl: PUBLIC_URL, filesBase })}\n*/\n\n` : "";
+  let header = "";
+  if (sheet) header = `import "${cssHref}";\n\n`;
+  else {
+    const fam = usedFonts(roots, doc);
+    // "*/" inside a value would end the comment early.
+    const root = rootCssText(usedRootCss(roots, doc)).replace(/\*\//g, "* /");
+    if (root) header += `/* Root CSS used by these components; put it in your global stylesheet:\n${root}\n*/\n\n`;
+    if (fam.length) header += `/* Fonts used: ${fam.join(", ")}. Load them with:\n${fonts.css({ families: fam, baseUrl: PUBLIC_URL, filesBase })}\n*/\n\n`;
+  }
   return header + roots.map((id) => `export function ${componentName(doc.nodes[id].name)}() {\n  return (\n${markup(id, 2)}\n  );\n}`).join("\n\n") + "\n";
 }
 
@@ -1592,6 +1785,8 @@ async function exportProjectZip(projectId, format = "html") {
   const wantJsx = format === "jsx" || format === "both";
   const entries = [];
   const usedPageDirs = new Set(["fonts"]);
+  // Every screen links one root stylesheet instead of carrying its own copy of the CSS.
+  const sheet = sharedSheet(doc);
   const allFamilies = new Set();
   const manifest = [];
 
@@ -1611,17 +1806,20 @@ async function exportProjectZip(projectId, format = "html") {
       usedFonts([abId], doc).forEach((f) => allFamilies.add(f));
       const slug = uniqueSlug(usedFiles, ab.name, `screen-${ai + 1}`);
       if (wantHtml) {
-        const body = toHtml(abId, { filesBase: "../fonts", doc });
-        const html = `<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1">\n<title>${escHtml(ab.name)} · ${escHtml(doc.name)}</title>\n</head>\n<body style="margin:0">\n${body}</body>\n</html>\n`;
+        const body = toHtml(abId, { doc, sheet });
+        const html = `<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1">\n<title>${escHtml(ab.name)} · ${escHtml(doc.name)}</title>\n<link rel="stylesheet" href="../styles.css">\n</head>\n<body>\n${body}</body>\n</html>\n`;
         entries.push({ name: `${pageDir}/${slug}.html`, data: html });
       }
       if (wantJsx) {
-        entries.push({ name: `${pageDir}/${slug}.jsx`, data: toJsx(abId, { filesBase: "../fonts", doc }) });
+        entries.push({ name: `${pageDir}/${slug}.jsx`, data: toJsx(abId, { doc, sheet }) });
       }
       items.push({ name: ab.name, fileBase: `${pageDir}/${slug}`, width: ab.styles.width || "auto", height: ab.styles.height || "auto" });
     }
     manifest.push({ name: page.name, dir: pageDir, items });
   }
+
+  const fontCss = allFamilies.size ? fonts.css({ families: [...allFamilies], filesBase: "fonts" }) : "";
+  entries.push({ name: "styles.css", data: sheet.css(fontCss) });
 
   // Bundle uploaded font files used anywhere in the project so exported HTML works offline.
   const fontFiles = allFamilies.size ? fonts.uploadedFor([...allFamilies]) : [];
@@ -1701,6 +1899,7 @@ const mcpContext = {
   urls: { ui: PUBLIC_URL, mcp: `${PUBLIC_URL}/mcp` },
   getNode, isPage, pageOf, artboardOf, artboardSize, outline, exportCode, renderer,
   createNode, updateNode, deleteNode, duplicateNode, createArtboard, writeHtml,
+  rootCss: { get: () => getRootCss(), update: (patch) => updateRootCss(patch, "mcp"), hints: (ids) => rootCssHints(ids) },
   batch: (source, fn, meta) => batch(source, fn, meta),
   undo: (source) => stepHistory(source, "undo"),
   redo: (source) => stepHistory(source, "redo"),
@@ -1810,6 +2009,8 @@ app.post("/api/state", wrap((req) => {
 }));
 
 // Nodes
+app.get("/api/root-css", wrap(() => getRootCss()));
+app.patch("/api/root-css", wrap((req) => updateRootCss(req.body || {}, who(req))));
 app.post("/api/nodes", wrap((req) => createNode(req.body || {}, who(req))));
 app.patch("/api/nodes/:id", wrap((req) => updateNode(req.params.id, req.body || {}, who(req))));
 app.delete("/api/nodes/:id", wrap((req) => deleteNode(req.params.id, who(req))));
@@ -1909,10 +2110,129 @@ app.get("/fonts/files/:file", (req, res) => {
 });
 
 // Rendering, export
+// Live preview of one screen in its own browser tab: /preview/:id is a slim shell that shows the screen in an iframe
+// sized to the artboard (so @media breakpoints match the canvas), can switch to filling the window, and reloads the
+// frame when the project changes. /preview/:id/frame is the screen itself, the same HTML + CSS as the export.
+function previewTarget(id) {
+  const ab = artboardOf(id);
+  return { ab, node: state.nodes[ab] };
+}
+app.get("/preview/:id/frame", wrap((req, res) => {
+  const { ab, node } = previewTarget(req.params.id);
+  const fill = req.query.fill === "1";
+  res.type("html").set("Cache-Control", "no-store").send(`<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escHtml(node.name)} · ${escHtml(state.name)}</title>
+<link rel="stylesheet" href="/fonts.css">
+<style>html,body{margin:0}${fill ? "body>[data-layer]{width:100%!important;min-height:100vh}" : ""}</style></head>
+<body>${toHtml(ab, { fontBase: "", markIds: true })}</body></html>`);
+}));
+app.get("/preview/:id", wrap((req, res) => {
+  const { ab, node } = previewTarget(req.params.id);
+  const { width } = artboardSize(ab);
+  const pageBg = state.nodes[pageOf(ab)]?.styles.backgroundColor || "#eef2f6";
+  const title = `${escHtml(node.name)} · ${escHtml(state.name)}`;
+  res.type("html").set("Cache-Control", "no-store").send(`<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Preview · ${title}</title>
+<link rel="icon" href="/favicon.svg">
+<style>
+  html, body { margin: 0; height: 100%; }
+  body { display: flex; flex-direction: column; background: ${escHtml(pageBg)}; font: 13px/1.4 system-ui, -apple-system, sans-serif; color: #0a0b0d; }
+  header { display: flex; align-items: center; gap: 10px; height: 44px; padding: 0 14px; background: #fff; border-bottom: 1px solid #dde3e9; flex-shrink: 0; }
+  header b { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  header .muted { color: #787878; white-space: nowrap; }
+  .live { display: inline-flex; align-items: center; gap: 6px; color: #787878; font-size: 12px; margin-left: auto; white-space: nowrap; }
+  .live i { width: 7px; height: 7px; border-radius: 50%; background: #c4c9cf; }
+  .live.on i { background: #22a06b; }
+  .seg { display: inline-flex; border: 1px solid #dde3e9; border-radius: 8px; overflow: hidden; flex-shrink: 0; }
+  .seg button { border: 0; background: #fff; padding: 0 10px; height: 28px; font: inherit; color: #0a0b0d; cursor: pointer; }
+  .seg button + button { border-left: 1px solid #dde3e9; }
+  .seg button[aria-pressed="true"] { background: #f4f6f8; font-weight: 600; }
+  a.raw { color: #0000ff; text-decoration: none; white-space: nowrap; }
+  a.raw:hover { text-decoration: underline; }
+  main { flex: 1; overflow: auto; display: flex; justify-content: center; align-items: flex-start; padding: 32px 16px; }
+  main.fill { padding: 0; }
+  iframe { border: 0; background: #fff; display: block; width: ${width}px; max-width: none; height: 200px; box-shadow: 0 0 0 1px #dde3e9; }
+  main.fill iframe { width: 100%; box-shadow: none; }
+  .gone { margin: auto; color: #787878; }
+</style></head>
+<body>
+<header>
+  <b>${escHtml(node.name)}</b><span class="muted">${escHtml(state.name)} · ${width}px</span>
+  <div class="seg" role="group" aria-label="Preview width">
+    <button type="button" id="w-screen" aria-pressed="true">Screen width</button><button type="button" id="w-fill" aria-pressed="false">Fill window</button>
+  </div>
+  <a class="raw" id="raw" href="/preview/${escHtml(ab)}/frame" target="_blank" rel="noopener">Open page only ↗</a>
+  <span class="live" id="live"><i></i><span>Connecting…</span></span>
+</header>
+<main id="main"><iframe id="frame" title="${title}" src="/preview/${escHtml(ab)}/frame"></iframe></main>
+<script>
+"use strict";
+const AB = ${JSON.stringify(ab)};
+const frame = document.getElementById("frame"), main = document.getElementById("main"), live = document.getElementById("live");
+let fill = false, scroll = 0, timer = 0, lastKey = "", gone = false, fontsSeen = false;
+const src = () => "/preview/" + encodeURIComponent(AB) + "/frame" + (fill ? "?fill=1" : "");
+// Grow the frame to its content so the page scrolls like the real screen would.
+function fit() {
+  try {
+    const doc = frame.contentDocument;
+    if (!doc || !doc.body) return;
+    if (fill) { frame.style.height = Math.max(main.clientHeight, doc.documentElement.scrollHeight) + "px"; return; }
+    frame.style.height = doc.documentElement.scrollHeight + "px";
+  } catch { /* cross-origin: keep the last height */ }
+}
+frame.addEventListener("load", () => {
+  fit();
+  main.scrollTop = scroll;
+  try { new ResizeObserver(fit).observe(frame.contentDocument.documentElement); } catch {}
+});
+function reload() {
+  scroll = main.scrollTop;
+  frame.src = src();
+}
+function setFill(on) {
+  fill = on;
+  main.classList.toggle("fill", on);
+  document.getElementById("w-fill").setAttribute("aria-pressed", String(on));
+  document.getElementById("w-screen").setAttribute("aria-pressed", String(!on));
+  document.getElementById("raw").href = src();
+  reload();
+}
+document.getElementById("w-screen").onclick = () => setFill(false);
+document.getElementById("w-fill").onclick = () => setFill(true);
+window.addEventListener("resize", fit);
+// Reload when this screen (or the root CSS / fonts) changes, not on every edit elsewhere.
+function screenKey(s) {
+  const out = [];
+  const walk = (id) => { const n = s.nodes[id]; if (!n) return; out.push(id, n.tag, n.text, n.styles, n.attrs, n.classes); n.children.forEach(walk); };
+  walk(AB);
+  return out.length ? JSON.stringify([out, s.rootCss]) : "";
+}
+const es = new EventSource("/events");
+es.addEventListener("open", () => { live.classList.add("on"); live.lastChild.textContent = "Live"; });
+es.addEventListener("error", () => { live.classList.remove("on"); live.lastChild.textContent = "Reconnecting…"; });
+es.addEventListener("state", (ev) => {
+  const { state } = JSON.parse(ev.data);
+  const key = state.nodes && state.nodes[AB] ? screenKey(state) : "";
+  if (!key) { gone = true; main.innerHTML = '<p class="gone">This screen is no longer in the open project.</p>'; return; }
+  if (gone) return location.reload(); // it came back (undo, or its project was reopened)
+  if (key === lastKey) return;
+  const first = !lastKey;
+  lastKey = key;
+  if (first) return;
+  clearTimeout(timer);
+  timer = setTimeout(reload, 120);
+});
+// The first fonts event is the snapshot sent on connect; later ones mean the library changed.
+es.addEventListener("fonts", () => { if (!fontsSeen) { fontsSeen = true; return; } if (lastKey && !gone) { clearTimeout(timer); timer = setTimeout(reload, 120); } });
+</script>
+</body></html>`);
+}));
 app.get("/render/:id", wrap((req, res) => {
   const ab = artboardOf(req.params.id);
   res.type("html").send(`<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="/fonts.css">
-<style>html,body{margin:0;background:transparent}</style></head><body>${toHtml(ab, { fontBase: "" })}</body></html>`);
+<style>html,body{margin:0;background:transparent}</style></head><body>${toHtml(ab, { fontBase: "", markIds: true })}</body></html>`);
 }));
 app.get("/api/export", wrap((req, res) => {
   res.type("text/plain").send(exportCode(String(req.query.format || "html"), req.query.nodeId ? String(req.query.nodeId) : undefined));
