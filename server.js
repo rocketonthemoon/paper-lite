@@ -1842,19 +1842,57 @@ function sharedSheet(doc = state) {
   };
 }
 
+// A subtree's identity for de-duplication: same tags, attributes, text, export styles and classes all the way down.
+function subtreeKeys(doc) {
+  const memo = new Map();
+  const keyOf = (id) => {
+    if (memo.has(id)) return memo.get(id);
+    const n = doc.nodes[id];
+    const key = JSON.stringify([n.tag, n.attrs || {}, n.text || "", exportStyles(n, doc), n.classes || [], n.children.map(keyOf)]);
+    memo.set(id, key);
+    return key;
+  };
+  return keyOf;
+}
+
+// Root CSS selectors that reach into SVG content (`.btn:hover path`, `svg *`) wouldn't match inside a <use>
+// copy, so icons are only shared through <symbol>/<use> when nothing in the root CSS targets SVG elements.
+const SVG_SELECTOR_RE = /(^|[\s>+~(,])(svg|g|path|circle|rect|ellipse|line|polyline|polygon|\*)(?![\w-])/;
+const canShareSvgs = (doc) => !(doc.rootCss?.rules || []).some((r) => SVG_SELECTOR_RE.test(r.selector));
+
 // With a shared sheet the markup carries class names only; otherwise it's a self-contained snippet.
 // markIds tags every element with data-layer="<id>" so the renderer can find layers that have no class of their own.
+// Exports stay small: layers with identical styles share one rule (named after the first such layer), and an SVG
+// that appears more than once is written once as a <symbol> and reused with <use>.
 function toHtml(nodeId, { fontBase = PUBLIC_URL, filesBase, doc = state, sheet, markIds = false } = {}) {
   const roots = exportRoots(nodeId, doc);
   const css = [];
+  const byDecl = new Map();
   const ownClass = sheet ? (n) => sheet.classFor(n) : (n, id) => {
     const decl = Object.entries(exportStyles(n, doc)).map(([k, v]) => `  ${kebab(k)}: ${v};`).join("\n");
     // Unstyled layers get neither an empty rule nor a class nothing targets.
-    // Layer names are free text: drop "*/" and angle brackets so a name can't end the comment or the <style> element.
     if (!decl) return null;
-    css.push(`/* ${n.name.replace(/\*\//g, "").replace(/[<>]/g, "")} */\n.layer-${id} {\n${decl}\n}`);
-    return `layer-${id}`;
+    if (!byDecl.has(decl)) {
+      byDecl.set(decl, `layer-${id}`);
+      // Layer names are free text: drop "*/" and angle brackets so a name can't end the comment or the <style> element.
+      css.push(`/* ${n.name.replace(/\*\//g, "").replace(/[<>]/g, "")} */\n.layer-${id} {\n${decl}\n}`);
+    }
+    return byDecl.get(decl);
   };
+
+  // SVGs (outermost ones) that occur at least twice in what's exported.
+  const keyOf = subtreeKeys(doc);
+  const svgCount = new Map();
+  if (!markIds && canShareSvgs(doc)) {
+    const walk = (id) => {
+      const n = doc.nodes[id];
+      if (n.tag === "svg") svgCount.set(keyOf(id), (svgCount.get(keyOf(id)) || 0) + 1);
+      else n.children.forEach(walk);
+    };
+    roots.forEach(walk);
+  }
+  const symbols = new Map(); // subtree key -> { id, markup }
+
   const markup = (id, depth) => {
     const n = doc.nodes[id];
     const pad = "  ".repeat(depth);
@@ -1862,12 +1900,25 @@ function toHtml(nodeId, { fontBase = PUBLIC_URL, filesBase, doc = state, sheet, 
     const attrs = Object.entries(n.attrs || {}).map(([k, v]) => ` ${k}="${escHtml(v)}"`).join("");
     const open = `${pad}<${n.tag}${cls ? ` class="${cls}"` : ""}${markIds ? ` data-layer="${id}"` : ""}${attrs}>`;
     if (VOID_TAGS.has(n.tag)) return open;
+    if (n.tag === "svg" && n.children.length && svgCount.get(keyOf(id)) > 1) {
+      const key = keyOf(id);
+      if (!symbols.has(key)) {
+        const viewBox = n.attrs?.viewBox ? ` viewBox="${escHtml(n.attrs.viewBox)}"` : "";
+        const inner = n.children.map((c) => markup(c, 2)).join("\n");
+        symbols.set(key, { id: `icon-${symbols.size + 1}`, markup: `  <symbol id="icon-${symbols.size + 1}"${viewBox}>\n${inner}\n  </symbol>` });
+      }
+      return `${open}<use href="#${symbols.get(key).id}"/></svg>`;
+    }
     const kids = n.children.map((c) => markup(c, depth + 1));
     if (!kids.length) return `${open}${escHtml(n.text)}</${n.tag}>`;
     const text = n.text ? [`${pad}  ${escHtml(n.text)}`] : [];
     return [open, ...text, ...kids, `${pad}</${n.tag}>`].join("\n");
   };
-  const body = roots.map((id) => markup(id, 0)).join("\n\n");
+  let body = roots.map((id) => markup(id, 0)).join("\n\n");
+  if (symbols.size) {
+    const sprite = [...symbols.values()].map((s) => s.markup).join("\n");
+    body = `<svg width="0" height="0" style="position:absolute" aria-hidden="true">\n${sprite}\n</svg>\n\n${body}`;
+  }
   if (sheet) return `${body}\n`;
   const fam = usedFonts(roots, doc);
   const fontCss = fam.length ? `${fonts.css({ families: fam, baseUrl: fontBase, filesBase })}\n\n` : "";
