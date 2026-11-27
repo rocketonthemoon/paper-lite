@@ -95,6 +95,15 @@ const MAX_VARS = 400, MAX_RULES = 800, MAX_LAYER_CLASSES = 12;
 
 export const emptyRootCss = () => ({ vars: {}, rules: [] });
 
+// Validate raw property keys directly (trimming outer whitespace and accidental matching quotes, never JSON-stringifying).
+function cleanCssMapKey(raw) {
+  let k = String(raw ?? "").trim();
+  if (k.length >= 2 && ((k.startsWith("\"") && k.endsWith("\"")) || (k.startsWith("'") && k.endsWith("'")))) {
+    k = k.slice(1, -1).trim();
+  }
+  return k;
+}
+
 function cleanVarValue(name, value) {
   if (!VAR_NAME_RE.test(name)) throw new HttpError(400, `CSS variable names look like --color-primary: "${name}"`);
   return cleanStyleValue(name, typeof value === "number" ? String(value) : value);
@@ -130,10 +139,33 @@ function cleanRule(rule) {
 
 const sameRule = (a, b) => a.selector === b.selector && (a.media || "") === (b.media || "");
 
+function coalesceMatchingRule(rules, rule) {
+  let first = null;
+  const kept = [];
+  for (const r of rules) {
+    if (sameRule(r, rule)) {
+      if (!first) {
+        first = r;
+        kept.push(r);
+      } else {
+        first.styles = mergeRuleStyles(first.styles, r.styles, r.selector);
+      }
+    } else {
+      kept.push(r);
+    }
+  }
+  if (first) {
+    first.styles = mergeRuleStyles(first.styles, rule.styles, rule.selector);
+    return kept;
+  }
+  kept.push(rule);
+  return kept;
+}
+
 /**
  * Apply a root-CSS patch.
- * - css: root CSS text. With replace it becomes the whole root CSS, in order; otherwise each rule merges into the
- *   existing rule with the same selector and @media (or is appended) and :root variables merge.
+ * - css: root CSS text. With replace it becomes the whole root CSS, in order (coalescing duplicate @media rules);
+ *   otherwise each rule merges into the existing rule with the same selector and @media (or is appended) and :root variables merge.
  * - vars: { "--name": value | null }.
  * - classes: { name: { camelCase: value | null } | null }: the plain `.name { }` rule; null removes it.
  */
@@ -143,27 +175,37 @@ export function mergeRootCss(base, { css, vars, classes } = {}, { replace = fals
   out.rules ||= [];
   if (css !== undefined && css !== null) {
     const parsed = asHttp(() => RC.parse(css));
-    for (const [k, v] of Object.entries(parsed.vars)) out.vars[k] = cleanVarValue(k, v);
+    for (const [rawK, v] of Object.entries(parsed.vars)) {
+      const k = cleanCssMapKey(rawK);
+      out.vars[k] = cleanVarValue(k, v);
+    }
     for (const raw of parsed.rules) {
       const rule = cleanRule(raw);
-      const hit = replace ? null : out.rules.find((r) => sameRule(r, rule));
-      if (hit) hit.styles = mergeRuleStyles(hit.styles, rule.styles, rule.selector);
-      else out.rules.push(rule);
+      if (!replace || rule.media) {
+        out.rules = coalesceMatchingRule(out.rules, rule);
+      } else {
+        out.rules.push(rule);
+      }
     }
   }
-  for (const [name, value] of Object.entries(vars || {})) {
+  for (const [rawName, value] of Object.entries(vars || {})) {
+    const name = cleanCssMapKey(rawName);
+    if (!VAR_NAME_RE.test(name)) throw new HttpError(400, `CSS variable names look like --color-primary: "${name}"`);
     if (value === null || value === "") {
-      if (!VAR_NAME_RE.test(name)) throw new HttpError(400, `CSS variable names look like --color-primary: "${name}"`);
       delete out.vars[name];
     } else {
       out.vars[name] = cleanVarValue(name, value);
     }
   }
-  for (const [name, styles] of Object.entries(classes || {})) {
+  for (const [rawName, styles] of Object.entries(classes || {})) {
+    const name = cleanCssMapKey(rawName);
     if (!CLASS_NAME_RE.test(name)) throw new HttpError(400, `Class names start with a letter and use letters, digits, - or _: "${name}"`);
     const selector = `.${name}`;
-    if (styles === null) { out.rules = out.rules.filter((r) => !(r.selector === selector && !r.media)); continue; }
-    if (typeof styles !== "object") throw new HttpError(400, `Class "${name}" must be an object of camelCase styles`);
+    if (styles === null || styles === "") {
+      out.rules = out.rules.filter((r) => !(r.selector === selector && !r.media));
+      continue;
+    }
+    if (typeof styles !== "object" || Array.isArray(styles)) throw new HttpError(400, `Class "${name}" must be an object of camelCase styles`);
     const hit = out.rules.find((r) => r.selector === selector && !r.media);
     if (hit) hit.styles = mergeRuleStyles(hit.styles, styles, selector);
     else out.rules.push({ selector, styles: mergeRuleStyles({}, styles, selector) });
@@ -197,6 +239,66 @@ export function cleanClassList(value) {
 
 /** Variables referenced by a style value, e.g. "1px solid var(--line)" → ["--line"]. */
 export const varsIn = (value) => [...String(value ?? "").matchAll(/var\(\s*(--[\w-]+)/g)].map((m) => m[1]);
+
+// Whether a root CSS rule can match at least one node given the active class usage map.
+function ruleUsedByNodes(rule, usage) {
+  if (rule.selector === ":root") return true;
+  return RC.splitTop(rule.selector, ",").some((part) => {
+    const cls = rootClassesIn(part);
+    return cls.length === 0 || cls.every((c) => usage[c] > 0);
+  });
+}
+
+/** Compute class usage counts, unused classes, and unused :root variables (including transitive var() chains). */
+export function analyzeRootCssUsage(root, nodes = {}) {
+  const r = root || emptyRootCss();
+  const usage = {};
+  for (const n of Object.values(nodes || {})) {
+    for (const c of n?.classes || []) usage[c] = (usage[c] || 0) + 1;
+  }
+  const defined = definedRootClasses(r);
+  const unusedClasses = defined.filter((c) => !usage[c]);
+
+  const usedVars = new Set();
+  const addVars = (val) => {
+    for (const ref of varsIn(val)) {
+      if (usedVars.has(ref)) continue;
+      usedVars.add(ref);
+      if (ref in (r.vars || {})) addVars(r.vars[ref]);
+      for (const rule of r.rules || []) {
+        if (rule.selector === ":root" && ref in (rule.styles || {})) addVars(rule.styles[ref]);
+      }
+    }
+  };
+  for (const n of Object.values(nodes || {})) {
+    for (const val of Object.values(n?.styles || {})) addVars(val);
+  }
+  for (const rule of r.rules || []) {
+    if (rule.selector === ":root" || !ruleUsedByNodes(rule, usage)) continue;
+    for (const val of Object.values(rule.styles || {})) addVars(val);
+  }
+  const unusedVars = Object.keys(r.vars || {}).filter((k) => !usedVars.has(k));
+  return { usage, unusedClasses, unusedVars, usedVars };
+}
+
+/** Return a pruned copy of `root` with unreferenced class rules and unreferenced :root variables removed. */
+export function pruneUnusedRootCss(root, nodes = {}) {
+  const base = structuredClone(root || emptyRootCss());
+  const { usage } = analyzeRootCssUsage(base, nodes);
+  base.rules = (base.rules || []).filter((rule) => rule.selector === ":root" || ruleUsedByNodes(rule, usage));
+  const { usedVars } = analyzeRootCssUsage(base, nodes);
+  for (const k of Object.keys(base.vars || {})) {
+    if (!usedVars.has(k)) delete base.vars[k];
+  }
+  base.rules = base.rules.filter((rule) => {
+    if (rule.selector !== ":root") return true;
+    for (const k of Object.keys(rule.styles || {})) {
+      if (!usedVars.has(k)) delete rule.styles[k];
+    }
+    return Object.keys(rule.styles || {}).length > 0;
+  });
+  return base;
+}
 
 // Validate one property at a time so a single bad value is dropped (with a warning) instead of failing a whole import.
 export function lenientMerge(merge, obj, warnings, where) {
