@@ -1,6 +1,7 @@
 // Live sync and the right panel: the SSE connection (state patches, history, projects, presence, comments,
 // fonts, focus), the right panel tabs, and window.weft, the bridge the Svelte components read.
 import { ed } from "./state.js";
+import { answerMeasure } from "./measure.js";
 import { $, GENERIC_FONTS, SVG_TAGS, TAGS, TEXT_TAGS, VOID_TAGS, ago, api, clock, commentsPanelEl, elOf, expanded, inspector, num, plural, px, rightHead, toast, viewKey, world } from "./core.js";
 import { applyView, baseStylesOf, kebabCss, layerRows, render, renderLayers, resolveVars, rootOf, rulesUsing, updateOverlay } from "./render.js";
 import { classableStyles, copyText, ctxAction, downloadZip, hex6, inspectorAction, inspectorChange, inspectorFocusout, inspectorInput, inspectorKeydown, inspectorModel, renderInspector, renderRightHead, rightHeadModel } from "./inspector.js";
@@ -41,7 +42,7 @@ export function setRightTab(tab) {
 }
 
 export function connect() {
-  const es = new EventSource("/events");
+  const es = new EventSource("/events?role=editor"); // editor tabs also measure layers for get_computed_styles
   const live = $("#live");
   es.addEventListener("open", () => { live.classList.add("live"); $("#live-text").textContent = "Live · synced"; if (ed.S) shareSelection(); });
   es.addEventListener("error", () => { live.classList.remove("live"); $("#live-text").textContent = "Reconnecting…"; });
@@ -94,12 +95,15 @@ export function connect() {
     if (!dashEl.hidden) renderDashActivity();
   });
   es.addEventListener("fonts", (ev) => {
-    const { fonts, v } = JSON.parse(ev.data);
+    const { fonts, v, rev } = JSON.parse(ev.data);
     ed.fontLib = fonts || [];
+    ed.fontsRev = rev ?? 0;
     renderFontList();
     if (v) { $("#fonts-css").href = `/fonts.css?v=${v}`; document.fonts?.ready.then(updateOverlay); }
     if (ed.S && !ed.sel) renderInspector();
   });
+  // After any patches already received, so the answer reflects the version the server asked about.
+  es.addEventListener("measure", (ev) => serially(() => { answerMeasure(JSON.parse(ev.data)); }));
   es.addEventListener("presence", (ev) => {
     const data = JSON.parse(ev.data);
     ed.agentNodes = data.nodes || [];
