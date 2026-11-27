@@ -24,7 +24,7 @@ docker compose up -d --build    # or: podman compose up -d --build
 
 ```bash
 npm ci
-npm start
+npm start      # builds the editor UI into public/ first if needed
 ```
 
 Open [http://localhost:3000](http://localhost:3000). When running with Node, install Chrome, Chromium, or Edge for screenshots, or set `CHROME_PATH`.
@@ -88,7 +88,8 @@ If your client only supports stdio, start the server first, then use the relay:
 | [`renderer.js`](renderer.js) | Chrome DevTools Protocol client for screenshots and computed styles |
 | [`checkpoint-store.js`](checkpoint-store.js) | Checkpoints as commits in a per-project bare git repo ([isomorphic-git](https://isomorphic-git.org)) |
 | [`fonts.js`](fonts.js) | Uploaded fonts (WOFF2/WOFF/TTF/OTF), Google Fonts, and `/fonts.css` |
-| [`public/index.html`](public/index.html) | Browser canvas UI |
+| [`ui/`](ui/) | Browser canvas UI source (Vite + Svelte 5; `npm run build` writes `public/`). [`ui/index.html`](ui/index.html) holds the editor; panels are moving into Svelte components in [`ui/src/`](ui/src/) |
+| [`shared/root-css.js`](shared/root-css.js) | Root CSS parser/serialiser used by both the server and the editor (served at `/root-css.js`) |
 
 ## HTTP endpoints
 
@@ -138,8 +139,10 @@ Each project's checkpoints are commits in a git repo (`DATA_DIR/projects/<id>.gi
 ## Development
 
 ```bash
+npm run build  # build the editor UI: ui/ -> public/ (not committed)
+npm run dev:ui # editor with hot reload on :5173; run `npm start` alongside for the API on :3000
 npm run lint   # syntax, CSS/DOM checks, ESLint
-npm test       # unit, MCP tool coverage, integration, stdio relay, browser E2E
+npm test       # builds the UI, then unit, MCP tool coverage, integration, stdio relay, browser E2E
 ```
 
 Browser tests need Chrome or Chromium installed and are skipped if none is found.

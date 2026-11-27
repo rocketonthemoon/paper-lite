@@ -1,3 +1,11 @@
+# Build stage: compile the editor UI (ui/ -> public/). Only the built files are copied into the runtime image.
+FROM node:22-slim AS ui
+WORKDIR /build
+COPY package.json package-lock.json ./
+RUN npm ci --ignore-scripts
+COPY ui ./ui
+RUN npm run build
+
 FROM node:22-slim
 WORKDIR /app
 
@@ -36,7 +44,8 @@ RUN (npm ci --omit=dev || npm install --omit=dev) \
     && rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
               /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack /root/.npm
 COPY *.js ./
-COPY public ./public
+COPY shared ./shared
+COPY --from=ui /build/public ./public
 RUN mkdir -p /app/data && chown -R node:node /app/data
 USER node
 EXPOSE 3000

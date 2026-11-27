@@ -1,9 +1,9 @@
 export default [
   {
-    ignores: ["node_modules/**", "data/**"],
+    ignores: ["node_modules/**", "data/**", "public/**"],
   },
   {
-    files: ["*.js", "eslint.config.mjs", "test/*.js", "test/*.mjs"],
+    files: ["*.js", "eslint.config.mjs", "test/*.js", "test/*.mjs", "scripts/*.mjs", "ui/vite.config.js"],
     languageOptions: {
       ecmaVersion: 2024,
       sourceType: "module",
@@ -39,8 +39,22 @@ export default [
     },
   },
   {
-    files: ["public/root-css.js"],
+    files: ["shared/root-css.js"],
     languageOptions: { ecmaVersion: 2024, sourceType: "script", globals: { window: "readonly" } },
+    rules: {
+      "no-unused-vars": ["error", { caughtErrors: "none", argsIgnorePattern: "^_" }],
+      "no-undef": "error",
+      "no-redeclare": "error",
+      "no-dupe-keys": "error",
+    },
+  },
+  {
+    files: ["ui/src/**/*.js"],
+    languageOptions: {
+      ecmaVersion: 2024,
+      sourceType: "module",
+      globals: { window: "readonly", document: "readonly", console: "readonly", fetch: "readonly", setTimeout: "readonly", clearTimeout: "readonly", EventTarget: "readonly", CustomEvent: "readonly", confirm: "readonly" },
+    },
     rules: {
       "no-unused-vars": ["error", { caughtErrors: "none", argsIgnorePattern: "^_" }],
       "no-undef": "error",

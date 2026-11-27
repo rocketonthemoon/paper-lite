@@ -1,6 +1,6 @@
 // Canvas document model: validation of tags / styles / attributes, comments and normalisation of project documents.
 import { randomBytes } from "node:crypto";
-import "./public/root-css.js";
+import "./shared/root-css.js";
 
 export const ALLOWED_TAGS = new Set([
   "div", "section", "header", "footer", "nav", "main", "article", "aside",
@@ -79,7 +79,7 @@ export function mergeAttrs(base, patch, tag) {
 
 // ---------------------------------------------------------------------------
 // Root CSS: one project-wide stylesheet every layer shares: variables in :root, classes, states (:hover…),
-// @media and nesting. Parsing/serialising lives in public/root-css.js so the editor uses the exact same rules.
+// @media and nesting. Parsing/serialising lives in shared/root-css.js (served to the editor at /root-css.js) so the editor uses the exact same rules.
 // Stored as { vars: { "--name": value }, rules: [{ selector, media?, styles }] } in author order.
 // ---------------------------------------------------------------------------
 const RC = globalThis.WeftRootCss;

@@ -2375,7 +2375,13 @@ app.use((req, res, next) => {
   next();
 });
 app.use(express.json({ limit: "25mb" }));
+// public/ is the built editor UI (npm run build: ui/ → public/). root-css.js is shared with the server, so it lives
+// in shared/ and is served from there.
+app.get("/root-css.js", (req, res) => res.type("text/javascript").sendFile(path.join(ROOT, "shared", "root-css.js")));
 app.use(express.static(path.join(ROOT, "public")));
+if (!existsSync(path.join(ROOT, "public", "index.html"))) {
+  console.warn("[weft] the editor UI isn't built yet (public/index.html is missing): run `npm run build`. The API and MCP work without it.");
+}
 
 const who = (req) => req.get("x-client-id") || "api";
 const wrap = (fn) => async (req, res) => {

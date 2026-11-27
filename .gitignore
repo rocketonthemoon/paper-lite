@@ -1,3 +1,5 @@
 node_modules/
 data/
 .DS_Store
+# Built editor UI (npm run build: ui/ -> public/)
+public/
