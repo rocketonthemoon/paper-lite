@@ -440,7 +440,7 @@ async function renameProject(id, name, source = "api") {
   if (state.id === id) {
     state.name = meta.name;
     persist();
-    broadcast(source);
+    broadcastPatch(source, []);
   } else {
     const doc = await readProject(id);
     doc.name = meta.name;
@@ -506,7 +506,32 @@ function sendEvent(event, data) {
   const msg = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
   for (const res of sseClients) res.write(msg);
 }
-const broadcast = (source) => sendEvent("state", { source, state });
+// Full document: on connect and when another project opens. Edits send only what changed (broadcastPatch).
+const broadcast = (source) => {
+  lastSentRootCss = state.rootCss;
+  sendEvent("state", { source, state });
+};
+
+// Send browsers the nodes that changed ({ id: node | null } for deleted), the page list, and the root CSS when
+// it changed. A browser applies it only on top of `baseVersion`; one that missed a step reloads the full state.
+let lastSentRootCss = null;
+function broadcastPatch(source, ids, baseVersion = state.version) {
+  const nodes = {};
+  for (const id of ids) nodes[id] = state.nodes[id] ?? null;
+  const rootCss = state.rootCss !== lastSentRootCss ? state.rootCss : undefined;
+  lastSentRootCss = state.rootCss;
+  sendEvent("patch", {
+    source,
+    id: state.id,
+    baseVersion,
+    version: state.version,
+    name: state.name,
+    pages: state.pages,
+    rootId: state.rootId,
+    ...(rootCss ? { rootCss } : {}),
+    nodes,
+  });
+}
 
 function currentHistoryId() {
   return historyCursor >= 0 ? historyTimeline[historyCursor]?.id || null : null;
@@ -861,28 +886,35 @@ function commit(source, patch, meta = null, startCpId = null) {
   recordSessionActivity({ histSource, tool, artboard, checkpointId: startCpId, at });
 
   persist();
-  broadcast(source);
+  broadcastPatch(source, Object.keys(patch.after.nodes), state.version - 1);
   sendHistory();
   if (commentsChanged) sendEvent("comments", { comments: state.comments });
 }
 
 // Walk the live document to history position `target` (-1 = before the first entry), one patch at a time.
+// Returns the ids of every node the move touched.
 function moveHistoryCursor(target) {
+  const touched = new Set();
+  const apply = (side) => {
+    for (const id of Object.keys(side.nodes)) touched.add(id);
+    applyPatchSide(side);
+  };
   while (historyCursor > target) {
-    applyPatchSide(historyTimeline[historyCursor].patch.before);
+    apply(historyTimeline[historyCursor].patch.before);
     historyCursor -= 1;
   }
   while (historyCursor < target) {
     historyCursor += 1;
-    applyPatchSide(historyTimeline[historyCursor].patch.after);
+    apply(historyTimeline[historyCursor].patch.after);
   }
   state.version += 1;
+  return touched;
 }
 
-function afterHistoryMove(source) {
+function afterHistoryMove(source, touched) {
   const commentsChanged = syncCommentsWithState(Math.max(1, historyCursor + 1));
   persist();
-  broadcast(source);
+  broadcastPatch(source, touched, state.version - 1);
   sendHistory();
   if (commentsChanged) sendEvent("comments", { comments: state.comments });
 }
@@ -890,12 +922,11 @@ function afterHistoryMove(source) {
 function stepHistory(source, direction) {
   if (direction === "undo") {
     if (historyCursor < 0) return false;
-    moveHistoryCursor(historyCursor - 1);
+    afterHistoryMove(source, moveHistoryCursor(historyCursor - 1));
   } else {
     if (historyCursor >= historyTimeline.length - 1) return false;
-    moveHistoryCursor(historyCursor + 1);
+    afterHistoryMove(source, moveHistoryCursor(historyCursor + 1));
   }
-  afterHistoryMove(source);
   return true;
 }
 
@@ -905,8 +936,7 @@ function jumpHistory(source, targetIndex) {
   }
   if (targetIndex === historyCursor) return { cursor: historyCursor, moved: 0 };
   const moved = Math.abs(targetIndex - historyCursor);
-  moveHistoryCursor(targetIndex);
-  afterHistoryMove(source);
+  afterHistoryMove(source, moveHistoryCursor(targetIndex));
   return { cursor: historyCursor, moved };
 }
 
@@ -1167,7 +1197,7 @@ function switchPage(id, source = "api") {
     state.rootId = id;
     uiSelection = { ids: [], at: 0 };
     persist({ touchUpdatedAt: false });
-    broadcast(source);
+    broadcastPatch(source, []);
   }
   return state.nodes[id];
 }
@@ -2437,8 +2467,22 @@ function screenKey(s) {
 const es = new EventSource("/events");
 es.addEventListener("open", () => { live.classList.add("on"); live.lastChild.textContent = "Live"; });
 es.addEventListener("error", () => { live.classList.remove("on"); live.lastChild.textContent = "Reconnecting…"; });
-es.addEventListener("state", (ev) => {
-  const { state } = JSON.parse(ev.data);
+// Keep a copy of the document: the full state on connect / project switch, then patches of changed nodes.
+// A patch that doesn't follow on from this copy (a missed event) reloads the whole document.
+let doc = null, chain = Promise.resolve();
+es.addEventListener("state", (ev) => { chain = chain.then(() => { doc = JSON.parse(ev.data).state; onDoc(doc); }); });
+es.addEventListener("patch", (ev) => { chain = chain.then(async () => {
+  const p = JSON.parse(ev.data);
+  if (!doc || doc.id !== p.id || doc.version !== p.baseVersion) {
+    if (doc && doc.id === p.id && p.version <= doc.version) return;
+    doc = await (await fetch("/api/state")).json();
+  } else {
+    for (const [id, n] of Object.entries(p.nodes)) { if (n) doc.nodes[id] = n; else delete doc.nodes[id]; }
+    Object.assign(doc, { version: p.version, pages: p.pages, rootId: p.rootId }, p.rootCss ? { rootCss: p.rootCss } : {});
+  }
+  onDoc(doc);
+}).catch(() => {}); });
+function onDoc(state) {
   const key = state.nodes && state.nodes[AB] ? screenKey(state) : "";
   if (!key) { gone = true; main.innerHTML = '<p class="gone">This screen is no longer in the open project.</p>'; return; }
   if (gone) return location.reload(); // it came back (undo, or its project was reopened)
@@ -2448,7 +2492,7 @@ es.addEventListener("state", (ev) => {
   if (first) return;
   clearTimeout(timer);
   timer = setTimeout(reload, 120);
-});
+}
 // The first fonts event is the snapshot sent on connect; later ones mean the library changed.
 es.addEventListener("fonts", () => { if (!fontsSeen) { fontsSeen = true; return; } if (lastKey && !gone) { clearTimeout(timer); timer = setTimeout(reload, 120); } });
 </script>

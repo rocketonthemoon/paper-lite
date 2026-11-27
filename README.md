@@ -95,7 +95,7 @@ If your client only supports stdio, start the server first, then use the relay:
 | Endpoint | Purpose |
 | --- | --- |
 | `POST /mcp` | MCP Streamable HTTP (JSON-RPC 2.0); `POST /paper-lite/mcp` alias |
-| `GET /events` | SSE stream: `state`, `projects`, `selection`, `presence`, `fonts`, `history`, `comments`, `activity` |
+| `GET /events` | SSE stream: `state` (full document on connect / project switch), `patch` (changed nodes after each edit), `projects`, `selection`, `presence`, `fonts`, `history`, `comments`, `activity` |
 | `/api/projects` | List/create projects; `:id/open`, `:id/preview`, `:id/duplicate` |
 | `/api/state`, `/api/nodes`, `/api/pages` | Active project, node and page CRUD |
 | `/api/history` | Undo timeline (`GET /api/history`, `POST /api/history/jump`, `POST /api/history/undo-agent-run`) |
