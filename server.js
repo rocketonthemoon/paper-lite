@@ -37,6 +37,9 @@ const ALLOWED_HOSTS = new Set(
 const HISTORY_LIMIT = 60;
 // Edits update memory at once; their disk writes are coalesced and land at most this often.
 const PERSIST_THROTTLE_MS = Number(process.env.PERSIST_THROTTLE_MS ?? 300);
+// get_computed_styles asks an open editor tab first (it already has the artboard laid out); this long for an answer
+// before falling back to headless Chrome. 0 turns it off.
+const TAB_MEASURE_MS = Number(process.env.TAB_MEASURE_MS ?? 500);
 const SESSION_GAP_MS = 120_000;
 const CURSOR_TTL_MS = 8_000;
 const PRESENCE_TTL = 90_000;
@@ -60,6 +63,7 @@ let pendingSessionTitle = null;
 
 const mcpContextStore = new AsyncLocalStorage();
 const sseClients = new Set();
+const editorClients = new Set(); // the SSE streams of editor tabs (not previews), which can measure layers
 const fonts = new FontLibrary(path.join(DATA_DIR, "fonts"));
 let diskQueue = Promise.resolve();
 const sessionsCache = new Map(); // projectId -> sessions list, for projects that aren't open
@@ -2253,7 +2257,7 @@ function outline(nodeId = state.rootId, depth = 4) {
 let fontsRev = 0; // bumps when the font library changes, so the renderer reloads pages that use fonts
 const fontsChanged = () => {
   fontsRev += 1;
-  sendEvent("fonts", { fonts: fonts.list(), v: Date.now() });
+  sendEvent("fonts", { fonts: fonts.list(), v: Date.now(), rev: fontsRev });
 };
 async function addFont(input) {
   let entry;
@@ -2288,10 +2292,35 @@ function setSessionTitle(text) {
 // MCP (tools live in mcp-tools.js)
 // ---------------------------------------------------------------------------
 const renderer = new Renderer(`http://127.0.0.1:${PORT}`, { contentKey: () => `${state.id}:${state.version}:${fontsRev}` });
+
+// Computed styles from an open editor tab. The canvas already has the page laid out with the same CSS as the
+// render page, so a tab that shows this artboard at the current version answers in a few ms, where headless Chrome
+// would load the artboard first. Every editor tab is asked; the first usable answer wins. A tab that can't answer
+// (another project or page, an older version, a drag in progress, fonts still loading) says so, and if none can
+// within TAB_MEASURE_MS, the caller uses headless Chrome.
+const tabMeasures = new Map(); // request id -> { resolve, waiting: number of tabs yet to answer, timer }
+let tabMeasureSeq = 0;
+function measureInTab({ artboardId, nodeIds, properties }) {
+  if (TAB_MEASURE_MS <= 0 || !editorClients.size) return Promise.resolve(null);
+  const id = `m${++tabMeasureSeq}`;
+  const req = { id, projectId: state.id, version: state.version, fontsRev, artboardId, nodeIds, properties };
+  return new Promise((resolve) => {
+    const done = (result) => { const m = tabMeasures.get(id); if (!m) return; clearTimeout(m.timer); tabMeasures.delete(id); resolve(result); };
+    tabMeasures.set(id, { done, waiting: editorClients.size, timer: setTimeout(() => done(null), TAB_MEASURE_MS) });
+    for (const res of editorClients) res.write(`event: measure\ndata: ${JSON.stringify(req)}\n\n`);
+  });
+}
+function answerTabMeasure(id, body) {
+  const m = tabMeasures.get(id);
+  if (!m) return { ok: false }; // already answered, or timed out
+  if (body && body.result && typeof body.result === "object" && body.version === state.version) m.done(body.result);
+  else if (--m.waiting <= 0) m.done(null);
+  return { ok: true };
+}
 const mcpContext = {
   state: () => state,
   urls: { ui: PUBLIC_URL, mcp: `${PUBLIC_URL}/mcp` },
-  getNode, isPage, pageOf, artboardOf, artboardSize, outline, exportCode, renderer,
+  getNode, isPage, pageOf, artboardOf, artboardSize, outline, exportCode, renderer, measureInTab,
   createNode, updateNode, deleteNode, duplicateNode, createArtboard, writeHtml,
   rootCss: { get: () => getRootCss(), update: (patch) => updateRootCss(patch, "mcp"), hints: (ids) => rootCssHints(ids) },
   batch: (source, fn, meta) => batch(source, fn, meta),
@@ -2403,7 +2432,7 @@ app.get("/events", async (req, res) => {
   res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
   res.write(`event: state\ndata: ${JSON.stringify({ source: "init", state })}\n\n`);
   res.write(`event: projects\ndata: ${JSON.stringify({ projects: projectList() })}\n\n`);
-  res.write(`event: fonts\ndata: ${JSON.stringify({ fonts: fonts.list(), v: 0 })}\n\n`);
+  res.write(`event: fonts\ndata: ${JSON.stringify({ fonts: fonts.list(), v: 0, rev: fontsRev })}\n\n`);
   res.write(`event: presence\ndata: ${JSON.stringify(presencePayload())}\n\n`);
   res.write(`event: history\ndata: ${JSON.stringify(historyPayload())}\n\n`);
   res.write(`event: comments\ndata: ${JSON.stringify({ comments: state.comments || [] })}\n\n`);
@@ -2412,9 +2441,13 @@ app.get("/events", async (req, res) => {
     res.write(`event: activity\ndata: ${JSON.stringify({ sessions })}\n\n`);
   }
   sseClients.add(res);
+  if (req.query.role === "editor") editorClients.add(res);
   const ping = setInterval(() => res.write(": ping\n\n"), 25000);
-  req.on("close", () => { clearInterval(ping); sseClients.delete(res); });
+  req.on("close", () => { clearInterval(ping); sseClients.delete(res); editorClients.delete(res); });
 });
+
+// An editor tab's answer to a "measure" event (see measureInTab).
+app.post("/api/measure/:id", wrap((req) => answerTabMeasure(req.params.id, req.body)));
 
 // Open project document
 app.get("/api/state", wrap(() => state));

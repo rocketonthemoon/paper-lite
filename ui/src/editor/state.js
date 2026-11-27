@@ -9,6 +9,7 @@ export const ed = {
   view: { x: 120, y: 120, z: 1 },
   projects: [], // [{ id, name, updatedAt, active }]
   fontLib: [], // font library entries from the server
+  fontsRev: 0, // the server's font library revision (get_computed_styles only trusts this tab when it matches)
   editingId: null,
   editOriginal: "",
   pendingEdit: null,

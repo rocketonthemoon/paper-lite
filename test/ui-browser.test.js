@@ -1202,3 +1202,72 @@ test("browser: toast and dashboard dialog / card menu (Svelte)", { timeout: 120_
   await cdp.evalJs(`document.querySelector('.dash-card[data-pid="${back}"] .dash-thumb').click()`);
   await waitFor(`S?.id === ${JSON.stringify(back)} && document.getElementById("dashboard").hidden`, "opened from a thumbnail");
 });
+
+test("browser: get_computed_styles is measured in the open editor tab, matching headless Chrome", { timeout: 180_000 }, async (t) => {
+  const browserBin = findBrowser();
+  if (!browserBin) {
+    t.skip("No headless Chromium/Chrome binary found");
+    return;
+  }
+  const srv = await startTestServer();
+  t.after(() => srv.stop());
+  const cdp = await startBrowser(browserBin);
+  t.after(() => cdp.stop());
+  const waitFor = async (expr, label) => {
+    for (let i = 0; i < 100; i++) { if (await cdp.evalJs(expr)) return; await sleep(50); }
+    assert.fail(`timed out waiting for ${label}`);
+  };
+  const call = (name, args) => mcpCall(srv.baseUrl, name, args);
+  // A design that exercises layout: flex, grid, padding, gap, text, a root CSS class with a variable, absolute.
+  await call("update_root_css", { vars: { "--accent": "#3355ff" }, classes: { pill: { borderRadius: "999px", backgroundColor: "var(--accent)", padding: "6px 12px" } } });
+  const ab = await call("create_artboard", { name: "Measure", width: 640, height: 480 });
+  await call("write_html", { parentId: ab.id, html: `<section data-name="Wrap" style="display:flex;flex-direction:column;gap:12px;padding:24px">
+    <h1 data-name="Title" style="font-size:28px;font-weight:700;line-height:1.2;letter-spacing:-0.5px">Hello there</h1>
+    <div data-name="Row" style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+      <span data-name="Pill" class="pill">Tag</span><button data-name="Btn" style="padding:8px 16px;border:1px solid #ccc;border-radius:8px">Go</button>
+    </div>
+    <div data-name="Grid" style="display:grid;grid-template-columns:repeat(3, 1fr);gap:10px"><div data-name="Cell" style="height:40px;background:#eee"></div><div style="height:40px"></div><div style="height:40px"></div></div>
+  </section><div data-name="Badge" style="position:absolute;right:16px;top:16px;width:20px;height:20px;border-radius:50%;opacity:0.8;background:#f60"></div>` });
+  const s = await (await fetch(`${srv.baseUrl}/api/state`)).json();
+  const ids = Object.values(s.nodes).filter((n) => n.id === ab.id || ["Wrap", "Title", "Row", "Pill", "Btn", "Grid", "Cell", "Badge"].includes(n.name)).map((n) => n.id);
+  assert.equal(ids.length, 9);
+
+  // Headless Chrome only (no editor tab connected yet).
+  const fromChrome = await call("get_computed_styles", { nodeIds: ids });
+  const fromChromePlacement = await call("get_computed_styles", { nodeIds: ids, properties: ["position", "left", "top", "right", "bottom", "inset", "width", "height", "transform"] });
+
+  await cdp.send("Page.navigate", { url: srv.baseUrl });
+  await waitFor(`document.readyState === "complete" && document.querySelector("#live.live") && document.fonts.status === "loaded" && document.querySelector('#world [data-node-id="${ab.id}"]')`, "artboard on the canvas");
+  // Record the tab's answers.
+  await cdp.evalJs(`(() => { window.__answers = []; const f = window.fetch; window.fetch = (u, o) => { if (String(u).startsWith("/api/measure/")) window.__answers.push(JSON.parse(o.body)); return f(u, o); }; })()`);
+
+  const fromTab = await call("get_computed_styles", { nodeIds: ids });
+  assert.equal(await cdp.evalJs(`window.__answers.length === 1 && Boolean(window.__answers[0].result)`), true, "the tab answered");
+  assert.deepEqual(fromTab, fromChrome, "same styles and boxes as headless Chrome");
+
+  // Zoomed out, boxes are still in design pixels.
+  await cdp.evalJs(`document.dispatchEvent(new KeyboardEvent("keydown", { key: "-", ctrlKey: true, bubbles: true }))`);
+  await cdp.evalJs(`document.dispatchEvent(new KeyboardEvent("keydown", { key: "-", ctrlKey: true, bubbles: true }))`);
+  assert.ok(await cdp.evalJs(`view.z < 1`));
+  assert.deepEqual(await call("get_computed_styles", { nodeIds: ids }), fromChrome, "zoom doesn't change the boxes");
+  assert.equal(await cdp.evalJs(`window.__answers.length === 2 && Boolean(window.__answers[1].result)`), true);
+
+  // Placement properties: the artboard is reported as the render page has it (relative at 0,0), layers as laid out.
+  const placement = { nodeIds: ids, properties: ["position", "left", "top", "right", "bottom", "inset", "width", "height", "transform"] };
+  assert.deepEqual(await call("get_computed_styles", placement), fromChromePlacement);
+  assert.equal(await cdp.evalJs(`Boolean(window.__answers.at(-1).result)`), true);
+
+  // An artboard that hugs its content could lay out differently on the canvas: the tab declines.
+  const hug = await call("create_artboard", { name: "Hug", width: 300, height: 200 });
+  await call("update_styles", { updates: [{ nodeIds: [hug.id], styles: { height: "fit-content" } }] });
+  await waitFor(`S.nodes[${JSON.stringify(hug.id)}]?.styles.height === "fit-content"`, "hug artboard synced");
+  const n = (await cdp.evalJs(`window.__answers.length`));
+  await call("get_computed_styles", { nodeIds: [hug.id] });
+  assert.equal(await cdp.evalJs(`window.__answers.length === ${n + 1} && window.__answers.at(-1).unavailable === true`), true, "declined for a hug artboard");
+
+  // On another page the tab can't see the artboard: it says so and headless Chrome answers instead.
+  await call("create_page", { name: "Other" });
+  await waitFor(`S.rootId !== ${JSON.stringify(s.rootId)} && !document.querySelector('#world [data-node-id="${ab.id}"]')`, "other page shown");
+  assert.deepEqual(await call("get_computed_styles", { nodeIds: ids }), fromChrome);
+  assert.equal(await cdp.evalJs(`window.__answers.at(-1).unavailable === true`), true, "the tab declined");
+});
