@@ -1242,7 +1242,7 @@ let agentNodes = [];          // [{ id, label }] nodes an MCP agent is working o
 let agentCursors = [];        // live MCP agent cursors
 let followAgent = localStorage.getItem("weft:follow-agent") === "1";
 let followTimer = 0;
-let activeThreadId = null, draftCommentNodeId = null, cmtFilter = "open", showResolvedPins = false;
+let activeThreadId = null, draftCommentNodeId = null, showResolvedPins = false;
 let activitySessions = [];    // dashboard activity sessions
 let actFilter = "all";
 const clock = (iso) => { const d = new Date(iso); return Number.isNaN(+d) ? "" : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }); };
@@ -3507,6 +3507,11 @@ window.weft = {
   // Command palette (CommandPalette.svelte)
   cmdkEntries: () => buildCmdkEntries(),
   closeCmdk: () => openCmdk(false),
+  // Comments tab (CommentsPanel.svelte)
+  commentRows: () => commentRows(),
+  openCommentThread: (id) => openCommentThread(id),
+  get showResolvedPins() { return showResolvedPins; },
+  set showResolvedPins(on) { showResolvedPins = Boolean(on); renderCommentPins(); },
 };
 function renderHistory() {
   window.weft.history = hist;
@@ -3893,71 +3898,43 @@ commentThreadEl.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submitCommentComposer(); }
 });
 
-function renderCommentsPanel() {
-  if (!S || commentsPanelEl.hidden) return;
-  const pageList = pageCommentsList();
+// The Comments tab is ui/src/components/CommentsPanel.svelte; it asks for these rows (via window.weft) whenever
+// renderCommentsPanel() says they changed. Pins and the thread popover on the canvas stay in this script.
+function commentRows() {
+  if (!S) return [];
   const pinMap = commentPinMap();
   const agentIds = new Set(agentNodes.map((a) => a.id));
-  const openList = pageList.filter((c) => c.status !== "resolved");
-  const resList = pageList.filter((c) => c.status === "resolved");
-  const shown = cmtFilter === "resolved" ? resList : openList;
-  commentsPanelEl.innerHTML = `
-    <div class="cmts-filter">
-      <button type="button" data-cf="open" class="${cmtFilter === "open" ? "on" : ""}">Open · ${openList.length}</button>
-      <button type="button" data-cf="resolved" class="${cmtFilter === "resolved" ? "on" : ""}">Resolved · ${resList.length}</button>
-      <span class="cmts-scope">This page</span>
-    </div>
-    <div class="cmts-list">
-      ${shown.length ? shown.map((c) => {
-        const node = S.nodes[c.nodeId];
-        const orphan = !node;
-        const lastMsg = c.messages?.[c.messages.length - 1];
-        const linkedCount = (c.messages || []).filter((m) => m.linkedStep).length;
-        const resolvedClock = c.resolvedAt || lastMsg?.at || c.createdAt;
-        const statusText = c.status === "replied"
-          ? `${lastMsg?.author || "Claude"} replied`
-          : c.status === "read"
-            ? `Read ${clock(c.readAt)}`
-            : c.status === "resolved"
-              ? `Resolved${resolvedClock ? ` ${clock(resolvedClock)}` : ""}`
-              : `Waiting · ${ago(c.createdAt).replace(" ago", "")}`;
-        const pinCls = `cmt-pin sm ${orphan ? "orphaned" : c.status}`;
-        const pinLbl = orphan
-          ? "?"
-          : c.status === "resolved"
-            ? `<svg width="11" height="11" viewBox="0 0 12 12" fill="none"><path d="M2.5 6.2l2.3 2.3 4.7-5" stroke="#6b6b68" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`
-            : String(pinMap.get(c.id) || "");
-        const layerTitle = node?.name || c.layerName || "Deleted layer";
-        const metaLeft = orphan
-          ? (c.deletedInStep ? `Removed in step ${c.deletedInStep}` : "Layer removed")
-          : `${plural(c.messages?.length || 0, "message")}${linkedCount ? ` · ${plural(linkedCount, "linked change")}` : ""}${c.status !== "resolved" && agentIds.has(c.nodeId) ? " · agent working" : ""}`;
-        return `<div class="cmt-row${c.status === "replied" ? " replied" : ""}${orphan ? " orphaned" : ""}" data-open-cmt="${esc(c.id)}">
-          <span class="${pinCls}">${pinLbl}</span>
-          <span class="cmt-row-body">
-            <span class="cmt-row-top"><strong class="${orphan ? "del" : ""}">${esc(layerTitle)}</strong>${orphan ? '<span class="cmt-warn-pill">Layer deleted</span>' : `<span class="cmt-row-st${c.status === "replied" ? " replied" : ""}">${esc(statusText)}</span>`}</span>
-            <span class="cmt-row-prev">${esc(lastMsg?.text || "")}</span>
-            <span class="cmt-row-meta"><span>${esc(metaLeft)}</span>${orphan ? '<button type="button" class="link-toggle" data-restore-orphan="1">Restore</button>' : ""}</span>
-          </span>
-        </div>`;
-      }).join("") : `<div class="hist-empty">${cmtFilter === "resolved" ? "No resolved comments yet." : "No open comments. Press C and click any layer to pin a note for your agent."}</div>`}
-    </div>
-    <div class="cmts-foot">
-      <div style="display:flex;align-items:center;gap:6px;font-size:12px;font-weight:600"><span style="width:6px;height:6px;border-radius:99px;background:var(--agent)"></span>Agents read comments over MCP</div>
-      <code>get_comments · reply_to_comment · resolve_comment</code>
-      <label class="cmt-check"><input type="checkbox" id="show-resolved-pins" ${showResolvedPins ? "checked" : ""}><span class="cmt-check-box" aria-hidden="true"><svg width="10" height="10" viewBox="0 0 12 12" fill="none"><path d="M2.5 6.2l2.3 2.3 4.7-5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span>Show resolved pins on canvas</span></label>
-    </div>`;
+  return pageCommentsList().map((c) => {
+    const node = S.nodes[c.nodeId];
+    const orphan = !node;
+    const lastMsg = c.messages?.[c.messages.length - 1];
+    const linkedCount = (c.messages || []).filter((m) => m.linkedStep).length;
+    const resolvedClock = c.resolvedAt || lastMsg?.at || c.createdAt;
+    const statusText = c.status === "replied"
+      ? `${lastMsg?.author || "Claude"} replied`
+      : c.status === "read"
+        ? `Read ${clock(c.readAt)}`
+        : c.status === "resolved"
+          ? `Resolved${resolvedClock ? ` ${clock(resolvedClock)}` : ""}`
+          : `Waiting · ${ago(c.createdAt).replace(" ago", "")}`;
+    return {
+      id: c.id,
+      status: c.status,
+      orphan,
+      layerTitle: node?.name || c.layerName || "Deleted layer",
+      statusText,
+      pin: orphan ? "?" : c.status === "resolved" ? null : String(pinMap.get(c.id) || ""),
+      preview: lastMsg?.text || "",
+      meta: orphan
+        ? (c.deletedInStep ? `Removed in step ${c.deletedInStep}` : "Layer removed")
+        : `${plural(c.messages?.length || 0, "message")}${linkedCount ? ` · ${plural(linkedCount, "linked change")}` : ""}${c.status !== "resolved" && agentIds.has(c.nodeId) ? " · agent working" : ""}`,
+    };
+  });
 }
-
-commentsPanelEl.addEventListener("click", (e) => {
-  if (e.target.closest("[data-restore-orphan]")) { e.stopPropagation(); api("POST", "/api/undo"); return; }
-  const cf = e.target.closest("[data-cf]");
-  if (cf) { cmtFilter = cf.dataset.cf; return renderCommentsPanel(); }
-  const row = e.target.closest("[data-open-cmt]");
-  if (row) openCommentThread(row.dataset.openCmt);
-});
-commentsPanelEl.addEventListener("change", (e) => {
-  if (e.target.id === "show-resolved-pins") { showResolvedPins = e.target.checked; renderCommentPins(); }
-});
+function renderCommentsPanel() {
+  if (!S || commentsPanelEl.hidden) return;
+  window.weft.events.dispatchEvent(new Event("comments"));
+}
 
 renderRightPanels = () => {
   commentsPanelEl.hidden = rightTab !== "comments";

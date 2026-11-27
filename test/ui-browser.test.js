@@ -703,3 +703,49 @@ test("browser: command palette (Svelte): arrows wrap, count, empty state, Esc bu
   await cdp.evalJs(`(() => { const i = document.getElementById("cmdk-input"); i.value = "beta"; i.dispatchEvent(new Event("input", { bubbles: true })); [...document.querySelectorAll("#cmdk-list .cmdk-item")].find((x) => x.querySelector(".cmdk-label").textContent === "Beta").click(); })()`);
   await waitFor(`sel === ${JSON.stringify(b.id)} && document.getElementById("cmdk").hidden`, "clicked result selects the layer");
 });
+
+test("browser: Comments panel (Svelte): open/resolved tabs, rows open threads, live updates", { timeout: 120_000 }, async (t) => {
+  const browserBin = findBrowser();
+  if (!browserBin) {
+    t.skip("No headless Chromium/Chrome binary found");
+    return;
+  }
+  const srv = await startTestServer();
+  t.after(() => srv.stop());
+  const cdp = await startBrowser(browserBin);
+  t.after(() => cdp.stop());
+  const rest = async (method, url, body) => {
+    const res = await fetch(srv.baseUrl + url, { method, headers: { "content-type": "application/json" }, body: body && JSON.stringify(body) });
+    assert.ok(res.ok, `${method} ${url} → ${res.status}`);
+    return res.json();
+  };
+  const waitFor = async (expr, label) => {
+    for (let i = 0; i < 100; i++) { if (await cdp.evalJs(expr)) return; await sleep(50); }
+    assert.fail(`timed out waiting for ${label}`);
+  };
+  const s0 = await rest("GET", "/api/state");
+  const board = await rest("POST", "/api/nodes", { parentId: s0.rootId, tag: "div", name: "Board" });
+  const a = await rest("POST", "/api/nodes", { parentId: board.id, tag: "p", name: "Alpha", text: "a" });
+  const b = await rest("POST", "/api/nodes", { parentId: board.id, tag: "p", name: "Beta", text: "b" });
+  const ca = await rest("POST", "/api/comments", { nodeId: a.id, text: "Fix alpha" });
+  const cb = await rest("POST", "/api/comments", { nodeId: b.id, text: "Beta is fine" });
+  await rest("PATCH", `/api/comments/${cb.id}`, { status: "resolved" });
+  await cdp.send("Page.navigate", { url: srv.baseUrl });
+  await waitFor(`document.querySelector("#live.live") && S?.nodes?.[${JSON.stringify(a.id)}]`, "app");
+
+  // Open / resolved tabs with counts; a row opens its thread.
+  await cdp.evalJs(`document.querySelector('#right-tabs [data-tab="comments"]').click()`);
+  await waitFor(`document.querySelectorAll("#comments-panel .cmt-row").length === 1`, "one open comment");
+  assert.equal(await cdp.evalJs(`document.querySelector('#comments-panel [data-cf="open"]').textContent`), "Open · 1");
+  assert.equal(await cdp.evalJs(`document.querySelector('#comments-panel [data-cf="resolved"]').textContent`), "Resolved · 1");
+  assert.equal(await cdp.evalJs(`document.querySelector("#comments-panel .cmt-row strong").textContent`), "Alpha");
+  await cdp.evalJs(`document.querySelector('#comments-panel [data-cf="resolved"]').click()`);
+  assert.equal(await cdp.evalJs(`document.querySelector("#comments-panel .cmt-row strong").textContent`), "Beta");
+  assert.ok(await cdp.evalJs(`Boolean(document.querySelector("#comments-panel .cmt-row .cmt-pin.resolved svg"))`), "resolved pin shows a check");
+  await cdp.evalJs(`document.querySelector('#comments-panel [data-cf="open"]').click()`);
+  await cdp.evalJs(`document.querySelector('#comments-panel .cmt-row[data-open-cmt="${ca.id}"]').click()`);
+  await waitFor(`!document.getElementById("comment-thread").hidden && document.querySelector("#comment-thread .ct-text")?.textContent === "Fix alpha"`, "thread opened");
+  // A new comment from elsewhere shows up live.
+  await rest("POST", "/api/comments", { nodeId: b.id, text: "Another" });
+  await waitFor(`document.querySelector('#comments-panel [data-cf="open"]').textContent === "Open · 2"`, "live update");
+});

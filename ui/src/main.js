@@ -2,10 +2,16 @@
 // first and exposes window.weft (see lib/bridge.svelte.js); panels move into components here one at a time.
 import { mount } from "svelte";
 import HistoryPanel from "./components/HistoryPanel.svelte";
+import CommentsPanel from "./components/CommentsPanel.svelte";
 import CommandPalette from "./components/CommandPalette.svelte";
 
 mount(HistoryPanel, { target: document.getElementById("history-panel") });
+mount(CommentsPanel, { target: document.getElementById("comments-panel") });
 mount(CommandPalette, { target: document.getElementById("cmdk") });
 
-// The legacy script may have rendered before these mounted; ask it for the current data now.
-window.weft.events.dispatchEvent(new Event("history"));
+// The legacy script starts first (this module loads after it), so it may already have sent data, or the user may
+// have opened the palette, before these components listened. Replay the current state now.
+const replay = (type) => window.weft.events.dispatchEvent(new Event(type));
+replay("history");
+replay("comments");
+if (!document.getElementById("cmdk").hidden) replay("cmdk-open");
