@@ -1257,6 +1257,14 @@ test("browser: get_computed_styles is measured in the open editor tab, matching 
   assert.deepEqual(await call("get_computed_styles", placement), fromChromePlacement);
   assert.equal(await cdp.evalJs(`Boolean(window.__answers.at(-1).result)`), true);
 
+  // Previewed at another width on the canvas (390 / 834 / 1440 toggles), the tab declines; back to normal, it answers.
+  await cdp.evalJs(`window.weft.setViewportOverride(${JSON.stringify(ab.id)}, 390)`);
+  assert.deepEqual(await call("get_computed_styles", { nodeIds: ids }), fromChrome, "Chrome measures the artboard at its own width");
+  assert.equal(await cdp.evalJs(`window.__answers.at(-1).unavailable === true`), true, "declined while previewing at 390px");
+  await cdp.evalJs(`window.weft.setViewportOverride(${JSON.stringify(ab.id)}, null)`);
+  await call("get_computed_styles", { nodeIds: ids });
+  assert.equal(await cdp.evalJs(`Boolean(window.__answers.at(-1).result)`), true, "answers again without the preview");
+
   // An artboard that hugs its content could lay out differently on the canvas: the tab declines.
   const hug = await call("create_artboard", { name: "Hug", width: 300, height: 200 });
   await call("update_styles", { updates: [{ nodeIds: [hug.id], styles: { height: "fit-content" } }] });

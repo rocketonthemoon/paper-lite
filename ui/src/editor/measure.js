@@ -19,7 +19,9 @@ function canMeasure(req) {
     && document.fonts?.status !== "loading"
     && !ed.busy && !ed.pendingRender && !ed.pointerHeld && !ed.editingId // a drag, resize or text edit changes the DOM
     && ed.S.nodes[req.artboardId]?.parentId === ed.S.rootId && elOf(req.artboardId) // on the page this tab shows
-    && fixedSize(ed.S.nodes[req.artboardId]); // a "hug" artboard could lay out differently when not absolute
+    && fixedSize(ed.S.nodes[req.artboardId]) // a "hug" artboard could lay out differently when not absolute
+    // Previewed at another width (the 390 / 834 / 1440 toggles): this tab's layout and @media aren't the artboard's.
+    && !ed.viewportOverrides?.[req.artboardId];
 }
 
 export function measure(req) {
