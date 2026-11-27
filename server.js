@@ -52,6 +52,7 @@ let state; // { version, id, name, pages: [pageRootId], rootId: activePageId, no
 let historyTimeline = []; // [{ id, patch: { before, after }, source, tool, target, label, nodeIds, layerCount, at }]
 let historyCursor = -1;
 let projectCheckpoints = []; // [{ id, name, auto, kind, at, historyId, layerCount, commit }] — snapshots live in git
+let projectRemote = { connected: false }; // open project's git remote, as the browser may see it (no token)
 let projectSessions = []; // [{ id, projectId, projectName, source, agentName, title, artboard, startedAt, updatedAt, editCount, toolCounts, checkpointId, live, reverted }]
 let lastMcpWriteAt = 0;
 let lastCheckpointHistoryKey = null;
@@ -76,9 +77,14 @@ const repoDir = (id) => {
   if (!ID_RE.test(id)) throw new HttpError(400, "Invalid project id");
   return path.join(PROJECTS_DIR, `${id}.git`);
 };
+// Git remote settings and token for a project. Kept outside the repo so they are never pushed.
+const remoteFile = (id) => {
+  if (!ID_RE.test(id)) throw new HttpError(400, "Invalid project id");
+  return path.join(PROJECTS_DIR, `${id}.remote.json`);
+};
 const repos = new Map(); // projectId -> CheckpointRepo (one git job queue per repo)
 function repoOf(id) {
-  if (!repos.has(id)) repos.set(id, new CheckpointRepo(repoDir(id)));
+  if (!repos.has(id)) repos.set(id, new CheckpointRepo(repoDir(id), remoteFile(id)));
   return repos.get(id);
 }
 const sessionsFile = (id) => {
@@ -314,7 +320,7 @@ function publicCheckpoints(list = projectCheckpoints) {
 
 function historyPayload() {
   const entries = historyTimeline.map(({ patch: _p, ...rest }) => rest);
-  return { entries, cursor: historyCursor, limit: HISTORY_LIMIT, checkpoints: publicCheckpoints() };
+  return { entries, cursor: historyCursor, limit: HISTORY_LIMIT, checkpoints: publicCheckpoints(), remote: projectRemote };
 }
 
 function sendHistory() {
@@ -345,6 +351,7 @@ async function loadProjectExtras(id) {
     console.error(`[weft] could not read checkpoints for ${id}: ${err.message}`);
     projectCheckpoints = [];
   }
+  projectRemote = await repoOf(id).publicRemote();
   projectSessions = await sessionsOf(id);
   sessionsCache.delete(id);
 }
@@ -398,6 +405,7 @@ function commitCheckpoint(projectId, cp, doc) {
   const job = repoOf(projectId).commit(cp, docSnapshot(doc))
     .then((oid) => {
       cp.commit = oid;
+      autoPush(projectId);
       return oid;
     })
     .finally(() => pendingCommits.delete(cp.id));
@@ -481,6 +489,7 @@ async function deleteProject(id, source = "api") {
     await repoOf(id).queue; // let in-flight git work finish before removing the repo
     await fs.rm(repoDir(id), { recursive: true, force: true });
     await fs.rm(legacyCheckpointFile(id), { force: true });
+    await fs.rm(remoteFile(id), { force: true });
     await fs.rm(sessionsFile(id), { force: true });
   });
   repos.delete(id);
@@ -929,6 +938,66 @@ async function restoreCheckpointById(id, source = "api") {
     return cp;
   }, { tool: "Restore checkpoint", target: cp.name, label: `Restore checkpoint · ${cp.name}` });
   return { id: cp.id, name: cp.name };
+}
+
+// ---------------------------------------------------------------------------
+// Git remote: push/pull a project's checkpoint repo to GitHub, GitLab, Bitbucket, Gitea, … over HTTPS
+// ---------------------------------------------------------------------------
+async function refreshRemote(projectId) {
+  if (state?.id !== projectId) return;
+  projectRemote = await repoOf(projectId).publicRemote();
+  sendHistory();
+}
+
+const gitApi = {
+  status: async () => ({ ...(await repoOf(state.id).publicRemote()), branch: "main", checkpoints: projectCheckpoints.length }),
+  connect: async (body = {}) => {
+    const id = state.id;
+    const out = await repoOf(id).setRemote({ url: body.url, token: body.token, username: body.username, autoPush: body.autoPush });
+    await refreshRemote(id);
+    return out;
+  },
+  disconnect: async () => {
+    const id = state.id;
+    const out = await repoOf(id).clearRemote();
+    await refreshRemote(id);
+    return out;
+  },
+  push: async () => {
+    const id = state.id;
+    try {
+      return await repoOf(id).push();
+    } finally {
+      await refreshRemote(id);
+    }
+  },
+  // Pull brings in checkpoints only; the open document stays as it is until one is restored.
+  pull: async () => {
+    const id = state.id;
+    try {
+      const repo = repoOf(id);
+      const res = await repo.pull();
+      const before = new Set(projectCheckpoints.map((c) => c.id));
+      const list = await repo.list();
+      if (state.id === id) projectCheckpoints = list;
+      return { ...res, added: list.filter((c) => !before.has(c.id)).map(({ id: cid, name, at }) => ({ id: cid, name, at })) };
+    } finally {
+      await refreshRemote(id);
+    }
+  },
+};
+
+// After a checkpoint commit: push in the background when the project's remote asks for it.
+async function autoPush(projectId) {
+  const repo = repoOf(projectId);
+  const cfg = await repo.readRemote();
+  if (!cfg?.autoPush || !cfg.token) return;
+  try {
+    await repo.push();
+  } catch (err) {
+    console.error(`[weft] auto-push failed: ${err.message}`);
+  }
+  await refreshRemote(projectId).catch(() => {});
 }
 
 // ---------------------------------------------------------------------------
@@ -2054,6 +2123,7 @@ const mcpContext = {
     },
     restore: (id) => restoreCheckpointById(id, "mcp"),
   },
+  git: { status: gitApi.status, push: gitApi.push, pull: gitApi.pull },
   comments: {
     openCount: openCommentCount,
     list: mcpGetComments,
@@ -2170,6 +2240,13 @@ app.post("/api/checkpoints", wrap((req) => {
   return { id: cp.id, name: cp.name, auto: cp.auto, kind: cp.kind, at: cp.at, historyId: cp.historyId, layerCount: cp.layerCount };
 }));
 app.post("/api/checkpoints/:id/restore", wrap((req) => restoreCheckpointById(req.params.id, who(req))));
+
+// Git remote for the open project's checkpoints (the token is write-only: never returned)
+app.get("/api/git", wrap(() => gitApi.status()));
+app.put("/api/git/remote", wrap((req) => gitApi.connect(req.body || {})));
+app.delete("/api/git/remote", wrap(() => gitApi.disconnect()));
+app.post("/api/git/push", wrap(() => gitApi.push()));
+app.post("/api/git/pull", wrap(() => gitApi.pull()));
 
 // Comments (§3)
 app.get("/api/comments", wrap((req) => listComments({
