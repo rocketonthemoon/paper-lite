@@ -947,3 +947,46 @@ test("browser: pages list (Svelte): rename survives live updates, Escape cancels
   await cdp.evalJs(`${row(p2.id)}.click()`);
   await waitFor(`${row(p2.id)}.classList.contains("cur")`, "switched page");
 });
+
+test("browser: project menu (Svelte): forms, Cancel / Escape back to the list, live list, outside click closes", { timeout: 120_000 }, async (t) => {
+  const browserBin = findBrowser();
+  if (!browserBin) {
+    t.skip("No headless Chromium/Chrome binary found");
+    return;
+  }
+  const srv = await startTestServer();
+  t.after(() => srv.stop());
+  const cdp = await startBrowser(browserBin);
+  t.after(() => cdp.stop());
+  const rest = async (method, url, body) => {
+    const res = await fetch(srv.baseUrl + url, { method, headers: { "content-type": "application/json" }, body: body && JSON.stringify(body) });
+    assert.ok(res.ok, `${method} ${url} → ${res.status}`);
+    return res.json();
+  };
+  const waitFor = async (expr, label) => {
+    for (let i = 0; i < 100; i++) { if (await cdp.evalJs(expr)) return; await sleep(50); }
+    assert.fail(`timed out waiting for ${label}`);
+  };
+  await cdp.send("Page.navigate", { url: srv.baseUrl });
+  await waitFor(`document.querySelector("#live.live") && document.getElementById("project-name").textContent`, "app");
+  // Project menu: rename form, Cancel / Escape back to the list; the list updates live, and an open form survives it.
+  await cdp.evalJs(`document.getElementById("project-btn").click()`);
+  await waitFor(`!document.getElementById("project-menu").hidden && document.querySelector('#project-menu [data-act="rename"]')`, "menu open");
+  await cdp.evalJs(`document.querySelector('#project-menu [data-act="rename"]').click()`);
+  await waitFor(`document.activeElement?.id === "menu-input"`, "rename form");
+  await cdp.evalJs(`document.querySelector("#project-menu [data-cancel]").click()`);
+  await waitFor(`document.querySelector('#project-menu [data-act="rename"]')`, "back to the list");
+  await rest("POST", "/api/projects", { name: "Made elsewhere" });
+  await waitFor(`[...document.querySelectorAll("#project-menu .pn")].some((e) => e.textContent === "Made elsewhere")`, "list updates live");
+  await cdp.evalJs(`document.querySelector('#project-menu [data-act="new"]').click()`);
+  await waitFor(`document.activeElement?.id === "menu-input"`, "new form");
+  await cdp.evalJs(`(() => { const i = document.getElementById("menu-input"); i.value = "Typed name"; i.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+  await rest("POST", "/api/projects", { name: "Another" });
+  await sleep(300);
+  assert.equal(await cdp.evalJs(`document.getElementById("menu-input")?.value`), "Typed name", "form survives live updates");
+  await cdp.evalJs(`document.getElementById("menu-input").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))`);
+  await waitFor(`!document.getElementById("menu-input") && !document.getElementById("project-menu").hidden`, "Escape returns to the list, menu stays open");
+  // Clicking outside closes it.
+  await cdp.evalJs(`document.getElementById("stage").dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }))`);
+  assert.equal(await cdp.evalJs(`document.getElementById("project-menu").hidden`), true);
+});

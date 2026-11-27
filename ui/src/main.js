@@ -6,6 +6,7 @@ import CommentsPanel from "./components/CommentsPanel.svelte";
 import CommandPalette from "./components/CommandPalette.svelte";
 import LayersPanel from "./components/LayersPanel.svelte";
 import PagesList from "./components/PagesList.svelte";
+import ProjectMenu from "./components/ProjectMenu.svelte";
 import RightHead from "./components/RightHead.svelte";
 import Inspector from "./components/inspector/Inspector.svelte";
 
@@ -14,6 +15,7 @@ mount(CommentsPanel, { target: document.getElementById("comments-panel") });
 mount(CommandPalette, { target: document.getElementById("cmdk") });
 mount(LayersPanel, { target: document.getElementById("layers") });
 mount(PagesList, { target: document.getElementById("pages") });
+mount(ProjectMenu, { target: document.getElementById("project-menu") });
 mount(RightHead, { target: document.getElementById("right-head") });
 mount(Inspector, { target: document.getElementById("inspector") });
 
@@ -24,6 +26,7 @@ replay("history");
 replay("comments");
 replay("layers");
 replay("pages");
+if (!document.getElementById("project-menu").hidden) replay("project-menu");
 replay("right-head");
 replay("inspector");
 if (!document.getElementById("cmdk").hidden) replay("cmdk-open");
