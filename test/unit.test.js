@@ -23,6 +23,7 @@ import {
   definedRootClasses,
 } from "../model.js";
 import { htmlToSpecs, parseInlineStyle } from "../html-import.js";
+import { expandIconSpecs, parseSvgIcon } from "../icons.js";
 import { FontLibrary, familiesIn, parseFontFileName, renameWithRetry } from "../fonts.js";
 
 test("model: cleanTag normalises case and rejects disallowed tags", () => {
@@ -368,4 +369,33 @@ test("normalizeProject keeps root CSS and layer classes, dropping invalid entrie
   assert.ok(warnings.length >= 4, warnings.join("\n"));
   assert.throws(() => normalizeProject({ ...raw, nodes: { p: raw.nodes.p, a: { ...raw.nodes.a, classes: ["card"] } } }), /look like --color-primary/, "strict loading rejects bad root CSS");
   assert.deepEqual(normalizeProject({ nodes: { p: { name: "P", tag: "div" } }, pages: ["p"] }).rootCss, { vars: {}, rules: [] }, "older projects get an empty root CSS");
+});
+
+test("icons: parseSvgIcon validates/sanitises SVG assets and expandIconSpecs expands self-closing <icon />", () => {
+  const icon = parseSvgIcon("nf-n", '<svg viewBox="0 0 24 24" width="24" height="24" fill="none"><path d="M4 2V22M20 2V22" stroke="#e50914" stroke-width="4"/></svg>');
+  assert.equal(icon.name, "nf-n");
+  assert.equal(icon.viewBox, "0 0 24 24");
+  assert.equal(icon.children.length, 1);
+
+  assert.throws(() => parseSvgIcon("bad name", "<svg><path d='M0 0'/></svg>"), /letters, digits/);
+  assert.throws(() => parseSvgIcon("bad-url", '<svg><path d="M0 0" fill="url(#g)"/></svg>'), /unsafe/i);
+  assert.throws(() => parseSvgIcon("bad-script", '<svg><script>alert(1)</script></svg>'), /unsafe/i);
+  assert.throws(() => parseSvgIcon("bad-use", '<svg><use href="#x"/></svg>'), /unsafe/i);
+
+  const { specs, warnings } = htmlToSpecs('<div><icon name="nf-n" width="16" style="opacity: 0.8" /><icon name="missing" /><span>Title</span></div>');
+  const expanded = expandIconSpecs(specs, { "nf-n": icon }, warnings);
+  assert.equal(expanded.length, 1);
+  assert.equal(expanded[0].children.length, 2, "self-closing <icon /> does not swallow following sibling and missing icon is skipped");
+  assert.equal(expanded[0].children[0].tag, "svg");
+  assert.equal(expanded[0].children[0].attrs.width, "16");
+  assert.equal(expanded[0].children[0].styles.opacity, "0.8");
+  assert.equal(expanded[0].children[1].tag, "span");
+  assert.ok(warnings.some((w) => /missing.*isn't registered/.test(w)));
+
+  const doc = normalizeProject({
+    pages: ["p"], rootId: "p",
+    nodes: { p: { name: "P", tag: "div", children: [] } },
+    icons: { "nf-n": icon },
+  }, { id: "icproj" });
+  assert.equal(doc.icons["nf-n"].viewBox, "0 0 24 24");
 });

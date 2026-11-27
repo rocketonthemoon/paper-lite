@@ -1,4 +1,4 @@
-// weft MCP tool set (49 tools). Modelled on Paper's MCP so agents can drive the canvas end to end:
+// weft MCP tool set (52 tools). Modelled on Paper's MCP so agents can drive the canvas end to end:
 // read (info / tree / nodes / comments / computed styles / screenshots / code) → write (HTML, styles, text, structure)
 // → review (screenshot) → reply_to_comment / finish_working_on_nodes. Every write is one undoable step and shows live in the UI.
 import * as z from "zod";
@@ -80,6 +80,7 @@ takes. Aim for 2–4 calls per screen, not 10–15:
   the top level. A misplaced top-level element fails the call; a misplaced nested one is skipped with a warning.
 - Name layers with data-name="Card". Text-only elements become text layers; mixed text becomes span layers.
 - SVG: presentation attributes only (viewBox, d, fill, stroke, stroke-width, cx, cy, r, …). No url() or href.
+  For repeated icons, register them once with register_icons and reference <icon name="nf-n" /> in write_html (exported HTML deduplicates repeated icons with <symbol>/<use>).
 - Images: <img src="https://…" alt="…">.
 
 ## Styling
@@ -552,6 +553,30 @@ export function registerTools(server, ctx) {
     description: "Delete a page and everything on it (undoable). A project keeps at least one page.",
     inputSchema: { pageId: z.string() }, annotations: { ...WRITE, destructiveHint: true },
   }, async ({ pageId }) => text(ctx.pages.remove(pageId, "mcp")));
+
+  // ---------------------------------------------------------------- icons
+  server.registerTool("register_icons", {
+    description: "Register reusable SVG icons for the open project (one undo step). Once registered, write_html can use <icon name=\"icon-name\" /> anywhere (repeating cards, nav items) without repeating inline <svg> markup. Icons are strictly sanitised (SVG shapes + presentation attrs only; no scripts, href, or url()).",
+    inputSchema: {
+      icons: z.array(z.object({ name: z.string().min(1), svg: z.string().min(1) })).min(1).optional().describe("Batch list of { name, svg } icons to register"),
+      name: z.string().optional().describe("Single icon name (alternative to icons array)"),
+      svg: z.string().optional().describe("Single <svg>...</svg> markup (alternative to icons array)"),
+      replace: z.boolean().optional().describe("Replace the entire project icon registry instead of merging"),
+    },
+    annotations: WRITE,
+  }, async ({ icons, name, svg, replace }) => text(ctx.icons.register({ icons, name, svg, replace })));
+
+  server.registerTool("list_icons", {
+    description: "List registered SVG icons in the open project (name, viewBox, shape count).",
+    inputSchema: {},
+    annotations: READ,
+  }, async () => text(ctx.icons.list()));
+
+  server.registerTool("delete_icon", {
+    description: "Remove a registered SVG icon from the project's icon registry (one undo step).",
+    inputSchema: { name: z.string().min(1) },
+    annotations: { ...WRITE, destructiveHint: true },
+  }, async ({ name }) => text(ctx.icons.remove(name)));
 
   // ---------------------------------------------------------------- fonts
   server.registerTool("list_fonts", {

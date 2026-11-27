@@ -21,6 +21,7 @@ import { Renderer } from "./renderer.js";
 import { BlitzRenderer, PreferBlitz } from "./renderer-blitz.js";
 import { registerTools, SERVER_INSTRUCTIONS } from "./mcp-tools.js";
 import { CheckpointRepo } from "./checkpoint-store.js";
+import { MAX_ICONS, expandIconSpecs, parseSvgIcon } from "./icons.js";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.DATA_DIR || path.join(ROOT, "data");
@@ -320,6 +321,7 @@ function docSnapshot(doc = state) {
     rootId: doc.rootId,
     nodes: doc.nodes,
     rootCss: doc.rootCss || emptyRootCss(),
+    icons: doc.icons || {},
   });
 }
 
@@ -594,7 +596,7 @@ function ensureAgentStartCheckpoint(beforeState) {
 // While an edit runs, `state.nodes` is a proxy that copies each node the first time the edit reads or writes it.
 // Afterwards those copies are compared with the live nodes; the ones that differ become the undo patch.
 // ---------------------------------------------------------------------------
-const docMeta = (doc) => ({ pages: [...doc.pages], rootCss: structuredClone(doc.rootCss || emptyRootCss()) });
+const docMeta = (doc) => ({ pages: [...doc.pages], rootCss: structuredClone(doc.rootCss || emptyRootCss()), icons: structuredClone(doc.icons || {}) });
 const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
 function beginTracking() {
@@ -625,6 +627,7 @@ function rollbackTracking(tr) {
   }
   state.pages = tr.meta.pages;
   state.rootCss = tr.meta.rootCss;
+  state.icons = tr.meta.icons;
 }
 
 // Finish an edit: returns { before, after } with only the nodes that changed ({ id: node | null }) and the
@@ -667,6 +670,7 @@ function applyPatchSide(side) {
   if (side.meta) {
     state.pages = [...side.meta.pages];
     state.rootCss = structuredClone(side.meta.rootCss);
+    if (side.meta.icons !== undefined) state.icons = structuredClone(side.meta.icons);
   }
   if (!state.pages.includes(state.rootId)) state.rootId = state.pages[0];
 }
@@ -975,6 +979,7 @@ async function restoreCheckpointById(id, source = "api") {
     s.rootId = snap.pages.includes(s.rootId) ? s.rootId : snap.rootId;
     s.nodes = snap.nodes;
     if (snap.rootCss) s.rootCss = snap.rootCss;
+    s.icons = snap.icons || {};
     return cp;
   }, { tool: "Restore checkpoint", target: cp.name, label: `Restore checkpoint · ${cp.name}` });
   return { id: cp.id, name: cp.name };
@@ -1561,9 +1566,42 @@ function specTag(spec) {
   try { return cleanTag(spec.tag); } catch { return "div"; }
 }
 
+function listIcons(doc = state) {
+  return Object.values(doc.icons || {})
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((ic) => ({ name: ic.name, ...(ic.viewBox ? { viewBox: ic.viewBox } : {}), shapes: ic.children.length }));
+}
+
+function registerIcons({ icons, name, svg, replace = false } = {}, source = "mcp") {
+  const entries = Array.isArray(icons) ? icons : (name !== undefined || svg !== undefined ? [{ name, svg }] : []);
+  if (!entries.length) throw new HttpError(400, "Provide icons: [{ name, svg }] or { name, svg }");
+  const parsed = entries.map((e) => parseSvgIcon(e?.name, e?.svg));
+  const next = replace ? {} : structuredClone(state.icons || {});
+  for (const asset of parsed) next[asset.name] = asset;
+  if (Object.keys(next).length > MAX_ICONS) throw new HttpError(400, `At most ${MAX_ICONS} registered icons per project`);
+  mutate(source, (s) => { s.icons = next; }, {
+    tool: source === "mcp" ? "register_icons" : "Register icons",
+    target: parsed.length === 1 ? parsed[0].name : `${parsed.length} icons`,
+  });
+  return { registered: parsed.map((p) => p.name), total: Object.keys(next).length };
+}
+
+function deleteIcon(name, source = "mcp") {
+  const key = String(name ?? "").trim();
+  if (!key || !Object.hasOwn(state.icons || {}, key)) throw new HttpError(404, `Icon "${key}" not found`);
+  mutate(source, (s) => {
+    const next = { ...(s.icons || {}) };
+    delete next[key];
+    s.icons = next;
+  }, { tool: source === "mcp" ? "delete_icon" : "Delete icon", target: key });
+  return { deleted: key, total: Object.keys(state.icons || {}).length };
+}
+
 function writeHtml({ html, parentId, targetNodeId, mode = "insert-children", index }, source = "mcp") {
-  const { specs, warnings } = htmlToSpecs(html);
-  if (!specs.length) throw new HttpError(400, "No elements found in html");
+  const { specs: rawSpecs, warnings } = htmlToSpecs(html);
+  if (!rawSpecs.length) throw new HttpError(400, "No elements found in html");
+  const specs = expandIconSpecs(rawSpecs, state.icons, warnings);
+  if (!specs.length) throw new HttpError(400, warnings[0] || "No elements found in html");
   let parent = (typeof parentId === "string" ? parentId.trim() : "") || state.rootId;
   let at = index;
   let replaceTargetName = null;
@@ -2356,6 +2394,7 @@ const mcpContext = {
   getNode, isPage, pageOf, artboardOf, artboardSize, outline, exportCode, renderer, measureInTab,
   createNode, updateNode, deleteNode, duplicateNode, createArtboard, writeHtml,
   rootCss: { get: () => getRootCss(), update: (patch) => updateRootCss(patch, "mcp"), hints: (ids) => rootCssHints(ids) },
+  icons: { list: () => listIcons(), register: (opts) => registerIcons(opts, "mcp"), remove: (name) => deleteIcon(name, "mcp") },
   batch: (source, fn, meta) => batch(source, fn, meta),
   undo: (source) => stepHistory(source, "undo"),
   redo: (source) => stepHistory(source, "redo"),
@@ -2493,6 +2532,9 @@ app.post("/api/state", wrap((req) => {
 // Nodes
 app.get("/api/root-css", wrap(() => getRootCss()));
 app.patch("/api/root-css", wrap((req) => updateRootCss(req.body || {}, who(req))));
+app.get("/api/icons", wrap(() => listIcons()));
+app.post("/api/icons", wrap((req) => registerIcons(req.body || {}, who(req))));
+app.delete("/api/icons/:name", wrap((req) => deleteIcon(req.params.name, who(req))));
 app.post("/api/nodes", wrap((req) => createNode(req.body || {}, who(req))));
 app.patch("/api/nodes/:id", wrap((req) => updateNode(req.params.id, req.body || {}, who(req))));
 app.delete("/api/nodes/:id", wrap((req) => deleteNode(req.params.id, who(req))));
