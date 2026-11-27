@@ -84,9 +84,20 @@ test("exports share rules, icons and components instead of repeating them", { ti
     assert.match(files["components/Sidebar.jsx"], /^export function Sidebar\(\)/m);
     assert.match(files["components/Icon.jsx"], /^export function Icon\(\)/m);
     const home = files["page-1/home.jsx"];
-    assert.match(home, /^import "\.\.\/styles\.css";\nimport \{ Sidebar \} from "\.\.\/components\/Sidebar\.jsx";\nimport \{ Icon \} from "\.\.\/components\/Icon\.jsx";/);
+    assert.match(home, /^import "\.\.\/tokens\.css";\nimport "\.\.\/components\.css";\nimport \{ Sidebar \} from "\.\.\/components\/Sidebar\.jsx";\nimport \{ Icon \} from "\.\.\/components\/Icon\.jsx";/);
     assert.doesNotMatch(home, /style=/, "with the shared stylesheet, JSX uses class names only");
-    assert.match(files["page-1/home.html"], /<symbol id="icon-1"/);
+    assert.match(files["page-1/home.html"], /<symbol id="icon-1"/, "screens keep their icons inline (they open from disk)");
+    // icons.svg: each distinct icon in the project once, self-contained (attributes and inline styles, no classes).
+    const sprite = files["icons.svg"];
+    assert.match(sprite, /^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg">/);
+    assert.equal((sprite.match(/<symbol id="icon-[a-z0-9-]+" viewBox="0 0 24 24"[^>]*>/g) || []).length, 3, "three distinct icons");
+    for (const d of ["M0 0L24 24", "M1 0L24 24", "M2 0L24 24"]) assert.equal(sprite.split(`d="${d}"`).length - 1, 1, `${d} once`);
+    assert.match(sprite, /stroke="#333"/);
+    assert.match(sprite, /<symbol id="[^"]+" viewBox="0 0 24 24" fill="none">/, "the outer svg's paint carries over (not its size)");
+    assert.doesNotMatch(sprite, /<symbol[^>]* width=/);
+    assert.doesNotMatch(sprite, /class=/);
+    const ids = [...sprite.matchAll(/<symbol id="([^"]+)"/g)].map((m) => m[1]);
+    assert.equal(new Set(ids).size, ids.length, "unique symbol ids");
   });
 
   await t.test("icons aren't shared when the root CSS styles SVG content (selectors wouldn't reach into <use>)", async () => {

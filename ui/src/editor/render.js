@@ -11,7 +11,7 @@ import { renderCommentPins, renderCommentsPanel, updateCommentsBadge } from "./c
 // Root CSS: one project-wide stylesheet (variables, classes, states, @media, nesting), parsed and serialised by
 // /root-css.js exactly like on the server. The canvas renders it as a real stylesheet scoped to the world, with each
 // layer's own styles as a rule between the base classes and the state / media / nested rules, the same cascade as
-// the exported styles.css. Layer classes are prefixed (wc-card) so they can't pick up the editor's own CSS.
+// the exported components.css. Layer classes are prefixed (wc-card) so they can't pick up the editor's own CSS.
 export const rootOf = () => ed.S?.rootCss || { vars: {}, rules: [] };
 export const definedClassList = () => WeftRootCss.definedClasses(rootOf());
 export const baseStylesOf = (name) => Object.assign({}, ...rootOf().rules.filter((r) => !r.media && r.selector === `.${name}`).map((r) => r.styles));

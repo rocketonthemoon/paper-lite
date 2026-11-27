@@ -5,7 +5,7 @@ A self-hosted HTML/CSS design canvas with a built-in MCP server. AI agents build
 ## Features
 
 - **Real HTML layers.** Artboards are plain DOM elements (`div`, `section`, `button`, `svg`, …) styled by the shared root CSS plus their own camelCase styles, not a proprietary vector format.
-- **One root CSS per project.** Variables, classes, states (`:hover`, `:focus-visible`, …), `@media` and nesting (`&:hover`, `& .title`, `&--primary`) live in one shared stylesheet. Layers use `class="card"` and `var(--color-primary)` and keep only their own overrides. On the canvas, width `@media` queries follow each artboard's width; the ZIP export links every screen to a single `styles.css`.
+- **One root CSS per project.** Variables, classes, states (`:hover`, `:focus-visible`, …), `@media` and nesting (`&:hover`, `& .title`, `&--primary`) live in one shared stylesheet. Layers use `class="card"` and `var(--color-primary)` and keep only their own overrides. On the canvas, width `@media` queries follow each artboard's width; the ZIP export links every screen to `tokens.css` (fonts and variables) and `components.css` (classes and layer styles), and adds `icons.svg`, a sprite with every icon in the project.
 - **Live collaboration.** Agent edits, live cursors, selections, comments, checkpoints, and labelled undo history sync to the browser over SSE.
 - **Screenshots.** Headless Chrome renders artboards for `get_screenshot` and `get_computed_styles`.
 - **Export.** Export to React JSX, standalone HTML, or a ZIP bundle (comments are excluded from all exports). Exports stay compact: identical styles share one rule, repeated icons are one SVG `<symbol>`, and in JSX repeated parts (a sidebar on every screen) become one component, in `components/` in the ZIP.
