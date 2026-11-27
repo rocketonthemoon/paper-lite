@@ -442,3 +442,35 @@ test("normalizeProject keeps root CSS and layer classes, dropping invalid entrie
   assert.throws(() => normalizeProject({ ...raw, nodes: { p: raw.nodes.p, a: { ...raw.nodes.a, classes: ["card"] } } }), /look like --color-primary/, "strict loading rejects bad root CSS");
   assert.deepEqual(normalizeProject({ nodes: { p: { name: "P", tag: "div" } }, pages: ["p"] }).rootCss, { vars: {}, rules: [] }, "older projects get an empty root CSS");
 });
+
+test("htmlToSpecs captures data-component and data-slot, and normalizeProject preserves components", () => {
+  const { specs } = htmlToSpecs('<div data-component="hero-card"><span data-slot="title">Hi</span></div>');
+  assert.equal(specs[0].component, "hero-card");
+  assert.equal(specs[0].children[0].slot, "title");
+
+  const doc = normalizeProject({
+    pages: ["p"],
+    rootId: "p",
+    nodes: {
+      p: { name: "Page", tag: "div", children: ["c1"] },
+      c1: {
+        name: "Card", tag: "div", children: [],
+        componentId: "hero-card", componentKey: "root",
+        componentOverrides: { text: true, styles: ["width", "bad-style!"] },
+      },
+    },
+    components: {
+      "hero-card": {
+        id: "hero-card",
+        name: "hero-card",
+        tree: { key: "root", tag: "div", name: "Card", text: "", styles: { padding: 12 }, attrs: {}, children: [] },
+      },
+      "bad name": { id: "bad name", tree: { key: "root", tag: "div", children: [] } },
+    },
+  }, { warnings: [] });
+
+  assert.ok(doc.components["hero-card"]);
+  assert.equal(doc.components["bad name"], undefined);
+  assert.equal(doc.components["hero-card"].tree.styles.padding, "12px");
+  assert.deepEqual(doc.nodes.c1.componentOverrides, { text: true, styles: ["width"] });
+});

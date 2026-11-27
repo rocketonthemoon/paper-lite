@@ -79,6 +79,7 @@ takes. Aim for 2–4 calls per screen, not 10–15:
 - Nesting: SVG shapes only inside <svg>/<g>; no HTML inside SVG; nothing inside <img>/<hr>/<br>; artboards stay at
   the top level. A misplaced top-level element fails the call; a misplaced nested one is skipped with a warning.
 - Name layers with data-name="Card". Text-only elements become text layers; mixed text becomes span layers.
+- Reusable components: create_component({ name, html|nodeId }), instantiate_component / <div data-component="nf-card"> with data-slot="..." overrides, and update_component to propagate changes across every artboard.
 - SVG: presentation attributes only (viewBox, d, fill, stroke, stroke-width, cx, cy, r, …). No url() or href.
 - Images: <img src="https://…" alt="…">.
 
@@ -187,6 +188,7 @@ export function registerTools(server, ctx) {
     return text({
       id: n.id, name: n.name, tag: n.tag, text: n.text || undefined, classes: n.classes?.length ? n.classes : undefined, styles: n.styles, attrs: Object.keys(n.attrs || {}).length ? n.attrs : undefined,
       parentId: n.parentId, pageId: ctx.pageOf(n.id), artboardId: ctx.isPage(n.id) ? undefined : ctx.artboardOf(n.id),
+      ...(n.componentId ? { component: { id: n.componentId, key: n.componentKey, rootId: n.componentRootId, overrides: n.componentOverrides } } : {}),
       path: path.join(" / "), children: n.children.map(summary),
     });
   });
@@ -370,10 +372,11 @@ export function registerTools(server, ctx) {
     styles: styleSchema.optional(),
     replaceStyles: z.boolean().optional(),
     attrs: z.record(z.string(), z.union([z.string(), z.null()])).optional(),
+    detachComponent: z.boolean().optional().describe("Detach this layer's component instance link so master updates no longer affect it"),
   };
 
   server.registerTool("update_node", {
-    description: "Patch one layer (nodeId, ...) or many layers in one undo step (updates: [{ nodeId, ... }]). Supports name, tag, text, classes, addClasses, removeClasses, styles (merged unless replaceStyles), attrs.",
+    description: "Patch one layer (nodeId, ...) or many layers in one undo step (updates: [{ nodeId, ... }]). Supports name, tag, text, classes, addClasses, removeClasses, styles (merged unless replaceStyles), attrs, detachComponent.",
     inputSchema: {
       nodeId: z.string().optional(),
       ...nodePatchFields,
@@ -657,6 +660,91 @@ export function registerTools(server, ctx) {
     description: "Remove a font from the library (layers using it fall back to their fallback fonts).",
     inputSchema: { fontId: z.string() }, annotations: { ...WRITE, destructiveHint: true },
   }, async ({ fontId }) => text(await ctx.fonts.remove(fontId)));
+
+  // ---------------------------------------------------------------- components (linked symbols)
+  server.registerTool("list_components", {
+    description: "List reusable components in the open project (id, name, rootTag, classes, slots, instanceCount).",
+    inputSchema: {},
+    annotations: READ,
+  }, async () => text(ctx.components.list()));
+
+  server.registerTool("create_component", {
+    description: "Define a reusable component from an existing nodeId or from single-root html (use data-slot=\"...\" for overridable slots). When nodeId is passed, linkSource (default true) turns that subtree into the first linked instance.",
+    inputSchema: {
+      name: z.string().min(1).describe("Component identifier, e.g. \"nf-card\""),
+      nodeId: z.string().optional(),
+      html: z.string().optional(),
+      linkSource: z.boolean().optional(),
+      overwrite: z.boolean().optional(),
+    },
+    annotations: WRITE,
+  }, async (args) => {
+    const res = ctx.components.create(args, "mcp");
+    if (args.nodeId) ctx.touch([args.nodeId], "create_component", res.id);
+    return text(res);
+  });
+
+  server.registerTool("instantiate_component", {
+    description: "Place a linked instance of a component into parentId (default: current page), optionally overriding slots (by data-slot, key, or layer name) with { text, styles, attrs, classes, tag, name } or a string shorthand for text.",
+    inputSchema: {
+      component: z.string().min(1),
+      parentId: z.string().optional(),
+      index: z.number().int().optional(),
+      name: z.string().optional(),
+      overrides: z.record(z.string(), z.union([
+        z.string(),
+        z.object({
+          name: z.string().optional(),
+          tag: z.string().optional(),
+          text: z.string().optional(),
+          classes: classesSchema.optional(),
+          styles: styleSchema.optional(),
+          attrs: z.record(z.string(), z.union([z.string(), z.null()])).optional(),
+        }),
+      ])).optional(),
+    },
+    annotations: WRITE,
+  }, async (args) => {
+    const res = ctx.components.instantiate(args, "mcp");
+    ctx.touch([res.id], "instantiate_component", res.component);
+    return text(res);
+  });
+
+  server.registerTool("update_component", {
+    description: "Update a master component (via new html, or slot + patch / appendHtml / removeSlot) and propagate changes to every linked instance across all pages/artboards in one undo step, preserving per-instance text, style and attribute overrides.",
+    inputSchema: {
+      component: z.string().min(1),
+      html: z.string().optional(),
+      slot: z.string().optional().describe("Target slot, key, or layer name in master (default: \"root\")"),
+      patch: z.object({
+        name: z.string().optional(),
+        tag: z.string().optional(),
+        text: z.string().optional(),
+        classes: classesSchema.optional(),
+        addClasses: classesSchema.optional(),
+        removeClasses: classesSchema.optional(),
+        styles: styleSchema.optional(),
+        replaceStyles: z.boolean().optional(),
+        attrs: z.record(z.string(), z.union([z.string(), z.null()])).optional(),
+      }).optional(),
+      appendHtml: z.object({
+        html: z.string().min(1),
+        parentSlot: z.string().optional(),
+        index: z.number().int().optional(),
+      }).optional(),
+      removeSlot: z.string().optional(),
+    },
+    annotations: WRITE,
+  }, async (args) => text(ctx.components.update(args, "mcp")));
+
+  server.registerTool("delete_component", {
+    description: "Delete a component definition (by default detaches existing instances so their layers remain on the canvas).",
+    inputSchema: {
+      component: z.string().min(1),
+      detach: z.boolean().optional(),
+    },
+    annotations: { ...WRITE, destructiveHint: true },
+  }, async (args) => text(ctx.components.remove(args, "mcp")));
 
   server.registerTool("undo", { description: "Undo the last canvas edit (from the UI or any agent).", inputSchema: {}, annotations: WRITE },
     async () => text({ undone: ctx.undo("mcp") }));

@@ -21,6 +21,7 @@ import { Renderer } from "./renderer.js";
 import { BlitzRenderer, PreferBlitz } from "./renderer-blitz.js";
 import { registerTools, SERVER_INSTRUCTIONS } from "./mcp-tools.js";
 import { CheckpointRepo } from "./checkpoint-store.js";
+import { createComponentEngine, extractComponentOverridesFromSpec, trackNodeOverrides } from "./components.js";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.DATA_DIR || path.join(ROOT, "data");
@@ -320,6 +321,7 @@ function docSnapshot(doc = state) {
     rootId: doc.rootId,
     nodes: doc.nodes,
     rootCss: doc.rootCss || emptyRootCss(),
+    components: doc.components || {},
   });
 }
 
@@ -519,17 +521,21 @@ function sendEvent(event, data) {
 // Full document: on connect and when another project opens. Edits send only what changed (broadcastPatch).
 const broadcast = (source) => {
   lastSentRootCss = state.rootCss;
+  lastSentComponents = state.components;
   sendEvent("state", { source, state });
 };
 
 // Send browsers the nodes that changed ({ id: node | null } for deleted), the page list, and the root CSS when
 // it changed. A browser applies it only on top of `baseVersion`; one that missed a step reloads the full state.
 let lastSentRootCss = null;
+let lastSentComponents = null;
 function broadcastPatch(source, ids, baseVersion = state.version) {
   const nodes = {};
   for (const id of ids) nodes[id] = state.nodes[id] ?? null;
   const rootCss = state.rootCss !== lastSentRootCss ? state.rootCss : undefined;
+  const components = state.components !== lastSentComponents ? state.components : undefined;
   lastSentRootCss = state.rootCss;
+  lastSentComponents = state.components;
   sendEvent("patch", {
     source,
     id: state.id,
@@ -539,6 +545,7 @@ function broadcastPatch(source, ids, baseVersion = state.version) {
     pages: state.pages,
     rootId: state.rootId,
     ...(rootCss ? { rootCss } : {}),
+    ...(components ? { components } : {}),
     nodes,
   });
 }
@@ -594,7 +601,7 @@ function ensureAgentStartCheckpoint(beforeState) {
 // While an edit runs, `state.nodes` is a proxy that copies each node the first time the edit reads or writes it.
 // Afterwards those copies are compared with the live nodes; the ones that differ become the undo patch.
 // ---------------------------------------------------------------------------
-const docMeta = (doc) => ({ pages: [...doc.pages], rootCss: structuredClone(doc.rootCss || emptyRootCss()) });
+const docMeta = (doc) => ({ pages: [...doc.pages], rootCss: structuredClone(doc.rootCss || emptyRootCss()), components: structuredClone(doc.components || {}) });
 const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
 function beginTracking() {
@@ -625,6 +632,7 @@ function rollbackTracking(tr) {
   }
   state.pages = tr.meta.pages;
   state.rootCss = tr.meta.rootCss;
+  state.components = tr.meta.components;
 }
 
 // Finish an edit: returns { before, after } with only the nodes that changed ({ id: node | null }) and the
@@ -667,6 +675,7 @@ function applyPatchSide(side) {
   if (side.meta) {
     state.pages = [...side.meta.pages];
     state.rootCss = structuredClone(side.meta.rootCss);
+    state.components = structuredClone(side.meta.components || {});
   }
   if (!state.pages.includes(state.rootId)) state.rootId = state.pages[0];
 }
@@ -975,6 +984,7 @@ async function restoreCheckpointById(id, source = "api") {
     s.rootId = snap.pages.includes(s.rootId) ? s.rootId : snap.rootId;
     s.nodes = snap.nodes;
     if (snap.rootCss) s.rootCss = snap.rootCss;
+    s.components = snap.components ? structuredClone(snap.components) : {};
     return cp;
   }, { tool: "Restore checkpoint", target: cp.name, label: `Restore checkpoint · ${cp.name}` });
   return { id: cp.id, name: cp.name };
@@ -1354,6 +1364,22 @@ function updateNode(id, patch, source = "api", meta = null) {
   else if (patch.styles !== undefined) uiTool = "Edit styles";
   else if (patch.classes !== undefined || patch.addClasses !== undefined || patch.removeClasses !== undefined) uiTool = "Edit classes";
   else if (patch.tag !== undefined) uiTool = "Change tag";
+  if (patch.detachComponent) {
+    return mutate(source, (s) => {
+      const target = s.nodes[id];
+      const rootId = target.componentRootId || target.id;
+      for (const item of Object.values(s.nodes)) {
+        if (item.id === rootId || item.componentRootId === rootId) {
+          delete item.componentId; delete item.componentRootId; delete item.componentKey; delete item.componentOverrides;
+        }
+      }
+      return target;
+    }, meta || { tool: "detach_component", target: node.name, nodeIds: [id] });
+  }
+  if (!meta?.skipOverrideTracking && node.componentId && node.componentKey) {
+    const ov = trackNodeOverrides(node, patch, next);
+    if (ov) next.componentOverrides = ov;
+  }
   return mutate(source, (s) => {
     const n = s.nodes[id];
     Object.assign(n, next);
@@ -1435,11 +1461,15 @@ function duplicateNode(id, source = "api") {
   if (isPage(id)) throw new HttpError(400, "Pages cannot be duplicated");
   const node = getNode(id);
   return mutate(source, (s) => {
-    const copy = (srcId, parentId) => {
+    const dupRootSourceId = node.componentId && !node.componentRootId ? node.id : null;
+    const copy = (srcId, parentId, newInstRoot = null) => {
       const src = s.nodes[srcId];
       const nid = newId();
-      s.nodes[nid] = { ...structuredClone(src), id: nid, parentId, children: [] };
-      s.nodes[nid].children = src.children.map((c) => copy(c, nid));
+      const instRoot = newInstRoot || (srcId === dupRootSourceId ? nid : null);
+      const cloned = { ...structuredClone(src), id: nid, parentId, children: [] };
+      if (cloned.componentRootId && dupRootSourceId && cloned.componentRootId === dupRootSourceId && instRoot) cloned.componentRootId = instRoot;
+      s.nodes[nid] = cloned;
+      s.nodes[nid].children = src.children.map((c) => copy(c, nid, instRoot));
       return nid;
     };
     const nid = copy(id, node.parentId);
@@ -1658,6 +1688,11 @@ async function updateRootCss({ vars, classes, css, replace = false, pruneUnused 
         if (!n.classes.length) delete n.classes;
         touchedIds.push(n.id);
       }
+      const pruneTree = (t) => {
+        if (t.classes?.length) { t.classes = t.classes.filter((c) => !dropped.includes(c)); if (!t.classes.length) delete t.classes; }
+        (t.children || []).forEach(pruneTree);
+      };
+      for (const comp of Object.values(s.components || {})) if (comp?.tree) pruneTree(comp.tree);
     }
   }, { tool: source === "mcp" ? "update_root_css" : "Edit root CSS", target: changed.length ? `Root CSS · ${changed.slice(0, 3).join(", ")}${changed.length > 3 ? "…" : ""}` : "Root CSS", nodeIds: touchedIds });
   // Ensure full persistence before returning so subsequent write_html / restarts always see the updated root CSS.
@@ -1715,6 +1750,15 @@ function rootCssHints(nodeIds, doc = state) {
 
 // Insert a parsed HTML spec tree (lenient: bad tags/styles/attrs are dropped with warnings). Call inside mutate/batch.
 function addSubtree(spec, parentId, index, warnings) {
+  if (spec.component) {
+    const comp = state.components?.[spec.component];
+    if (comp) {
+      const overrides = extractComponentOverridesFromSpec(spec);
+      const rootName = spec.name && spec.name !== "Frame" ? spec.name : undefined;
+      return components.instantiateIntoState(comp, parentId, index, overrides, rootName, warnings).rootId;
+    }
+    warnings.push(`Component "${spec.component}" is not registered; built as a regular layer`);
+  }
   const parent = getNode(parentId);
   const label = cleanName(spec.name, spec.tag);
   let tag;
@@ -2549,11 +2593,16 @@ function answerTabMeasure(id, body) {
   else if (--m.waiting <= 0) m.done(null);
   return { ok: true };
 }
+const components = createComponentEngine({
+  getState: () => state, getNode, isPage, safePageOf, nestError, insertChild, nextArtboardPosition, definedClasses, mutate, specTag,
+});
+
 const mcpContext = {
   state: () => state,
   urls: { ui: PUBLIC_URL, mcp: `${PUBLIC_URL}/mcp` },
   getNode, isPage, pageOf, artboardOf, artboardSize, outline, exportCode, renderer, measureInTab,
   createNode, updateNode, updateNodesMatching, deleteNode, duplicateNode, createArtboard, writeHtml,
+  components: { list: () => components.list(), create: (a, s) => components.create(a, s), instantiate: (a, s) => components.instantiate(a, s), update: (a, s) => components.update(a, s), remove: (a, s) => components.remove(a, s) },
   rootCss: { get: (opts) => getRootCss(opts), update: (patch) => updateRootCss(patch, "mcp"), hints: (ids) => rootCssHints(ids) },
   batch: (source, fn, meta) => batch(source, fn, meta),
   undo: (source) => stepHistory(source, "undo"),

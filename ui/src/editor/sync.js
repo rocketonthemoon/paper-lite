@@ -64,7 +64,7 @@ export function connect() {
       if (n) ed.S.nodes[id] = n;
       else delete ed.S.nodes[id];
     }
-    applyState(p.source, { ...ed.S, version: p.version, name: p.name, pages: p.pages, rootId: p.rootId, rootCss: p.rootCss || ed.S.rootCss });
+    applyState(p.source, { ...ed.S, version: p.version, name: p.name, pages: p.pages, rootId: p.rootId, rootCss: p.rootCss || ed.S.rootCss, components: p.components || ed.S.components });
   }));
   function applyState(source, state) {
     const prevProject = ed.S?.id, prevKey = viewKey();
