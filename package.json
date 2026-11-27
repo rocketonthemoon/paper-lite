@@ -8,7 +8,11 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
+    "prestart": "node scripts/ensure-ui-build.mjs",
+    "build": "vite build --config ui/vite.config.js",
+    "dev:ui": "vite --config ui/vite.config.js",
     "lint": "node test/lint.mjs",
+    "pretest": "npm run build",
     "test": "node --test --test-force-exit test/*.test.js"
   },
   "engines": {
@@ -20,5 +24,10 @@
     "isomorphic-git": "^1.44.12",
     "parse5": "^8.1.1",
     "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^7.3.1",
+    "svelte": "^5.57.3",
+    "vite": "^8.3.8"
   }
 }

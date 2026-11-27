@@ -8,5 +8,4 @@ services:
       ALLOWED_HOSTS: host.docker.internal
     volumes:
       - ./data:/app/data
-      - ./public:/app/public
     restart: unless-stopped

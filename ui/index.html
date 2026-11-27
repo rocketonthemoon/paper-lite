@@ -1211,6 +1211,7 @@
 <div id="toast" role="status" aria-live="polite"></div>
 
 <script src="/root-css.js"></script>
+<script type="module" src="/src/main.js"></script>
 <script>
 "use strict";
 // ---------------------------------------------------------------------------
@@ -3588,10 +3589,15 @@ if (typeof ResizeObserver !== "undefined") new ResizeObserver(updateOverlay).obs
 // ---------------------------------------------------------------------------
 let rightTab = localStorage.getItem("weft:right-tab") || "design";
 let hist = { entries: [], cursor: -1, limit: 60, checkpoints: [] };
-let histFilter = "all", histFilterOpen = false, cpNaming = false, cpShowAll = false;
-let gitEditing = false, gitBusy = null, gitDraft = null; // git remote form state survives re-renders from SSE
 const historyEl = $("#history-panel");
-const BOOKMARK = (filled) => `<svg width="12" height="12" viewBox="0 0 16 16" fill="${filled ? "#d97757" : "none"}"><path d="M4 2.5h8v11l-4-2.8-4 2.8z" stroke="${filled ? "#d97757" : "currentColor"}" stroke-width="1.5" stroke-linejoin="round"/></svg>`;
+
+// Bridge to the Svelte components in ui/src (loaded after this script): helpers they call and live data they
+// render. renderHistory() hands the latest history to the Svelte History panel (ui/src/components/HistoryPanel).
+window.weft = { api, toast, clock, history: hist, events: new EventTarget() };
+function renderHistory() {
+  window.weft.history = hist;
+  window.weft.events.dispatchEvent(new Event("history"));
+}
 
 function setRightTab(tab) {
   if (!$(`#right-tabs [data-tab="${tab}"]`)) tab = "design";
@@ -3611,185 +3617,6 @@ function setRightTab(tab) {
 }
 let renderRightPanels = null; // extended by later tabs (comments)
 $("#right-tabs").addEventListener("click", (e) => { const b = e.target.closest("[data-tab]"); if (b) setRightTab(b.dataset.tab); });
-
-function histLabel(e) {
-  if (e.tool) return `<code>${esc(e.tool)}</code>${e.target ? ` · ${esc(e.target)}` : ""}`;
-  return esc(e.label || "");
-}
-
-const GIT_ICON = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="4.5" cy="3.5" r="1.6" stroke="currentColor" stroke-width="1.3"/><circle cx="4.5" cy="12.5" r="1.6" stroke="currentColor" stroke-width="1.3"/><circle cx="11.5" cy="6" r="1.6" stroke="currentColor" stroke-width="1.3"/><path d="M4.5 5.1v5.8M11.5 7.6c0 2.4-2.2 2.9-5.6 3.9" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>`;
-const whenShort = (iso) => {
-  if (!iso) return "never";
-  const d = new Date(iso);
-  return d.toDateString() === new Date().toDateString() ? clock(iso) : `${d.toLocaleDateString([], { month: "short", day: "numeric" })} ${clock(iso)}`;
-};
-const repoLabel = (url) => { try { const u = new URL(url); return `${u.host}${u.pathname.replace(/\.git$/, "")}`; } catch { return url; } };
-
-function gitHtml() {
-  const r = hist.remote || { connected: false };
-  if (gitEditing) {
-    const d = gitDraft || { url: r.url || "", token: "", username: "", autoPush: Boolean(r.autoPush) };
-    return `<section class="hist-git">
-      <div class="sec-h"><span>Git remote</span><span class="muted">${r.connected ? "Edit" : "Connect"}</span></div>
-      <div class="git-form">
-        <label class="fld"><span>URL</span><input id="git-url" value="${esc(d.url)}" placeholder="https://github.com/you/design.git" autocomplete="off" spellcheck="false"></label>
-        <label class="fld"><span>Token</span><input id="git-token" type="password" value="${esc(d.token)}" placeholder="${r.hasToken ? "Saved · leave blank to keep" : "Access token with write access"}" autocomplete="new-password"></label>
-        <label class="fld"><span>User</span><input id="git-user" value="${esc(d.username)}" placeholder="${esc(r.connected && r.username ? `${r.username} (current)` : "Automatic")}" autocomplete="off" spellcheck="false"></label>
-        <label class="git-check"><input type="checkbox" id="git-autopush" ${d.autoPush ? "checked" : ""}> Push after each checkpoint</label>
-        <div class="git-actions">
-          ${r.connected ? `<button class="link-toggle danger" data-hist="git-disconnect">Disconnect</button>` : ""}
-          <button class="btn" data-hist="git-cancel">Cancel</button>
-          <button class="btn primary" data-hist="git-save">${r.connected ? "Save" : "Connect"}</button>
-        </div>
-        <div class="hint">The token stays on this server and is never shown again. Pull adds the remote's checkpoints; it doesn't change your design.</div>
-      </div>
-    </section>`;
-  }
-  if (!r.connected) {
-    return `<section class="hist-git">
-      <div class="sec-h"><span>Git remote</span><span class="muted">Not connected</span></div>
-      <button class="btn" data-hist="git-edit">${GIT_ICON}Connect a git remote</button>
-    </section>`;
-  }
-  const busy = (k, label) => (gitBusy === k ? `${label}ing…` : label);
-  return `<section class="hist-git">
-    <div class="sec-h"><span>Git remote</span><span class="muted">${r.autoPush ? "Auto-push on" : "main"}</span></div>
-    <div class="cp-row">${GIT_ICON}<div class="cp-text" title="${esc(r.url)}"><span class="cp-name">${esc(repoLabel(r.url))}</span><span class="cp-meta">Pushed ${esc(whenShort(r.lastPushAt))} · Pulled ${esc(whenShort(r.lastPullAt))}</span></div><button class="link-toggle" data-hist="git-edit">Edit</button></div>
-    ${r.lastError ? `<div class="git-err" role="status">${esc(r.lastError)}</div>` : ""}
-    ${r.hasToken ? "" : `<div class="git-err" role="status">No token saved. Edit the remote and add one to push or pull.</div>`}
-    <div class="git-actions">
-      <button class="btn" data-hist="git-pull" ${gitBusy ? "disabled" : ""}>${busy("pull", "Pull")}</button>
-      <button class="btn" data-hist="git-push" ${gitBusy ? "disabled" : ""}>${busy("push", "Push")}</button>
-    </div>
-  </section>`;
-}
-
-function readGitDraft() {
-  if (!$("#git-url")) return gitDraft;
-  return { url: $("#git-url").value, token: $("#git-token").value, username: $("#git-user").value, autoPush: $("#git-autopush").checked };
-}
-
-function renderHistory() {
-  if (!S || historyEl.hidden) return;
-  const scroll = historyEl.querySelector(".hist-scroll")?.scrollTop || 0;
-  if (gitEditing) gitDraft = readGitDraft();
-  const focusedId = document.activeElement?.closest?.(".git-form") ? document.activeElement.id : null;
-  const cps = [...(hist.checkpoints || [])].sort((a, b) => String(b.at).localeCompare(String(a.at)));
-  const shownCps = cpShowAll ? cps : cps.slice(0, 3);
-  const cpMeta = (c) => `${c.auto ? (c.kind === "agent-start" ? "Auto · agent run" : "Auto") : "Saved"} · ${clock(c.at)}`;
-  const cpHtml = `
-    <section class="hist-cps">
-      <div class="sec-h"><span>Checkpoints</span><span class="muted">${cps.length} saved</span></div>
-      ${cpNaming ? `<div class="cp-new"><label class="fld"><input id="cp-name" value="${esc(`Checkpoint ${clock(new Date().toISOString())}`)}" aria-label="Checkpoint name"></label><button class="btn primary" data-hist="cp-save">Save</button></div>`
-        : `<button class="btn primary" data-hist="cp-new">${BOOKMARK(false).replace('currentColor', '#ffffff')}Save checkpoint</button>`}
-      ${shownCps.map((c) => `<div class="cp-row">${BOOKMARK(c.auto && c.kind === "agent-start")}<div class="cp-text" title="${esc(c.name)}${c.layerCount != null ? ` · ${c.layerCount} layers` : ""}"><span class="cp-name">${esc(c.name)}</span><span class="cp-meta">${esc(cpMeta(c))}</span></div><button class="link-toggle" data-hist="cp-restore" data-id="${esc(c.id)}">Restore</button></div>`).join("")}
-      ${cps.length > 3 ? `<button class="link-toggle cp-more" data-hist="cp-all">${cpShowAll ? "Show fewer" : `Show all ${cps.length}`}</button>` : ""}
-    </section>`;
-
-  const entries = hist.entries || [];
-  const byHistory = new Map();
-  for (const c of cps) if (c.historyId) { if (!byHistory.has(c.historyId)) byHistory.set(c.historyId, []); byHistory.get(c.historyId).push(c); }
-  const rows = [];
-  for (let i = entries.length - 1; i >= 0; i--) {
-    const e = entries[i];
-    if (histFilter === "agent" && e.source !== "mcp") continue;
-    if (histFilter === "you" && e.source === "mcp") continue;
-    const state = i > hist.cursor ? "undone" : i === hist.cursor ? "cur" : "";
-    const meta = state === "undone" ? "Undone · Ctrl+Shift+Z to redo" : state === "cur" ? `Current state · ${clock(e.at)}` : `${clock(e.at)}${e.nodeIds?.length > 1 ? ` · ${e.nodeIds.length} layers` : e.source !== "mcp" ? " · You" : ""}`;
-    rows.push(`<button type="button" class="hist-step ${state}" data-hist="jump" data-index="${i}" title="${state === "cur" ? "Current state" : "Jump to this step"}">
-      <span class="hist-av${e.source === "mcp" ? " ai" : ""}">${e.source === "mcp" ? "AI" : "Y"}</span>
-      <span class="hist-txt"><span class="hist-lbl">${histLabel(e)}</span><span class="hist-meta">${esc(meta)}</span></span></button>`);
-    for (const c of byHistory.get(e.id) || []) rows.push(`<div class="hist-mark${c.auto ? "" : " manual"}">${BOOKMARK(c.auto && c.kind === "agent-start")}<span>${esc(c.name)}</span></div>`);
-  }
-  const canUndoAgent = entries.some((e, i) => i <= hist.cursor && e.source === "mcp");
-  historyEl.innerHTML = `<div class="hist-scroll">${cpHtml}${gitHtml()}
-    <section class="hist-list">
-      <div class="sec-h"><span>Undo history</span><span class="hist-count">${hist.cursor + 1} / ${hist.limit}</span></div>
-      ${histFilterOpen ? `<div class="seg hist-filter">${["all", "agent", "you"].map((f) => `<button data-hist="filter" data-f="${f}" class="${histFilter === f ? "on" : ""}">${f === "all" ? "All" : f === "agent" ? "Agent" : "You"}</button>`).join("")}</div>` : ""}
-      ${rows.join("") || `<div class="hist-empty">${entries.length ? "No steps match this filter." : "No edits yet. Every change by you or an agent shows up here, newest first. History resets when you switch projects."}</div>`}
-    </section></div>
-    <div class="hist-foot">
-      <button class="btn" data-hist="undo-agent" ${canUndoAgent ? "" : "disabled"} title="Jump back to just before the agent's most recent run (also undoes anything after it)">Undo last agent run</button>
-      <button class="icon-btn${histFilterOpen || histFilter !== "all" ? " on" : ""}" data-hist="filter-toggle" title="Filter by who made the change" aria-label="Filter history"><svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M3 4h10M5 8h6M7 12h2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></button>
-    </div>`;
-  historyEl.querySelector(".hist-scroll").scrollTop = scroll;
-  if (cpNaming) { const f = $("#cp-name"); f.focus(); f.select(); }
-  else if (focusedId && $(`#${focusedId}`)) $(`#${focusedId}`).focus();
-}
-
-async function gitAction(kind) {
-  gitBusy = kind;
-  renderHistory();
-  const res = await api("POST", `/api/git/${kind}`);
-  gitBusy = null;
-  renderHistory();
-  if (!res) return;
-  if (kind === "push") toast(res.pushed ? "Pushed checkpoints to the remote" : res.reason || "Nothing to push");
-  else if (res.mode === "up-to-date" || res.mode === "empty-remote") toast(res.mode === "empty-remote" ? "The remote has no checkpoints yet" : "Already up to date");
-  else toast(res.added?.length ? `Pulled ${res.added.length} checkpoint${res.added.length === 1 ? "" : "s"}; restore one to apply it` : "Pulled from the remote", { ms: 3500 });
-}
-
-async function saveCheckpoint() {
-  const name = ($("#cp-name")?.value || "").trim() || `Checkpoint ${clock(new Date().toISOString())}`;
-  cpNaming = false;
-  const cp = await api("POST", "/api/checkpoints", { name });
-  if (cp) toast(`Saved checkpoint “${cp.name}”`);
-  renderHistory();
-}
-
-historyEl.addEventListener("click", async (e) => {
-  const b = e.target.closest("[data-hist]");
-  if (!b) return;
-  const act = b.dataset.hist;
-  if (act === "cp-new") { cpNaming = true; return renderHistory(); }
-  if (act === "cp-save") return saveCheckpoint();
-  if (act === "cp-all") { cpShowAll = !cpShowAll; return renderHistory(); }
-  if (act === "cp-restore") {
-    const cp = hist.checkpoints.find((c) => c.id === b.dataset.id);
-    const res = await api("POST", `/api/checkpoints/${encodeURIComponent(b.dataset.id)}/restore`);
-    if (res) toast(`Restored “${cp?.name || "checkpoint"}”`, { action: "Undo", onAction: () => api("POST", "/api/undo") });
-    return;
-  }
-  if (act === "jump") { const i = Number(b.dataset.index); if (i !== hist.cursor) api("POST", "/api/history/jump", { index: i }); return; }
-  if (act === "undo-agent") {
-    const res = await api("POST", "/api/history/undo-agent-run");
-    if (res?.ok) toast(`Undid the last agent run (${res.undone} ${res.undone === 1 ? "step" : "steps"})`, { action: "Redo", onAction: () => api("POST", "/api/history/jump", { index: res.cursor + res.undone }) });
-    return;
-  }
-  if (act === "git-edit") { gitEditing = true; gitDraft = null; renderHistory(); return $("#git-url")?.focus(); }
-  if (act === "git-cancel") { gitEditing = false; gitDraft = null; return renderHistory(); }
-  if (act === "git-save") {
-    const d = readGitDraft();
-    if (!d.url.trim()) { toast("Paste the repository's HTTPS URL"); return $("#git-url").focus(); }
-    const wasConnected = hist.remote?.connected;
-    const res = await api("PUT", "/api/git/remote", { url: d.url.trim(), username: d.username.trim(), autoPush: d.autoPush, ...(d.token.trim() ? { token: d.token.trim() } : {}) });
-    if (!res) return;
-    gitEditing = false; gitDraft = null;
-    hist.remote = res;
-    renderHistory();
-    toast(wasConnected ? "Git remote updated" : "Git remote connected · Push to send your checkpoints");
-    return;
-  }
-  if (act === "git-disconnect") {
-    if (!confirm("Disconnect this git remote? The saved token is deleted. Checkpoints stay in this project.")) return;
-    const res = await api("DELETE", "/api/git/remote");
-    if (res) { gitEditing = false; gitDraft = null; hist.remote = res; renderHistory(); toast("Git remote disconnected"); }
-    return;
-  }
-  if (act === "git-push" || act === "git-pull") return gitAction(act.slice(4));
-  if (act === "filter-toggle") { histFilterOpen = !histFilterOpen; if (!histFilterOpen) histFilter = "all"; return renderHistory(); }
-  if (act === "filter") { histFilter = b.dataset.f; return renderHistory(); }
-});
-historyEl.addEventListener("keydown", (e) => {
-  if (e.target.closest?.(".git-form") && e.target.tagName === "INPUT") {
-    if (e.key === "Enter") { e.preventDefault(); historyEl.querySelector('[data-hist="git-save"]').click(); }
-    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); gitEditing = false; gitDraft = null; renderHistory(); }
-    return;
-  }
-  if (e.target.id !== "cp-name") return;
-  if (e.key === "Enter") { e.preventDefault(); saveCheckpoint(); }
-  if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); cpNaming = false; renderHistory(); }
-});
 
 function connect() {
   const es = new EventSource("/events");
