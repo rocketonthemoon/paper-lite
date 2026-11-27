@@ -14,13 +14,13 @@ const PAPER_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const EXPECTED_TOOLS = [
-  "add_font", "create_artboard", "create_node", "create_page", "create_project", "delete_nodes", "delete_page",
-  "delete_project", "duplicate_nodes", "duplicate_project", "find_nodes", "finish_working_on_nodes", "get_basic_info",
-  "get_children", "get_comments", "get_computed_styles", "get_guide", "get_jsx", "get_node_info", "get_root_css",
-  "get_screenshot", "get_selection", "get_tree_summary", "git_pull", "git_push", "git_status", "list_checkpoints", "list_fonts", "list_projects", "move_nodes", "open_project",
-  "redo", "remove_font", "rename_nodes", "rename_project", "reply_to_comment", "resolve_comment", "restore_checkpoint",
-  "save_checkpoint", "set_selection", "set_session_title", "set_text_content", "switch_page", "undo", "update_node",
-  "update_nodes_matching", "update_page", "update_root_css", "update_styles", "write_html",
+  "add_font", "audit_artboard", "create_artboard", "create_component", "create_node", "create_page", "create_project", "delete_component", "delete_icon", "delete_nodes", "delete_page",
+  "delete_project", "duplicate_nodes", "duplicate_project", "export_design_tokens", "find_nodes", "finish_working_on_nodes", "get_basic_info", "get_children", "get_comments", "get_computed_styles",
+  "get_guide", "get_jsx", "get_node_info", "get_root_css", "get_screenshot", "get_selection", "get_tree_summary", "git_pull", "git_push", "git_status",
+  "import_design_tokens", "import_root_css", "instantiate_component", "list_checkpoints", "list_components", "list_fonts", "list_icons", "list_projects", "move_nodes", "open_project",
+  "redo", "register_icons", "remove_font", "rename_nodes", "rename_project", "reply_to_comment", "resolve_comment", "restore_checkpoint", "save_checkpoint", "set_selection",
+  "set_session_title", "set_text_content", "switch_page", "undo", "update_component", "update_node", "update_nodes_matching", "update_page", "update_root_css", "update_styles",
+  "write_html",
 ];
 
 // Markup an attacker could put in layer names / text to break out of exported or rendered HTML.
@@ -161,7 +161,7 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
   t.after(() => srv.stop());
   const B = srv.baseUrl;
 
-  await t.test("tools/list exposes exactly the 50 documented tools with schemas", async () => {
+  await t.test("tools/list exposes all documented tools with schemas", async () => {
     const { tools } = await rpc(B, "tools/list");
     assert.deepEqual(tools.map((x) => x.name).sort(), EXPECTED_TOOLS);
     for (const tool of tools) {
@@ -722,6 +722,9 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
     const files = unzip(Buffer.from(await (await fetch(`${B}/api/export/zip?format=both`)).arrayBuffer()));
     const names = Object.keys(files);
     assert.deepEqual(names.filter((n) => n.endsWith(".css")).sort(), ["components.css", "tokens.css"], "two stylesheets, at the root");
+    assert.ok(names.includes("tokens.json"), "tokens.json is exported alongside tokens.css");
+    const zipTokens = JSON.parse(files["tokens.json"].toString());
+    assert.equal(zipTokens.color.primary.$value, "#0000ff");
     const tokens = files["tokens.css"].toString();
     assert.match(tokens, /:root \{[^}]*--color-primary: #0000ff;[^}]*--font-ui: 'Geist', sans-serif;/);
     assert.doesNotMatch(tokens, /^\./m, "tokens only: no classes");
@@ -787,6 +790,101 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
     await ok(B, "update_root_css", { replace: true, css: prev.css });
   });
 
+  await t.test("cross-project design system: import_root_css, W3C tokens.json, and expanded linter", async () => {
+    const kit = await ok(B, "create_project", { name: "UI Kit", open: false });
+    const target = await ok(B, "create_project", { name: "Consumer" });
+    await ok(B, "open_project", { projectId: kit.id });
+    await ok(B, "update_root_css", {
+      css: `:root { --color-brand: #0000ff; --space-4: 16px; --radius-lg: 12px; --font-size-body: 15px; --unused-var: 99px; }
+        .kit-btn { padding: var(--space-4); border-radius: var(--radius-lg); color: var(--color-brand); @media (max-width: 640px) { padding: 8px; } }
+        .kit-badge { font-size: var(--font-size-body); }`,
+    });
+    const tokensJson = await ok(B, "export_design_tokens");
+    assert.equal(tokensJson.color.brand.$value, "#0000ff");
+    assert.equal(tokensJson.space["4"].$value, "16px");
+    const restTokens = await (await fetch(`${B}/api/tokens`)).json();
+    assert.equal(restTokens.radius.lg.$value, "12px");
+
+    await ok(B, "open_project", { projectId: target.id });
+    // Scoped import pulls only .kit-btn and its referenced vars (excluding --unused-var and .kit-badge)
+    const scoped = await ok(B, "import_root_css", { sourceProjectId: kit.id, classes: ["kit-btn"] });
+    assert.deepEqual(scoped.definedClasses, ["kit-btn"]);
+    assert.ok(scoped.addedVars.includes("--color-brand") && !scoped.addedVars.includes("--unused-var"));
+    assert.ok((await ok(B, "get_root_css")).vars["--color-brand"]);
+
+    // Merge import brings the rest
+    const merged = await ok(B, "import_root_css", { sourceProjectId: kit.id, mode: "merge" });
+    assert.deepEqual(merged.definedClasses.sort(), ["kit-badge", "kit-btn"]);
+    assert.ok(merged.addedVars.includes("--font-size-body"));
+    assert.equal((await ok(B, "get_root_css")).vars["--font-size-body"], "15px");
+
+    // Import W3C Design Tokens via MCP in replace mode (preserves classes, swaps vars)
+    const impTok = await ok(B, "import_design_tokens", {
+      mode: "replace",
+      tokens: {
+        color: { $type: "color", primary: { $value: "#112233" } },
+        space: { $type: "dimension", md: { $value: { value: 20, unit: "px" } } },
+        radius: { $type: "dimension", card: { $value: "10px" } },
+        "font-size": { $type: "dimension", sm: { $value: "13px" } },
+      },
+    });
+    assert.equal(impTok.imported, 4);
+    assert.ok(impTok.removedVars.includes("--unused-var"), "replace removes old tokens");
+    assert.equal((await ok(B, "get_root_css")).vars["--unused-var"], undefined, "replace removes old tokens");
+    assert.deepEqual(impTok.definedClasses.sort(), ["kit-badge", "kit-btn"], "classes are preserved");
+
+    // Expanded design system linter warns on spacing, radii, font sizes, and colors
+    const b2 = await ok(B, "create_artboard", { name: "Lint Board", width: 400, height: 300 });
+    const wRes = await ok(B, "write_html", {
+      parentId: b2.id,
+      html: `<div style="padding: 18px; border-radius: 6px; font-size: 22px; color: #ff0000">Raw</div>`,
+    });
+    assert.ok(wRes.warnings.some((w) => /spacing token/.test(w)), wRes.warnings.join("\n"));
+    assert.ok(wRes.warnings.some((w) => /radius token/.test(w)), wRes.warnings.join("\n"));
+    assert.ok(wRes.warnings.some((w) => /font-size token/.test(w)), wRes.warnings.join("\n"));
+    assert.ok(wRes.warnings.some((w) => /color token/.test(w)), wRes.warnings.join("\n"));
+
+    const lId = wRes.created[0].id;
+    const quiet = await ok(B, "update_styles", { updates: [{ nodeIds: [lId], styles: { padding: "22px" } }], lint: false });
+    assert.deepEqual(quiet, { updated: 1 }, "lint: false suppresses design system scale warnings");
+
+    await ok(B, "open_project", { projectId });
+    await ok(B, "delete_project", { projectId: target.id });
+    await ok(B, "delete_project", { projectId: kit.id });
+  });
+
+  await t.test("icon registry: register_icons, list_icons, delete_icon, and <icon /> expansion", async () => {
+    const reg = await ok(B, "register_icons", {
+      icons: [
+        { name: "nf-n", svg: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none"><path d="M4 2V22M20 2V22" stroke="#e50914" stroke-width="4"/></svg>' },
+        { name: "dot", svg: '<svg viewBox="0 0 8 8" width="8" height="8"><circle cx="4" cy="4" r="3" fill="#ffffff"/></svg>' },
+      ],
+    });
+    assert.deepEqual(reg.registered, ["nf-n", "dot"]);
+    assert.equal(reg.total, 2);
+    const list = await ok(B, "list_icons");
+    assert.deepEqual(list.map((i) => i.name), ["dot", "nf-n"]);
+    await fails(B, "register_icons", { name: "evil", svg: '<svg><script>alert(1)</script><path d="M0 0"/></svg>' }, /unsafe/i);
+
+    const wRes = await ok(B, "write_html", {
+      parentId: section,
+      html: '<div style="display:flex;gap:8px"><icon name="nf-n" width="16" /><icon name="nf-n" width="16" /><icon name="ghost" /><span>Row</span></div>',
+    });
+    assert.ok(wRes.warnings.some((w) => /ghost.*isn't registered/.test(w)), wRes.warnings.join("\n"));
+    const rowId = wRes.created[0].id;
+    const kids = await ok(B, "get_children", { nodeId: rowId });
+    assert.deepEqual(kids.map((k) => k.tag), ["svg", "svg", "span"]);
+
+    const htmlOut = await ok(B, "get_jsx", { nodeId: rowId, format: "html" });
+    assert.equal((htmlOut.match(/<symbol /g) || []).length, 1, "repeated <icon> instances deduplicate into one <symbol>");
+    assert.equal((htmlOut.match(/<use href="#icon-1"\/>/g) || []).length, 2);
+
+    assert.deepEqual(await ok(B, "delete_icon", { name: "dot" }), { deleted: "dot", total: 1 });
+    await ok(B, "undo");
+    assert.equal((await ok(B, "list_icons")).length, 2, "delete_icon is undoable");
+    await ok(B, "delete_nodes", { nodeIds: [rowId] });
+  });
+
   await t.test("preview: a screen opens as a live page sized to its artboard", async () => {
     const shell = await fetch(`${B}/preview/${board}`);
     assert.equal(shell.status, 200);
@@ -838,6 +936,17 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
 
     const small = await call(B, "get_screenshot", { nodeId: board, scale: 0.5 });
     assert.match(small.text, /at scale 0\.5/);
+
+    // Multi-viewport responsive screenshot captures on one artboard without duplicating DOM.
+    const multi = await call(B, "get_screenshot", { nodeId: board, widths: [390, 834], scale: 1 });
+    assert.equal(multi.isError, false, multi.text);
+    const imgs = multi.result.content.filter((c) => c.type === "image");
+    const caps = multi.result.content.filter((c) => c.type === "text");
+    assert.equal(imgs.length, 2, "one PNG per requested viewport width");
+    assert.match(caps[0].text, /@ 390px · 390×\d+px/);
+    assert.match(caps[1].text, /@ 834px · 834×\d+px/);
+    assert.equal((await ok(B, "get_node_info", { nodeId: board })).styles.width, "800px", "saved artboard width unchanged");
+
     const batchShots = await call(B, "get_screenshot", { nodeIds: [board, section], scale: 0.5 });
     assert.equal(batchShots.isError, false, batchShots.text);
     const images = batchShots.result.content.filter((c) => c.type === "image");
@@ -848,6 +957,52 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
     assert.match(captions[1].text, new RegExp(section));
     await fails(B, "get_screenshot", { nodeId: "ghost" }, /not found/);
     await fails(B, "get_screenshot", { nodeIds: [board, "ghost"] }, /not found/);
+  });
+
+  await t.test("diagnostics: audit_artboard and get_screenshot({ diagnostics: true })", { skip: !browser && "no Chrome/Chromium available" }, async () => {
+    const cleanAb = (await ok(B, "create_artboard", { name: "Healthy", width: 800, height: "fit-content" })).id;
+    await ok(B, "write_html", {
+      parentId: cleanAb,
+      html: `<div style="padding:24px;background:#ffffff"><p style="margin:0;color:#0a0b0d">Healthy text</p></div>`,
+    });
+    const cleanAudit = await ok(B, "audit_artboard", { nodeIds: [cleanAb], checkContrast: true });
+    assert.equal(cleanAudit.ok, true);
+    assert.equal(cleanAudit.audits.length, 1);
+    assert.equal(cleanAudit.summary.brokenImages, 0);
+
+    const sickAb = (await ok(B, "create_artboard", { name: "AuditTarget", width: 390, height: "fit-content" })).id;
+    await ok(B, "write_html", {
+      parentId: sickAb,
+      html: `<div data-name="Wrap" style="padding:12px;background:#ffffff">
+        <img data-name="BrokenImg" src="http://127.0.0.1:1/nope.png" alt="Broken" style="width:40px;height:40px;display:block">
+        <div data-name="Over" style="width:120px;white-space:nowrap">Long_unbreakable_horizontal_overflow_text_string</div>
+        <p data-name="BadFont" style="font-family:'MissingAuditFont',sans-serif;color:#111111;margin:0">Font check</p>
+        <p data-name="Faint" style="color:#cccccc;margin:0">Too light</p>
+        <button data-name="TinyBtn" style="width:24px;height:24px">Go</button>
+      </div>`,
+    });
+    const audit = await ok(B, "audit_artboard", { nodeIds: [sickAb], checkContrast: true });
+    assert.equal(audit.ok, false);
+    assert.equal(audit.summary.brokenImages, 1);
+    assert.ok(audit.summary.overflows >= 1);
+    assert.ok(audit.audits[0].missingFonts.some((f) => f.family === "MissingAuditFont"));
+    assert.ok(audit.summary.tapTargets >= 1);
+    assert.ok(audit.summary.lowContrast >= 1);
+
+    // Responsive width override
+    const wideAudit = await ok(B, "audit_artboard", { nodeId: cleanAb, width: 390 });
+    assert.equal(wideAudit.audits[0].width, 390);
+
+    // Attached diagnostics on get_screenshot
+    const diagShot = await call(B, "get_screenshot", { nodeId: sickAb, diagnostics: true, checkContrast: true });
+    assert.equal(diagShot.isError, false, diagShot.text);
+    const diagText = diagShot.result.content.filter((c) => c.type === "text").at(-1)?.text;
+    const diagJson = JSON.parse(diagText);
+    assert.equal(diagJson.diagnostics.ok, false);
+    assert.equal(diagJson.diagnostics.summary.brokenImages, 1);
+
+    await fails(B, "audit_artboard", { nodeIds: ["ghost"] }, /not found/);
+    await ok(B, "delete_nodes", { nodeIds: [cleanAb, sickAb] });
   });
 
   // ---------------------------------------------------------------- pages
@@ -878,6 +1033,93 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
   });
 
   // ---------------------------------------------------------------- fonts
+
+  await t.test("reusable components: create, instantiate, override, update propagation and undo", async () => {
+    await ok(B, "update_root_css", { css: ".nf-card { padding: 12px; } .nf-card-lg { border-radius: 16px; } .nf-badge { background: #0000ff; color: #fff; }" });
+    const mobileBoard = await ok(B, "create_artboard", { name: "Mobile", width: 390, height: 844 });
+    const desktopBoard = await ok(B, "create_artboard", { name: "Desktop", width: 1280, height: 800 });
+
+    const created = await ok(B, "create_component", {
+      name: "nf-card",
+      html: `<div class="nf-card" data-name="Show Card"><img data-slot="poster" src="https://example.com/default.jpg" alt="Poster"><h3 data-slot="title">Default Show</h3></div>`,
+    });
+    assert.equal(created.id, "nf-card");
+    assert.ok(created.slots.some((s) => s.slot === "poster") && created.slots.some((s) => s.slot === "title"));
+
+    // Instantiate via MCP tool with slot overrides on Desktop
+    const inst1 = await ok(B, "instantiate_component", {
+      component: "nf-card",
+      parentId: desktopBoard.id,
+      overrides: {
+        title: "Stranger Things",
+        poster: { attrs: { src: "https://example.com/st.jpg", alt: "ST" } },
+      },
+    });
+    assert.equal(inst1.component, "nf-card");
+
+    // Instantiate via write_html data-component + data-slot on Mobile
+    const wRes = await ok(B, "write_html", {
+      parentId: mobileBoard.id,
+      html: `<div data-component="nf-card"><h3 data-slot="title">Dark</h3></div>`,
+    });
+    const inst2Id = wRes.created[0].id;
+    const inst1Children = await ok(B, "get_children", { nodeId: inst1.id });
+    const inst2Children = await ok(B, "get_children", { nodeId: inst2Id });
+    const inst1TitleId = inst1Children[1].id;
+    const inst2TitleId = inst2Children[1].id;
+    assert.equal((await ok(B, "get_node_info", { nodeId: inst1TitleId })).text, "Stranger Things");
+    assert.equal((await ok(B, "get_node_info", { nodeId: inst2TitleId })).text, "Dark");
+
+    // Manual edit via set_text_content tracks override too
+    await ok(B, "set_text_content", { updates: [{ nodeId: inst2TitleId, text: "Dark (S3)" }] });
+
+    // Duplicate an instance -> also stays linked
+    const [dupInst] = await ok(B, "duplicate_nodes", { nodeIds: [inst1.id] });
+    assert.equal((await ok(B, "list_components")).find((c) => c.id === "nf-card").instanceCount, 3);
+
+    // Master update propagates class, tag, and a newly appended badge slot across ALL 3 instances while preserving overrides!
+    const up = await ok(B, "update_component", {
+      component: "nf-card",
+      patch: { tag: "article", addClasses: ["nf-card-lg"] },
+      appendHtml: { html: `<span data-slot="badge" class="nf-badge">TOP 10</span>` },
+    });
+    assert.equal(up.updatedInstances, 3);
+    assert.equal(up.createdNodes, 3);
+
+    const inst1Info = await ok(B, "get_node_info", { nodeId: inst1.id });
+    assert.equal(inst1Info.tag, "article");
+    assert.deepEqual(inst1Info.classes, ["nf-card", "nf-card-lg"]);
+    assert.equal(inst1Info.children.length, 3, "new badge slot added to instance");
+    assert.equal((await ok(B, "get_node_info", { nodeId: inst1TitleId })).text, "Stranger Things", "override preserved after master update");
+    assert.equal((await ok(B, "get_node_info", { nodeId: inst1Children[0].id })).attrs.src, "https://example.com/st.jpg", "poster override preserved");
+    assert.equal((await ok(B, "get_node_info", { nodeId: inst2TitleId })).text, "Dark (S3)", "manual edit override preserved");
+
+    const dupInfo = await ok(B, "get_node_info", { nodeId: dupInst.id });
+    assert.equal(dupInfo.tag, "article");
+    assert.equal(dupInfo.children.length, 3, "duplicated instance also received new badge slot");
+
+    // Undo restores previous master & removes added badge slots atomically
+    await ok(B, "undo");
+    assert.equal((await ok(B, "get_node_info", { nodeId: inst1.id })).tag, "div");
+    assert.equal((await ok(B, "get_node_info", { nodeId: inst1.id })).children.length, 2);
+    await ok(B, "redo");
+    assert.equal((await ok(B, "get_node_info", { nodeId: inst1.id })).children.length, 3);
+
+    // Create component from existing node + detach + delete component
+    const customBox = await ok(B, "create_node", { parentId: desktopBoard.id, name: "Banner", tag: "div", styles: { padding: 8 } });
+    const compFromNode = await ok(B, "create_component", { name: "banner-box", nodeId: customBox.id });
+    assert.equal(compFromNode.linkedSource, true);
+    assert.equal((await ok(B, "get_node_info", { nodeId: customBox.id })).component.id, "banner-box");
+
+    const delComp = await ok(B, "delete_component", { component: "nf-card" });
+    assert.equal(delComp.detachedInstances, 3);
+    assert.equal((await ok(B, "get_node_info", { nodeId: inst1.id })).component, undefined, "layers stay on canvas detached");
+
+    await ok(B, "delete_component", { component: "banner-box" });
+    await ok(B, "delete_nodes", { nodeIds: [mobileBoard.id, desktopBoard.id] });
+    await ok(B, "update_root_css", { classes: { "nf-card": null, "nf-card-lg": null, "nf-badge": null } });
+  });
+
   await t.test("fonts: list, add (Google + file), remove", async () => {
     const fontsBefore = await ok(B, "list_fonts");
     assert.ok(fontsBefore.some((f) => f.id === "builtin-geist" && f.cssFamily.startsWith("'Geist'")));

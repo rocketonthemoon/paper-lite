@@ -21,6 +21,9 @@ import { Renderer } from "./renderer.js";
 import { BlitzRenderer, PreferBlitz } from "./renderer-blitz.js";
 import { registerTools, SERVER_INSTRUCTIONS } from "./mcp-tools.js";
 import { CheckpointRepo } from "./checkpoint-store.js";
+import { MAX_ICONS, expandIconSpecs, parseSvgIcon } from "./icons.js";
+import { analyzeDesignLint, exportDesignTokens, importDesignTokens } from "./design-tokens.js";
+import { createComponentEngine, extractComponentOverridesFromSpec, trackNodeOverrides } from "./components.js";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.DATA_DIR || path.join(ROOT, "data");
@@ -320,6 +323,8 @@ function docSnapshot(doc = state) {
     rootId: doc.rootId,
     nodes: doc.nodes,
     rootCss: doc.rootCss || emptyRootCss(),
+    icons: doc.icons || {},
+    components: doc.components || {},
   });
 }
 
@@ -519,17 +524,21 @@ function sendEvent(event, data) {
 // Full document: on connect and when another project opens. Edits send only what changed (broadcastPatch).
 const broadcast = (source) => {
   lastSentRootCss = state.rootCss;
+  lastSentComponents = state.components;
   sendEvent("state", { source, state });
 };
 
 // Send browsers the nodes that changed ({ id: node | null } for deleted), the page list, and the root CSS when
 // it changed. A browser applies it only on top of `baseVersion`; one that missed a step reloads the full state.
 let lastSentRootCss = null;
+let lastSentComponents = null;
 function broadcastPatch(source, ids, baseVersion = state.version) {
   const nodes = {};
   for (const id of ids) nodes[id] = state.nodes[id] ?? null;
   const rootCss = state.rootCss !== lastSentRootCss ? state.rootCss : undefined;
+  const components = state.components !== lastSentComponents ? state.components : undefined;
   lastSentRootCss = state.rootCss;
+  lastSentComponents = state.components;
   sendEvent("patch", {
     source,
     id: state.id,
@@ -539,6 +548,7 @@ function broadcastPatch(source, ids, baseVersion = state.version) {
     pages: state.pages,
     rootId: state.rootId,
     ...(rootCss ? { rootCss } : {}),
+    ...(components ? { components } : {}),
     nodes,
   });
 }
@@ -594,7 +604,7 @@ function ensureAgentStartCheckpoint(beforeState) {
 // While an edit runs, `state.nodes` is a proxy that copies each node the first time the edit reads or writes it.
 // Afterwards those copies are compared with the live nodes; the ones that differ become the undo patch.
 // ---------------------------------------------------------------------------
-const docMeta = (doc) => ({ pages: [...doc.pages], rootCss: structuredClone(doc.rootCss || emptyRootCss()) });
+const docMeta = (doc) => ({ pages: [...doc.pages], rootCss: structuredClone(doc.rootCss || emptyRootCss()), icons: structuredClone(doc.icons || {}), components: structuredClone(doc.components || {}) });
 const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
 function beginTracking() {
@@ -625,6 +635,8 @@ function rollbackTracking(tr) {
   }
   state.pages = tr.meta.pages;
   state.rootCss = tr.meta.rootCss;
+  state.icons = tr.meta.icons;
+  state.components = tr.meta.components;
 }
 
 // Finish an edit: returns { before, after } with only the nodes that changed ({ id: node | null }) and the
@@ -667,6 +679,8 @@ function applyPatchSide(side) {
   if (side.meta) {
     state.pages = [...side.meta.pages];
     state.rootCss = structuredClone(side.meta.rootCss);
+    if (side.meta.icons !== undefined) state.icons = structuredClone(side.meta.icons);
+    state.components = structuredClone(side.meta.components || {});
   }
   if (!state.pages.includes(state.rootId)) state.rootId = state.pages[0];
 }
@@ -975,6 +989,8 @@ async function restoreCheckpointById(id, source = "api") {
     s.rootId = snap.pages.includes(s.rootId) ? s.rootId : snap.rootId;
     s.nodes = snap.nodes;
     if (snap.rootCss) s.rootCss = snap.rootCss;
+    s.icons = snap.icons || {};
+    s.components = snap.components ? structuredClone(snap.components) : {};
     return cp;
   }, { tool: "Restore checkpoint", target: cp.name, label: `Restore checkpoint · ${cp.name}` });
   return { id: cp.id, name: cp.name };
@@ -1354,6 +1370,22 @@ function updateNode(id, patch, source = "api", meta = null) {
   else if (patch.styles !== undefined) uiTool = "Edit styles";
   else if (patch.classes !== undefined || patch.addClasses !== undefined || patch.removeClasses !== undefined) uiTool = "Edit classes";
   else if (patch.tag !== undefined) uiTool = "Change tag";
+  if (patch.detachComponent) {
+    return mutate(source, (s) => {
+      const target = s.nodes[id];
+      const rootId = target.componentRootId || target.id;
+      for (const item of Object.values(s.nodes)) {
+        if (item.id === rootId || item.componentRootId === rootId) {
+          delete item.componentId; delete item.componentRootId; delete item.componentKey; delete item.componentOverrides;
+        }
+      }
+      return target;
+    }, meta || { tool: "detach_component", target: node.name, nodeIds: [id] });
+  }
+  if (!meta?.skipOverrideTracking && node.componentId && node.componentKey) {
+    const ov = trackNodeOverrides(node, patch, next);
+    if (ov) next.componentOverrides = ov;
+  }
   return mutate(source, (s) => {
     const n = s.nodes[id];
     Object.assign(n, next);
@@ -1435,11 +1467,15 @@ function duplicateNode(id, source = "api") {
   if (isPage(id)) throw new HttpError(400, "Pages cannot be duplicated");
   const node = getNode(id);
   return mutate(source, (s) => {
-    const copy = (srcId, parentId) => {
+    const dupRootSourceId = node.componentId && !node.componentRootId ? node.id : null;
+    const copy = (srcId, parentId, newInstRoot = null) => {
       const src = s.nodes[srcId];
       const nid = newId();
-      s.nodes[nid] = { ...structuredClone(src), id: nid, parentId, children: [] };
-      s.nodes[nid].children = src.children.map((c) => copy(c, nid));
+      const instRoot = newInstRoot || (srcId === dupRootSourceId ? nid : null);
+      const cloned = { ...structuredClone(src), id: nid, parentId, children: [] };
+      if (cloned.componentRootId && dupRootSourceId && cloned.componentRootId === dupRootSourceId && instRoot) cloned.componentRootId = instRoot;
+      s.nodes[nid] = cloned;
+      s.nodes[nid].children = src.children.map((c) => copy(c, nid, instRoot));
       return nid;
     };
     const nid = copy(id, node.parentId);
@@ -1608,9 +1644,9 @@ function getRootCss(opts = {}, doc = state) {
 
 // Patch the root CSS. `css` text is parsed and merged like vars/classes; replace: true starts from empty.
 // Removing a class also removes it from every layer that used it, in the same undo step.
-async function updateRootCss({ vars, classes, css, replace = false, pruneUnused = false } = {}, source = "api") {
+async function updateRootCss({ vars, classes, css, rules, replace = false, pruneUnused = false } = {}, source = "api") {
   const before = state.rootCss || emptyRootCss();
-  let next = mergeRootCss(before, { css, vars, classes }, { replace });
+  let next = mergeRootCss(before, { css, vars, classes, rules }, { replace });
   if (pruneUnused) next = pruneUnusedRootCss(next, state.nodes);
   // Changed variables and rules, by name (a rule is named by its selector and @media).
   const ruleKey = (r) => (r.media ? `@media ${r.media} { ${r.selector} }` : r.selector);
@@ -1658,6 +1694,11 @@ async function updateRootCss({ vars, classes, css, replace = false, pruneUnused 
         if (!n.classes.length) delete n.classes;
         touchedIds.push(n.id);
       }
+      const pruneTree = (t) => {
+        if (t.classes?.length) { t.classes = t.classes.filter((c) => !dropped.includes(c)); if (!t.classes.length) delete t.classes; }
+        (t.children || []).forEach(pruneTree);
+      };
+      for (const comp of Object.values(s.components || {})) if (comp?.tree) pruneTree(comp.tree);
     }
   }, { tool: source === "mcp" ? "update_root_css" : "Edit root CSS", target: changed.length ? `Root CSS · ${changed.slice(0, 3).join(", ")}${changed.length > 3 ? "…" : ""}` : "Root CSS", nodeIds: touchedIds });
   // Ensure full persistence before returning so subsequent write_html / restarts always see the updated root CSS.
@@ -1692,29 +1733,83 @@ async function updateRootCss({ vars, classes, css, replace = false, pruneUnused 
   };
 }
 
-// Nudges for agents: hard-coded values that already exist as a root variable, and var() names that don't exist.
-function rootCssHints(nodeIds, doc = state) {
-  const root = doc.rootCss || emptyRootCss();
-  // Several variables can share a value (--space-3 and --radius both 12px); name them all.
-  const byValue = new Map();
-  for (const [k, v] of Object.entries(root.vars)) byValue.set(String(v).toLowerCase(), [...(byValue.get(String(v).toLowerCase()) || []), k]);
-  const hints = new Set();
-  for (const id of nodeIds) {
-    const n = doc.nodes[id];
-    if (!n) continue;
-    for (const [k, v] of Object.entries(n.styles)) {
-      if (doc.pages.includes(n.parentId) && (k === "left" || k === "top" || k === "position")) continue;
-      const known = byValue.get(String(v).toLowerCase());
-      if (known) hints.add(`${k}: ${v} is the root variable ${known.join(" / ")}; use ${known.map((x) => `var(${x})`).join(" or ")} so it stays shared`);
-      for (const ref of varsIn(v)) if (!(ref in root.vars)) hints.add(`${n.name}: var(${ref}) isn't defined in the root CSS (add it with update_root_css)`);
-    }
-    if (hints.size >= 20) break;
+async function importRootCss({ sourceProjectId, mode = "merge", varsOnly = false, classes } = {}, source = "mcp") {
+  if (!["merge", "replace"].includes(mode)) throw new HttpError(400, `Invalid mode "${mode}" (use merge or replace)`);
+  if (!sourceProjectId || !ID_RE.test(String(sourceProjectId))) throw new HttpError(400, "Invalid sourceProjectId");
+  const srcDoc = await readProject(sourceProjectId);
+  const srcRoot = srcDoc.rootCss || emptyRootCss();
+  const classSet = Array.isArray(classes) && classes.length ? new Set(cleanClassList(classes)) : null;
+
+  let rulesToImport = [];
+  if (!varsOnly) {
+    rulesToImport = classSet
+      ? srcRoot.rules.filter((r) => rootClassesIn(r.selector).some((c) => classSet.has(c)))
+      : srcRoot.rules;
   }
-  return [...hints].slice(0, 20);
+
+  let varsToImport = {};
+  if (classSet && !varsOnly) {
+    const needed = new Set();
+    const queue = [];
+    for (const r of rulesToImport) {
+      for (const stVal of Object.values(r.styles || {})) {
+        for (const v of varsIn(stVal)) if (!needed.has(v)) { needed.add(v); queue.push(v); }
+      }
+    }
+    while (queue.length) {
+      const v = queue.shift();
+      if (!(v in srcRoot.vars)) continue;
+      varsToImport[v] = srcRoot.vars[v];
+      for (const ref of varsIn(srcRoot.vars[v])) {
+        if (!needed.has(ref)) { needed.add(ref); queue.push(ref); }
+      }
+    }
+  } else {
+    varsToImport = { ...srcRoot.vars };
+  }
+
+  const res = await updateRootCss({ vars: varsToImport, rules: rulesToImport, replace: mode === "replace" }, source);
+  return {
+    importedFrom: { id: srcDoc.id, name: srcDoc.name },
+    mode,
+    varsImported: Object.keys(varsToImport).length,
+    rulesImported: rulesToImport.length,
+    ...res,
+  };
+}
+
+async function applyDesignTokens({ tokens, mode = "merge" } = {}, source = "mcp") {
+  if (!["merge", "replace"].includes(mode)) throw new HttpError(400, `Invalid mode "${mode}" (use merge or replace)`);
+  const parsed = importDesignTokens(tokens);
+  const existingVars = state.rootCss?.vars || {};
+  const varsPatch = mode === "replace"
+    ? { ...Object.fromEntries(Object.keys(existingVars).map((k) => [k, null])), ...parsed.vars }
+    : parsed.vars;
+  const res = await updateRootCss({ vars: varsPatch }, source);
+  return {
+    mode,
+    imported: parsed.tokenCount,
+    ...(parsed.warnings.length ? { warnings: parsed.warnings } : {}),
+    ...res,
+  };
+}
+
+// Design system linter + nudges for agents (exact duplicates, unknown var(), spacing/radii/font-size/color lints).
+function rootCssHints(nodeIds, doc = state, options = {}) {
+  return analyzeDesignLint(nodeIds, doc, options);
 }
 
 // Insert a parsed HTML spec tree (lenient: bad tags/styles/attrs are dropped with warnings). Call inside mutate/batch.
 function addSubtree(spec, parentId, index, warnings) {
+  if (spec.component) {
+    const comp = state.components?.[spec.component];
+    if (comp) {
+      const overrides = extractComponentOverridesFromSpec(spec);
+      const rootName = spec.name && spec.name !== "Frame" ? spec.name : undefined;
+      return components.instantiateIntoState(comp, parentId, index, overrides, rootName, warnings).rootId;
+    }
+    warnings.push(`Component "${spec.component}" is not registered; built as a regular layer`);
+  }
   const parent = getNode(parentId);
   const label = cleanName(spec.name, spec.tag);
   let tag;
@@ -1760,9 +1855,42 @@ function specTag(spec) {
   try { return cleanTag(spec.tag); } catch { return "div"; }
 }
 
-function writeHtml({ html, parentId, targetNodeId, mode = "insert-children", index }, source = "mcp") {
-  const { specs, warnings } = htmlToSpecs(html);
-  if (!specs.length) throw new HttpError(400, "No elements found in html");
+function listIcons(doc = state) {
+  return Object.values(doc.icons || {})
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((ic) => ({ name: ic.name, ...(ic.viewBox ? { viewBox: ic.viewBox } : {}), shapes: ic.children.length }));
+}
+
+function registerIcons({ icons, name, svg, replace = false } = {}, source = "mcp") {
+  const entries = Array.isArray(icons) ? icons : (name !== undefined || svg !== undefined ? [{ name, svg }] : []);
+  if (!entries.length) throw new HttpError(400, "Provide icons: [{ name, svg }] or { name, svg }");
+  const parsed = entries.map((e) => parseSvgIcon(e?.name, e?.svg));
+  const next = replace ? {} : structuredClone(state.icons || {});
+  for (const asset of parsed) next[asset.name] = asset;
+  if (Object.keys(next).length > MAX_ICONS) throw new HttpError(400, `At most ${MAX_ICONS} registered icons per project`);
+  mutate(source, (s) => { s.icons = next; }, {
+    tool: source === "mcp" ? "register_icons" : "Register icons",
+    target: parsed.length === 1 ? parsed[0].name : `${parsed.length} icons`,
+  });
+  return { registered: parsed.map((p) => p.name), total: Object.keys(next).length };
+}
+
+function deleteIcon(name, source = "mcp") {
+  const key = String(name ?? "").trim();
+  if (!key || !Object.hasOwn(state.icons || {}, key)) throw new HttpError(404, `Icon "${key}" not found`);
+  mutate(source, (s) => {
+    const next = { ...(s.icons || {}) };
+    delete next[key];
+    s.icons = next;
+  }, { tool: source === "mcp" ? "delete_icon" : "Delete icon", target: key });
+  return { deleted: key, total: Object.keys(state.icons || {}).length };
+}
+
+function writeHtml({ html, parentId, targetNodeId, mode = "insert-children", index, lint = true }, source = "mcp") {
+  const { specs: rawSpecs, warnings } = htmlToSpecs(html);
+  if (!rawSpecs.length) throw new HttpError(400, "No elements found in html");
+  const specs = expandIconSpecs(rawSpecs, state.icons, warnings);
+  if (!specs.length) throw new HttpError(400, warnings[0] || "No elements found in html");
   let parent = (typeof parentId === "string" ? parentId.trim() : "") || state.rootId;
   let at = index;
   let replaceTargetName = null;
@@ -1788,7 +1916,7 @@ function writeHtml({ html, parentId, targetNodeId, mode = "insert-children", ind
   }, { tool: "write_html", target: targetLabel });
   const countAll = (id) => 1 + state.nodes[id].children.reduce((a, c) => a + countAll(c), 0);
   const subtree = (id) => [id, ...state.nodes[id].children.flatMap(subtree)];
-  warnings.push(...rootCssHints(created.flatMap(subtree)));
+  warnings.push(...rootCssHints(created.flatMap(subtree), state, { lint }));
   return {
     created: created.map((id) => ({ id, name: state.nodes[id].name, tag: state.nodes[id].tag })),
     layers: created.reduce((a, id) => a + countAll(id), 0),
@@ -2143,37 +2271,47 @@ function toHtml(nodeId, { fontBase = PUBLIC_URL, filesBase, doc = state, sheet, 
   return `<style>\n${fontCss}${styleText}\n</style>\n\n${body}\n`;
 }
 
-// icons.svg in the project export: every distinct SVG in the project once, as a <symbol> named after its layer, for
-// reuse in an app (<svg><use href="icons.svg#icon-search"/></svg> when served over http). Styles are written inline,
-// so the sprite works without the export's stylesheets. Exported screens keep the icons they use inline, because
-// browsers won't load <use> from another file when a page is opened from disk.
+// icons.svg in the project export: every icon in the project once, as a <symbol>, for reuse in an app
+// (<svg><use href="icons.svg#icon-search"/></svg> when served over http). Registered icons (register_icons) come
+// first under their registered names; any other distinct SVG on a page follows, named after its layer, unless it is a
+// copy of a registered icon. Styles are written inline, so the sprite works without the export's stylesheets.
+// Exported screens keep the icons they use inline, because browsers won't load <use> from another file when a page is
+// opened from disk.
 function iconSprite(doc = state) {
-  const keyOf = subtreeKeys(doc);
-  const seen = new Map(), ids = new Set();
-  const attrsOf = (n, skip = new Set()) => {
-    const style = Object.entries(exportStyles(n, doc)).filter(([k]) => !skip.has(k)).map(([k, v]) => `${kebab(k)}: ${v}`).join("; ");
-    return Object.entries(n.attrs || {}).filter(([k]) => !skip.has(k)).map(([k, v]) => ` ${k}="${escHtml(v)}"`).join("") + (style ? ` style="${escHtml(style)}"` : "");
+  // Registry icons are specs ({ tag, attrs, styles, children }); page SVGs are layers. Both become plain shapes.
+  const fromSpec = (sp) => ({ tag: sp.tag, attrs: sp.attrs || {}, styles: sp.styles || {}, text: sp.text || "", kids: (sp.children || []).map(fromSpec) });
+  const fromNode = (id) => {
+    const n = doc.nodes[id];
+    return { tag: n.tag, attrs: n.attrs || {}, styles: exportStyles(n, doc), text: n.text || "", kids: n.children.filter((c) => doc.nodes[c]).map(fromNode) };
+  };
+  const shapesKey = (kids) => JSON.stringify(kids.map(function k(x) { return [x.tag, x.attrs, x.styles, x.text, x.kids.map(k)]; }));
+  const attrsOf = (x, skip = new Set()) => {
+    const style = Object.entries(x.styles).filter(([k]) => !skip.has(k)).map(([k, v]) => `${kebab(k)}: ${v}`).join("; ");
+    return Object.entries(x.attrs).filter(([k]) => !skip.has(k)).map(([k, v]) => ` ${k}="${escHtml(v)}"`).join("") + (style ? ` style="${escHtml(style)}"` : "");
   };
   // The outer <svg>'s size and placement belong to where the icon is used; its paint (fill="none", stroke, …) is
   // inherited by the shapes, so it goes on the <symbol>.
   const PLACEMENT = new Set(["width", "height", "viewBox", "xmlns", "x", "y", "position", "left", "top", "right", "bottom",
     "margin", "display", "flexShrink", "flexGrow", "alignSelf", "order"]);
-  const element = (id, depth) => {
-    const n = doc.nodes[id];
+  const element = (x, depth) => {
     const pad = "  ".repeat(depth);
-    const attrs = attrsOf(n);
-    if (!n.children.length) return `${pad}<${n.tag}${attrs}${n.text ? `>${escHtml(n.text)}</${n.tag}>` : "/>"}`;
-    return [`${pad}<${n.tag}${attrs}>`, ...n.children.map((c) => element(c, depth + 1)), `${pad}</${n.tag}>`].join("\n");
+    if (!x.kids.length) return `${pad}<${x.tag}${attrsOf(x)}${x.text ? `>${escHtml(x.text)}</${x.tag}>` : "/>"}`;
+    return [`${pad}<${x.tag}${attrsOf(x)}>`, ...x.kids.map((c) => element(c, depth + 1)), `${pad}</${x.tag}>`].join("\n");
   };
+  const seen = new Map(), ids = new Set();
+  const add = (svg, name) => {
+    const key = shapesKey(svg.kids);
+    if (!svg.kids.length || seen.has(key)) return;
+    const viewBox = svg.attrs.viewBox ? ` viewBox="${escHtml(svg.attrs.viewBox)}"` : "";
+    const symbolId = uniqueSlug(ids, `icon ${name}`, "icon");
+    seen.set(key, `  <symbol id="${symbolId}"${viewBox}${attrsOf(svg, PLACEMENT)}>\n${svg.kids.map((c) => element(c, 2)).join("\n")}\n  </symbol>`);
+  };
+  for (const icon of Object.values(doc.icons || {}).sort((a, b) => a.name.localeCompare(b.name))) add(fromSpec({ tag: "svg", ...icon }), icon.name);
   const walk = (id) => {
     const n = doc.nodes[id];
     if (!n) return;
-    if (n.tag !== "svg") return n.children.forEach(walk);
-    const key = keyOf(id);
-    if (seen.has(key) || !n.children.length) return;
-    const symbolId = uniqueSlug(ids, `icon ${n.name}`, "icon");
-    const viewBox = n.attrs?.viewBox ? ` viewBox="${escHtml(n.attrs.viewBox)}"` : "";
-    seen.set(key, `  <symbol id="${symbolId}"${viewBox}${attrsOf(n, PLACEMENT)}>\n${n.children.map((c) => element(c, 2)).join("\n")}\n  </symbol>`);
+    if (n.tag === "svg") add(fromNode(id), n.name);
+    else n.children.forEach(walk);
   };
   for (const pid of doc.pages) walk(pid);
   if (!seen.size) return null;
@@ -2459,6 +2597,8 @@ async function exportProjectZip(projectId, format = "html") {
   const fontCss = allFamilies.size ? fonts.css({ families: [...allFamilies], filesBase: "fonts" }) : "";
   entries.push({ name: "tokens.css", data: sheet.tokensCss(fontCss) });
   entries.push({ name: "components.css", data: sheet.componentsCss() });
+  // The same tokens as tokens.css, in the W3C Design Tokens format, for design tools and token pipelines.
+  entries.push({ name: "tokens.json", data: `${JSON.stringify(exportDesignTokens(doc), null, 2)}\n` });
   const sprite = iconSprite(doc);
   if (sprite) entries.push({ name: "icons.svg", data: sprite });
 
@@ -2596,12 +2736,64 @@ function answerTabMeasure(id, body) {
   else if (--m.waiting <= 0) m.done(null);
   return { ok: true };
 }
+async function auditArtboards({ nodeIds, nodeId, width, checkContrast = false, checkTapTargets } = {}) {
+  const rawIds = nodeIds?.length
+    ? nodeIds
+    : nodeId
+      ? [nodeId]
+      : uiSelection.ids.filter((id) => state.nodes[id] && !isPage(id));
+  const artboards = [];
+  const seen = new Set();
+  const pushAb = (ab) => {
+    if (ab && !seen.has(ab)) {
+      seen.add(ab);
+      artboards.push(ab);
+    }
+  };
+  if (rawIds.length) {
+    for (const id of rawIds) {
+      getNode(id);
+      if (isPage(id)) {
+        for (const cid of state.nodes[id].children || []) pushAb(cid);
+      } else {
+        pushAb(artboardOf(id));
+      }
+    }
+  } else {
+    for (const cid of state.nodes[state.rootId]?.children || []) pushAb(cid);
+  }
+  if (!artboards.length) throw new HttpError(400, "Canvas is empty");
+  look(artboards, "audit_artboard", artboards.length === 1 ? state.nodes[artboards[0]].name : `${artboards.length} artboards`);
+  const audits = [];
+  const summary = { brokenImages: 0, overflows: 0, missingFonts: 0, tapTargets: 0, lowContrast: 0 };
+  for (const ab of artboards) {
+    const size = artboardSize(ab);
+    const report = await renderer.audit({
+      artboardId: ab,
+      ...size,
+      widthOverride: width,
+      checkContrast,
+      checkTapTargets,
+    });
+    for (const k of Object.keys(summary)) summary[k] += report.summary?.[k] || 0;
+    audits.push({ artboardId: ab, name: state.nodes[ab].name, ...report });
+  }
+  return { ok: audits.every((a) => a.ok), summary, audits };
+}
+
+const components = createComponentEngine({
+  getState: () => state, getNode, isPage, safePageOf, nestError, insertChild, nextArtboardPosition, definedClasses, mutate, specTag,
+});
+
 const mcpContext = {
   state: () => state,
   urls: { ui: PUBLIC_URL, mcp: `${PUBLIC_URL}/mcp` },
-  getNode, isPage, pageOf, artboardOf, artboardSize, outline, exportCode, renderer, measureInTab,
+  getNode, isPage, pageOf, artboardOf, artboardSize, outline, exportCode, renderer, measureInTab, auditArtboards,
   createNode, updateNode, updateNodesMatching, deleteNode, duplicateNode, createArtboard, writeHtml,
-  rootCss: { get: (opts) => getRootCss(opts), update: (patch) => updateRootCss(patch, "mcp"), hints: (ids) => rootCssHints(ids) },
+  components: { list: () => components.list(), create: (a, s) => components.create(a, s), instantiate: (a, s) => components.instantiate(a, s), update: (a, s) => components.update(a, s), remove: (a, s) => components.remove(a, s) },
+  rootCss: { get: (opts) => getRootCss(opts), update: (patch) => updateRootCss(patch, "mcp"), import: (opts) => importRootCss(opts, "mcp"), hints: (ids, opts) => rootCssHints(ids, state, opts) },
+  tokens: { export: () => exportDesignTokens(state), import: (opts) => applyDesignTokens(opts, "mcp") },
+  icons: { list: () => listIcons(), register: (opts) => registerIcons(opts, "mcp"), remove: (name) => deleteIcon(name, "mcp") },
   batch: (source, fn, meta) => batch(source, fn, meta),
   undo: (source) => stepHistory(source, "undo"),
   redo: (source) => stepHistory(source, "redo"),
@@ -2739,6 +2931,12 @@ app.post("/api/state", wrap((req) => {
 // Nodes
 app.get("/api/root-css", wrap(() => getRootCss()));
 app.patch("/api/root-css", wrap((req) => updateRootCss(req.body || {}, who(req))));
+app.get("/api/icons", wrap(() => listIcons()));
+app.post("/api/icons", wrap((req) => registerIcons(req.body || {}, who(req))));
+app.delete("/api/icons/:name", wrap((req) => deleteIcon(req.params.name, who(req))));
+app.post("/api/root-css/import", wrap((req) => importRootCss(req.body || {}, who(req))));
+app.get("/api/tokens", wrap(() => exportDesignTokens(state)));
+app.post("/api/tokens", wrap((req) => applyDesignTokens(req.body || {}, who(req))));
 app.post("/api/nodes", wrap((req) => createNode(req.body || {}, who(req))));
 app.patch("/api/nodes/:id", wrap((req) => updateNode(req.params.id, req.body || {}, who(req))));
 app.delete("/api/nodes/:id", wrap((req) => deleteNode(req.params.id, who(req))));
@@ -2980,8 +3178,10 @@ es.addEventListener("fonts", () => { if (!fontsSeen) { fontsSeen = true; return;
 }));
 app.get("/render/:id", wrap((req, res) => {
   const ab = artboardOf(req.params.id);
+  const w = Number(req.query.width);
+  const widthCss = Number.isFinite(w) && w > 0 ? `body>[data-layer="${ab}"]{width:${Math.round(w)}px!important}` : "";
   res.type("html").send(`<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="/fonts.css">
-<style>html,body{margin:0;background:transparent}</style></head><body>${toHtml(ab, { fontBase: "", markIds: true })}</body></html>`);
+<style>html,body{margin:0;background:transparent}${widthCss}</style></head><body>${toHtml(ab, { fontBase: "", markIds: true })}</body></html>`);
 }));
 app.get("/api/export", wrap((req, res) => {
   res.type("text/plain").send(exportCode(String(req.query.format || "html"), req.query.nodeId ? String(req.query.nodeId) : undefined));
@@ -3008,6 +3208,7 @@ function mcpToolDetail(toolName, args) {
   if (toolName === "write_html") return args.mode === "replace" ? "replace" : "";
   if (toolName === "create_artboard" && args.name) return String(args.name).slice(0, 28);
   if (toolName === "get_screenshot" && args.scale) return `${args.scale}x`;
+  if (toolName === "audit_artboard" && args.width) return `${args.width}px`;
   if (toolName === "get_jsx" && args.format) return String(args.format);
   return "";
 }

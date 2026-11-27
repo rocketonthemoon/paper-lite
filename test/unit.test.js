@@ -25,7 +25,10 @@ import {
   pruneUnusedRootCss,
 } from "../model.js";
 import { htmlToSpecs, parseInlineStyle } from "../html-import.js";
+import { expandIconSpecs, parseSvgIcon } from "../icons.js";
 import { FontLibrary, familiesIn, parseFontFileName, renameWithRetry } from "../fonts.js";
+import { analyzeDesignLint, exportDesignTokens, importDesignTokens } from "../design-tokens.js";
+import { extractCustomFontFamilies, parseRgbaColor, blendColor, contrastRatio, isLargeText, buildDomAuditScript } from "../audit.js";
 
 test("model: cleanTag normalises case and rejects disallowed tags", () => {
   assert.equal(cleanTag("DIV"), "div");
@@ -263,6 +266,34 @@ test("fonts: renameWithRetry renames, and fails fast on errors that aren't trans
   }
 });
 
+test("audit: WCAG color, contrast, font extraction, and script generation", () => {
+  assert.deepEqual(
+    extractCustomFontFamilies("'Bebas Neue', 'Inter', system-ui, sans-serif"),
+    ["Bebas Neue", "Inter"],
+  );
+  assert.deepEqual(extractCustomFontFamilies("system-ui, -apple-system, sans-serif"), []);
+
+  assert.deepEqual(parseRgbaColor("rgb(255, 0, 128)"), { r: 255, g: 0, b: 128, a: 1 });
+  assert.deepEqual(parseRgbaColor("rgba(0, 0, 0, 0.5)"), { r: 0, g: 0, b: 0, a: 0.5 });
+  assert.equal(parseRgbaColor("not-a-color"), null);
+
+  const halfBlackOnWhite = blendColor({ r: 0, g: 0, b: 0, a: 0.5 }, { r: 255, g: 255, b: 255, a: 1 });
+  assert.equal(Math.round(halfBlackOnWhite.r), 128);
+
+  assert.equal(contrastRatio("rgb(0, 0, 0)", "rgb(255, 255, 255)"), 21);
+  assert.ok(contrastRatio("rgb(153, 153, 153)", "rgb(255, 255, 255)") < 4.5);
+  assert.ok(contrastRatio("rgba(0, 0, 0, 0.5)", "rgb(255, 255, 255)") < 4.5);
+
+  assert.equal(isLargeText("24px", "400"), true);
+  assert.equal(isLargeText("19px", "700"), true);
+  assert.equal(isLargeText("16px", "400"), false);
+
+  const script = buildDomAuditScript({ artboardId: "ab123456", width: 390, checkContrast: true });
+  assert.match(script, /ab123456/);
+  assert.match(script, /brokenImages/);
+  assert.match(script, /lowContrast/);
+});
+
 test("root CSS: nesting, states and @media parse into ordered rules and round-trip as text", () => {
   const css = `/* brand */
     :root { --brand: #0000ff; --pad: 16px }
@@ -441,4 +472,139 @@ test("normalizeProject keeps root CSS and layer classes, dropping invalid entrie
   assert.ok(warnings.length >= 4, warnings.join("\n"));
   assert.throws(() => normalizeProject({ ...raw, nodes: { p: raw.nodes.p, a: { ...raw.nodes.a, classes: ["card"] } } }), /look like --color-primary/, "strict loading rejects bad root CSS");
   assert.deepEqual(normalizeProject({ nodes: { p: { name: "P", tag: "div" } }, pages: ["p"] }).rootCss, { vars: {}, rules: [] }, "older projects get an empty root CSS");
+});
+
+test("icons: parseSvgIcon validates/sanitises SVG assets and expandIconSpecs expands self-closing <icon />", () => {
+  const icon = parseSvgIcon("nf-n", '<svg viewBox="0 0 24 24" width="24" height="24" fill="none"><path d="M4 2V22M20 2V22" stroke="#e50914" stroke-width="4"/></svg>');
+  assert.equal(icon.name, "nf-n");
+  assert.equal(icon.viewBox, "0 0 24 24");
+  assert.equal(icon.children.length, 1);
+
+  assert.throws(() => parseSvgIcon("bad name", "<svg><path d='M0 0'/></svg>"), /letters, digits/);
+  assert.throws(() => parseSvgIcon("bad-url", '<svg><path d="M0 0" fill="url(#g)"/></svg>'), /unsafe/i);
+  assert.throws(() => parseSvgIcon("bad-script", '<svg><script>alert(1)</script></svg>'), /unsafe/i);
+  assert.throws(() => parseSvgIcon("bad-use", '<svg><use href="#x"/></svg>'), /unsafe/i);
+
+  const { specs, warnings } = htmlToSpecs('<div><icon name="nf-n" width="16" style="opacity: 0.8" /><icon name="missing" /><span>Title</span></div>');
+  const expanded = expandIconSpecs(specs, { "nf-n": icon }, warnings);
+  assert.equal(expanded.length, 1);
+  assert.equal(expanded[0].children.length, 2, "self-closing <icon /> does not swallow following sibling and missing icon is skipped");
+  assert.equal(expanded[0].children[0].tag, "svg");
+  assert.equal(expanded[0].children[0].attrs.width, "16");
+  assert.equal(expanded[0].children[0].styles.opacity, "0.8");
+  assert.equal(expanded[0].children[1].tag, "span");
+  assert.ok(warnings.some((w) => /missing.*isn't registered/.test(w)));
+
+  const doc = normalizeProject({
+    pages: ["p"], rootId: "p",
+    nodes: { p: { name: "P", tag: "div", children: [] } },
+    icons: { "nf-n": icon },
+  }, { id: "icproj" });
+  assert.equal(doc.icons["nf-n"].viewBox, "0 0 24 24");
+});
+
+test("design-tokens: W3C DTCG export/import round-trips vars, aliases, collisions and composites", () => {
+  const doc = {
+    rootCss: {
+      vars: {
+        "--color-primary": "#0000ff",
+        "--color-accent": "var(--color-primary)",
+        "--radius": "12px",
+        "--radius-lg": "20px",
+        "--space-4": "16px",
+        "--font-ui": "'Geist', sans-serif",
+      },
+      rules: [],
+    },
+  };
+  const tokens = exportDesignTokens(doc);
+  assert.equal(tokens.color.primary.$type, "color");
+  assert.equal(tokens.color.accent.$value, "{color.primary}");
+  assert.equal(tokens.radius.$root.$value, "12px", "leaf/group collision uses $root");
+  assert.equal(tokens.radius.lg.$value, "20px");
+  assert.equal(tokens.font.ui.$type, "fontFamily");
+
+  const reimported = importDesignTokens(tokens);
+  assert.deepEqual(reimported.vars, doc.rootCss.vars, "W3C tokens round-trip back to :root vars losslessly");
+
+  const dtcg = importDesignTokens({
+    spacing: { $type: "dimension", sm: { $value: { value: 8, unit: "px" } } },
+    brand: { $type: "color", base: { $value: { colorSpace: "srgb", components: [1, 0, 0] } }, alias: { $value: "{brand.base}" } },
+    heading: { $type: "typography", $value: { fontFamily: ["Inter", "sans-serif"], fontSize: { value: 24, unit: "px" } } },
+  });
+  assert.equal(dtcg.vars["--spacing-sm"], "8px");
+  assert.equal(dtcg.vars["--brand-base"], "#ff0000");
+  assert.equal(dtcg.vars["--brand-alias"], "var(--brand-base)");
+  assert.equal(dtcg.vars["--heading-font-family"], "Inter, sans-serif");
+  assert.equal(dtcg.vars["--heading-font-size"], "24px");
+});
+
+test("design-tokens: analyzeDesignLint catches spacing, radii, font-size, shorthand and color tokens", () => {
+  const doc = {
+    pages: ["p1"],
+    nodes: {
+      p1: { id: "p1", children: ["n1"] },
+      n1: {
+        id: "n1",
+        name: "Card",
+        parentId: "p1",
+        styles: {
+          padding: "12px 16px",
+          borderRadius: "10px",
+          fontSize: "19px",
+          color: "rgb(0, 0, 255)",
+          backgroundColor: "#ff00ff",
+        },
+      },
+    },
+    rootCss: {
+      vars: {
+        "--color-primary": "#0000ff",
+        "--space-3": "12px",
+        "--space-4": "16px",
+        "--radius-md": "8px",
+        "--font-size-md": "16px",
+      },
+      rules: [],
+    },
+  };
+  const hints = analyzeDesignLint(["n1"], doc);
+  assert.ok(hints.some((h) => /12px 16px repeats root variable values/.test(h)), hints.join("\n"));
+  assert.ok(hints.some((h) => /borderRadius: 10px doesn't use a radius token/.test(h)), hints.join("\n"));
+  assert.ok(hints.some((h) => /fontSize: 19px doesn't use a font-size token/.test(h)), hints.join("\n"));
+  assert.ok(hints.some((h) => /color: rgb\(0, 0, 255\) matches the root variable --color-primary/.test(h)), hints.join("\n"));
+  assert.ok(hints.some((h) => /backgroundColor: #ff00ff doesn't use a color token/.test(h)), hints.join("\n"));
+  assert.deepEqual(analyzeDesignLint(["n1"], doc, { lint: false }), []);
+});
+
+test("htmlToSpecs captures data-component and data-slot, and normalizeProject preserves components", () => {
+  const { specs } = htmlToSpecs('<div data-component="hero-card"><span data-slot="title">Hi</span></div>');
+  assert.equal(specs[0].component, "hero-card");
+  assert.equal(specs[0].children[0].slot, "title");
+
+  const doc = normalizeProject({
+    pages: ["p"],
+    rootId: "p",
+    nodes: {
+      p: { name: "Page", tag: "div", children: ["c1"] },
+      c1: {
+        name: "Card", tag: "div", children: [],
+        componentId: "hero-card", componentKey: "root",
+        componentOverrides: { text: true, styles: ["width", "bad-style!"] },
+      },
+    },
+    components: {
+      "hero-card": {
+        id: "hero-card",
+        name: "hero-card",
+        tree: { key: "root", tag: "div", name: "Card", text: "", styles: { padding: 12 }, attrs: {}, children: [] },
+      },
+      "bad name": { id: "bad name", tree: { key: "root", tag: "div", children: [] } },
+    },
+  }, { warnings: [] });
+
+  assert.ok(doc.components["hero-card"]);
+  assert.equal(doc.components["bad name"], undefined);
+  assert.equal(doc.components["hero-card"].tree.styles.padding, "12px");
+  assert.deepEqual(doc.nodes.c1.componentOverrides, { text: true, styles: ["width"] });
 });

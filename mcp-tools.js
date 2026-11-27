@@ -1,4 +1,4 @@
-// weft MCP tool set (49 tools). Modelled on Paper's MCP so agents can drive the canvas end to end:
+// weft MCP tool set (62 tools). Modelled on Paper's MCP so agents can drive the canvas end to end:
 // read (info / tree / nodes / comments / computed styles / screenshots / code) → write (HTML, styles, text, structure)
 // → review (screenshot) → reply_to_comment / finish_working_on_nodes. Every write is one undoable step and shows live in the UI.
 import * as z from "zod";
@@ -44,6 +44,8 @@ const GUIDE = `# weft MCP guide
   the layers that use it. write_html and update_styles warn when a raw value duplicates a variable.
 - update_root_css({ css }) merges each rule into the rule with the same selector and @media (or appends it);
   replace: true makes the text the whole root CSS, in order. get_root_css returns the nested text as css.
+- Cross-project design systems: import_root_css imports variables, classes and @media rules from another project;
+  export_design_tokens / import_design_tokens convert between :root CSS variables and W3C Design Tokens (tokens.json).
 
 ## Work in few, large calls
 Each tool call waits for a full model round trip, so the number of calls, not their size, sets how long a design
@@ -66,7 +68,7 @@ takes. Aim for 2–4 calls per screen, not 10–15:
    - write_html({ parentId, html }) to add content: a complete section or whole screen per call (see above).
    - write_html({ targetNodeId, mode: "replace", html }) to rebuild a layer in place.
 5. Edit: update_styles, set_text_content, rename_nodes, move_nodes, duplicate_nodes, delete_nodes: one call each with every change in its list.
-6. Review & collaborate: get_screenshot({ nodeId }) once a section or screen is done; get_computed_styles for exact values; reply_to_comment / resolve_comment on user notes.
+6. Review & collaborate: get_screenshot({ nodeId }) or audit_artboard({ nodeIds }) once a section or screen is done (broken images, overflows, missing fonts, tap targets, contrast); get_computed_styles for exact values; reply_to_comment / resolve_comment on user notes.
 7. Finish: finish_working_on_nodes. Use set_selection to point the user at the result.
 8. Code: get_jsx({ nodeId, format: "jsx" | "html" }).
 
@@ -79,7 +81,9 @@ takes. Aim for 2–4 calls per screen, not 10–15:
 - Nesting: SVG shapes only inside <svg>/<g>; no HTML inside SVG; nothing inside <img>/<hr>/<br>; artboards stay at
   the top level. A misplaced top-level element fails the call; a misplaced nested one is skipped with a warning.
 - Name layers with data-name="Card". Text-only elements become text layers; mixed text becomes span layers.
+- Reusable components: create_component({ name, html|nodeId }), instantiate_component / <div data-component="nf-card"> with data-slot="..." overrides, and update_component to propagate changes across every artboard.
 - SVG: presentation attributes only (viewBox, d, fill, stroke, stroke-width, cx, cy, r, …). No url() or href.
+  For repeated icons, register them once with register_icons and reference <icon name="nf-n" /> in write_html (exported HTML deduplicates repeated icons with <symbol>/<use>).
 - Images: <img src="https://…" alt="…">.
 
 ## Styling
@@ -187,6 +191,7 @@ export function registerTools(server, ctx) {
     return text({
       id: n.id, name: n.name, tag: n.tag, text: n.text || undefined, classes: n.classes?.length ? n.classes : undefined, styles: n.styles, attrs: Object.keys(n.attrs || {}).length ? n.attrs : undefined,
       parentId: n.parentId, pageId: ctx.pageOf(n.id), artboardId: ctx.isPage(n.id) ? undefined : ctx.artboardOf(n.id),
+      ...(n.componentId ? { component: { id: n.componentId, key: n.componentKey, rootId: n.componentRootId, overrides: n.componentOverrides } } : {}),
       path: path.join(" / "), children: n.children.map(summary),
     });
   });
@@ -229,14 +234,19 @@ export function registerTools(server, ctx) {
   });
 
   server.registerTool("get_screenshot", {
-    description: "PNG screenshot of one or more layers/artboards rendered exactly like the canvas/export (headless Chrome). Pass nodeId for one, nodeIds for batch capture, or omit for the user's selection / first artboard.",
+    description: "PNG screenshot of one or more layers/artboards rendered exactly like the canvas/export (headless Chrome). Pass nodeId for one, nodeIds for batch capture, or omit for the user's selection / first artboard. Pass width or widths ([390, 834, 1440]) to test @media breakpoints at multiple viewports without duplicating layers, and diagnostics: true to also run DOM/layout/font/image health checks.",
     inputSchema: {
       nodeId: z.string().optional(),
       nodeIds: z.array(z.string()).min(1).max(12).optional().describe("Batch capture multiple layers/artboards in one call"),
       scale: z.number().min(0.1).max(3).optional().describe("Default 1; large frames are capped at 1600px on the long edge"),
+      width: z.number().int().min(200).max(4096).optional().describe("Viewport/artboard width override in px"),
+      widths: z.array(z.number().int().min(200).max(4096)).min(1).max(6).optional().describe("Capture each target across multiple widths, e.g. [390, 834, 1440]"),
+      diagnostics: z.boolean().optional().describe("Attach DOM & rendering health diagnostics (broken images, overflows, missing fonts, tap targets)"),
+      checkContrast: z.boolean().optional().describe("When diagnostics is true, also check WCAG text contrast ratios"),
+      checkTapTargets: z.boolean().optional().describe("When diagnostics is true, override mobile (<44px) tap-target checking"),
     },
     annotations: READ,
-  }, async ({ nodeId, nodeIds, scale = 1 }) => {
+  }, async ({ nodeId, nodeIds, scale = 1, width, widths, diagnostics = false, checkContrast = false, checkTapTargets }) => {
     let targets;
     if (nodeIds?.length) {
       targets = [...new Set([...(nodeId ? [nodeId] : []), ...nodeIds])];
@@ -247,16 +257,38 @@ export function registerTools(server, ctx) {
     }
     const items = targets.map((id) => ({ id, target: ctx.getNode(id), ab: ctx.artboardOf(id) }));
     ctx.look(targets, "get_screenshot", items.length === 1 ? items[0].target.name : `${items.length} targets`);
+    const widthList = widths?.length ? [...new Set(widths)] : (width !== undefined ? [width] : [null]);
     const content = [];
     for (const { id, ab } of items) {
-      const shot = await ctx.renderer.screenshot({ artboardId: ab, nodeId: id, ...ctx.artboardSize(ab), scale });
-      content.push(
-        { type: "image", data: shot.png.toString("base64"), mimeType: "image/png" },
-        { type: "text", text: `${S().nodes[id].name} (${id}) · ${shot.width}×${shot.height}px at scale ${shot.scale}` },
-      );
+      const baseSize = ctx.artboardSize(ab);
+      for (const w of widthList) {
+        const size = w ? { width: w, height: baseSize.height, widthOverride: w } : baseSize;
+        const shot = await ctx.renderer.screenshot({ artboardId: ab, nodeId: id, ...size, scale, diagnostics, checkContrast, checkTapTargets });
+        const vpLabel = w ? ` @ ${w}px` : "";
+        content.push(
+          { type: "image", data: shot.png.toString("base64"), mimeType: "image/png" },
+          { type: "text", text: `${S().nodes[id].name} (${id})${vpLabel} · ${shot.width}×${shot.height}px at scale ${shot.scale}` },
+        );
+        if (shot.diagnostics) {
+          content.push({ type: "text", text: JSON.stringify({ diagnostics: shot.diagnostics }, null, 2) });
+        }
+      }
     }
     return { content };
   });
+
+  server.registerTool("audit_artboard", {
+    description: "Run automated DOM & rendering diagnostics on one or more artboards (headless Chrome): broken images (naturalWidth === 0), horizontal overflow or clipped containers, unloaded custom webfonts, mobile (<44px) tap targets, and optional WCAG contrast checks. Defaults to the selection or all artboards on the current page.",
+    inputSchema: {
+      nodeIds: z.array(z.string()).min(1).optional().describe("Artboard or layer IDs to audit (resolved to unique artboards)"),
+      nodeId: z.string().optional().describe("Single artboard or layer ID to audit"),
+      width: z.number().int().min(200).max(4096).optional().describe("Optional viewport width override (e.g. 390, 834, 1440)"),
+      checkContrast: z.boolean().optional().describe("Check WCAG contrast ratios on text layers (4.5:1 normal, 3:1 large)"),
+      checkTapTargets: z.boolean().optional().describe("Check interactive controls <44px (default: enabled when width <= 480px)"),
+    },
+    annotations: READ,
+  }, async ({ nodeIds, nodeId, width, checkContrast = false, checkTapTargets }) =>
+    text(await ctx.auditArtboards({ nodeIds, nodeId, width, checkContrast, checkTapTargets })));
 
   server.registerTool("get_jsx", {
     description: "Code for a layer/artboard (or the whole page when nodeId is omitted): jsx = React components (className for shared classes, inline style objects for overrides, the root CSS they use in a header comment), html = <style> with the used root CSS and .layer-<id> overrides + markup. The project .zip export links every screen to the root tokens.css (fonts, variables) and components.css (classes, layer styles), with every icon in icons.svg.",
@@ -290,6 +322,33 @@ export function registerTools(server, ctx) {
     annotations: WRITE,
   }, async ({ css, vars, classes, replace, pruneUnused }) => text(await ctx.rootCss.update({ css, vars, classes, replace, pruneUnused })));
 
+  server.registerTool("import_root_css", {
+    description: "Import root CSS variables, shared classes, states and @media rules from another project into the open project (one undo step). Optionally pass varsOnly: true or classes: [...] to scope the import.",
+    inputSchema: {
+      sourceProjectId: z.string().describe("Id of the source project (e.g. a Design System / UI Kit project)"),
+      mode: z.enum(["merge", "replace"]).optional().describe("merge (default) preserves existing vars/rules not overwritten; replace starts from empty"),
+      varsOnly: z.boolean().optional().describe("Import :root variables only (skip classes and rules)"),
+      classes: z.array(z.string()).optional().describe("Import only these class names (plus any rules and :root variables they reference)"),
+    },
+    annotations: WRITE,
+  }, async ({ sourceProjectId, mode = "merge", varsOnly = false, classes }) =>
+    text(await ctx.rootCss.import({ sourceProjectId, mode, varsOnly, classes })));
+
+  server.registerTool("export_design_tokens", {
+    description: "Export the open project's :root CSS variables as a W3C Design Tokens (DTCG) JSON object ($value, $type, {group.token} references). Also included as tokens.json in the project .zip export.",
+    inputSchema: {},
+    annotations: READ,
+  }, async () => text(ctx.tokens.export()));
+
+  server.registerTool("import_design_tokens", {
+    description: "Import W3C Design Tokens (DTCG JSON object or JSON string with $value / $type / {token.ref}) into the open project's :root CSS variables in one undo step.",
+    inputSchema: {
+      tokens: z.union([z.string(), z.record(z.string(), z.any())]).describe("W3C Design Tokens JSON object or serialized JSON string"),
+      mode: z.enum(["merge", "replace"]).optional().describe("merge (default) adds/updates variables; replace removes existing :root variables not in the imported tokens while keeping classes"),
+    },
+    annotations: WRITE,
+  }, async ({ tokens, mode = "merge" }) => text(await ctx.tokens.import({ tokens, mode })));
+
   // ---------------------------------------------------------------- write
   server.registerTool("write_html", {
     description: "Add designs by writing HTML: class=\"card\" for shared root CSS classes, inline style=\"\" for overrides (use var(--name) for root variables). Default: append the parsed elements as children of parentId (omit parentId to create top-level artboards). mode=replace swaps targetNodeId for the parsed elements. Returns created ids. Write a whole section or screen per call rather than many small calls. See get_guide for the HTML rules.",
@@ -299,10 +358,11 @@ export function registerTools(server, ctx) {
       targetNodeId: z.string().optional(),
       mode: z.enum(["insert-children", "replace"]).optional(),
       index: z.number().int().optional().describe("Insert position among siblings (default: end)"),
+      lint: z.boolean().optional().describe("Design system lint hints for un-tokenized spacing, radii, font sizes and colors (default: true)"),
     },
     annotations: WRITE,
-  }, async ({ html, parentId, targetNodeId, mode = "insert-children", index }) => {
-    const res = ctx.writeHtml({ html, parentId, targetNodeId, mode, index });
+  }, async ({ html, parentId, targetNodeId, mode = "insert-children", index, lint = true }) => {
+    const res = ctx.writeHtml({ html, parentId, targetNodeId, mode, index, lint });
     ctx.touch(res.created.map((c) => c.id), "write_html", res.created[0]?.name || "");
     return text(res);
   });
@@ -336,9 +396,12 @@ export function registerTools(server, ctx) {
 
   server.registerTool("update_styles", {
     description: "Batch style changes in one undo step: [{ nodeIds: [...], styles: { camelCase: value | null } }]. Put every style change you have in one call.",
-    inputSchema: { updates: z.array(z.object({ nodeIds: ids, styles: styleSchema })).min(1) },
+    inputSchema: {
+      updates: z.array(z.object({ nodeIds: ids, styles: styleSchema })).min(1),
+      lint: z.boolean().optional().describe("Design system lint hints for un-tokenized spacing, radii, font sizes and colors (default: true)"),
+    },
     annotations: WRITE,
-  }, async ({ updates }) => {
+  }, async ({ updates, lint = true }) => {
     const keys = [...new Set(updates.flatMap((u) => Object.keys(u.styles || {})))].slice(0, 3).join(", ");
     const targetIds = updates.flatMap((u) => u.nodeIds);
     const targetName = targetIds.length === 1 ? S().nodes[targetIds[0]]?.name : `${targetIds.length} layers`;
@@ -348,7 +411,7 @@ export function registerTools(server, ctx) {
       nodeIds: targetIds,
     });
     ctx.touch(touched, "update_styles", keys);
-    const hints = ctx.rootCss.hints(touched);
+    const hints = ctx.rootCss.hints(touched, { lint });
     return text(hints.length ? { updated: touched.length, hints } : { updated: touched.length });
   });
 
@@ -362,10 +425,11 @@ export function registerTools(server, ctx) {
     styles: styleSchema.optional(),
     replaceStyles: z.boolean().optional(),
     attrs: z.record(z.string(), z.union([z.string(), z.null()])).optional(),
+    detachComponent: z.boolean().optional().describe("Detach this layer's component instance link so master updates no longer affect it"),
   };
 
   server.registerTool("update_node", {
-    description: "Patch one layer (nodeId, ...) or many layers in one undo step (updates: [{ nodeId, ... }]). Supports name, tag, text, classes, addClasses, removeClasses, styles (merged unless replaceStyles), attrs.",
+    description: "Patch one layer (nodeId, ...) or many layers in one undo step (updates: [{ nodeId, ... }]). Supports name, tag, text, classes, addClasses, removeClasses, styles (merged unless replaceStyles), attrs, detachComponent.",
     inputSchema: {
       nodeId: z.string().optional(),
       ...nodePatchFields,
@@ -620,6 +684,30 @@ export function registerTools(server, ctx) {
     inputSchema: { pageId: z.string() }, annotations: { ...WRITE, destructiveHint: true },
   }, async ({ pageId }) => text(ctx.pages.remove(pageId, "mcp")));
 
+  // ---------------------------------------------------------------- icons
+  server.registerTool("register_icons", {
+    description: "Register reusable SVG icons for the open project (one undo step). Once registered, write_html can use <icon name=\"icon-name\" /> anywhere (repeating cards, nav items) without repeating inline <svg> markup. Icons are strictly sanitised (SVG shapes + presentation attrs only; no scripts, href, or url()).",
+    inputSchema: {
+      icons: z.array(z.object({ name: z.string().min(1), svg: z.string().min(1) })).min(1).optional().describe("Batch list of { name, svg } icons to register"),
+      name: z.string().optional().describe("Single icon name (alternative to icons array)"),
+      svg: z.string().optional().describe("Single <svg>...</svg> markup (alternative to icons array)"),
+      replace: z.boolean().optional().describe("Replace the entire project icon registry instead of merging"),
+    },
+    annotations: WRITE,
+  }, async ({ icons, name, svg, replace }) => text(ctx.icons.register({ icons, name, svg, replace })));
+
+  server.registerTool("list_icons", {
+    description: "List registered SVG icons in the open project (name, viewBox, shape count).",
+    inputSchema: {},
+    annotations: READ,
+  }, async () => text(ctx.icons.list()));
+
+  server.registerTool("delete_icon", {
+    description: "Remove a registered SVG icon from the project's icon registry (one undo step).",
+    inputSchema: { name: z.string().min(1) },
+    annotations: { ...WRITE, destructiveHint: true },
+  }, async ({ name }) => text(ctx.icons.remove(name)));
+
   // ---------------------------------------------------------------- fonts
   server.registerTool("list_fonts", {
     description: "Font library: built-in Geist / Geist Mono, uploaded font files and Google Fonts. Use cssFamily as the fontFamily style.",
@@ -649,6 +737,91 @@ export function registerTools(server, ctx) {
     description: "Remove a font from the library (layers using it fall back to their fallback fonts).",
     inputSchema: { fontId: z.string() }, annotations: { ...WRITE, destructiveHint: true },
   }, async ({ fontId }) => text(await ctx.fonts.remove(fontId)));
+
+  // ---------------------------------------------------------------- components (linked symbols)
+  server.registerTool("list_components", {
+    description: "List reusable components in the open project (id, name, rootTag, classes, slots, instanceCount).",
+    inputSchema: {},
+    annotations: READ,
+  }, async () => text(ctx.components.list()));
+
+  server.registerTool("create_component", {
+    description: "Define a reusable component from an existing nodeId or from single-root html (use data-slot=\"...\" for overridable slots). When nodeId is passed, linkSource (default true) turns that subtree into the first linked instance.",
+    inputSchema: {
+      name: z.string().min(1).describe("Component identifier, e.g. \"nf-card\""),
+      nodeId: z.string().optional(),
+      html: z.string().optional(),
+      linkSource: z.boolean().optional(),
+      overwrite: z.boolean().optional(),
+    },
+    annotations: WRITE,
+  }, async (args) => {
+    const res = ctx.components.create(args, "mcp");
+    if (args.nodeId) ctx.touch([args.nodeId], "create_component", res.id);
+    return text(res);
+  });
+
+  server.registerTool("instantiate_component", {
+    description: "Place a linked instance of a component into parentId (default: current page), optionally overriding slots (by data-slot, key, or layer name) with { text, styles, attrs, classes, tag, name } or a string shorthand for text.",
+    inputSchema: {
+      component: z.string().min(1),
+      parentId: z.string().optional(),
+      index: z.number().int().optional(),
+      name: z.string().optional(),
+      overrides: z.record(z.string(), z.union([
+        z.string(),
+        z.object({
+          name: z.string().optional(),
+          tag: z.string().optional(),
+          text: z.string().optional(),
+          classes: classesSchema.optional(),
+          styles: styleSchema.optional(),
+          attrs: z.record(z.string(), z.union([z.string(), z.null()])).optional(),
+        }),
+      ])).optional(),
+    },
+    annotations: WRITE,
+  }, async (args) => {
+    const res = ctx.components.instantiate(args, "mcp");
+    ctx.touch([res.id], "instantiate_component", res.component);
+    return text(res);
+  });
+
+  server.registerTool("update_component", {
+    description: "Update a master component (via new html, or slot + patch / appendHtml / removeSlot) and propagate changes to every linked instance across all pages/artboards in one undo step, preserving per-instance text, style and attribute overrides.",
+    inputSchema: {
+      component: z.string().min(1),
+      html: z.string().optional(),
+      slot: z.string().optional().describe("Target slot, key, or layer name in master (default: \"root\")"),
+      patch: z.object({
+        name: z.string().optional(),
+        tag: z.string().optional(),
+        text: z.string().optional(),
+        classes: classesSchema.optional(),
+        addClasses: classesSchema.optional(),
+        removeClasses: classesSchema.optional(),
+        styles: styleSchema.optional(),
+        replaceStyles: z.boolean().optional(),
+        attrs: z.record(z.string(), z.union([z.string(), z.null()])).optional(),
+      }).optional(),
+      appendHtml: z.object({
+        html: z.string().min(1),
+        parentSlot: z.string().optional(),
+        index: z.number().int().optional(),
+      }).optional(),
+      removeSlot: z.string().optional(),
+    },
+    annotations: WRITE,
+  }, async (args) => text(ctx.components.update(args, "mcp")));
+
+  server.registerTool("delete_component", {
+    description: "Delete a component definition (by default detaches existing instances so their layers remain on the canvas).",
+    inputSchema: {
+      component: z.string().min(1),
+      detach: z.boolean().optional(),
+    },
+    annotations: { ...WRITE, destructiveHint: true },
+  }, async (args) => text(ctx.components.remove(args, "mcp")));
 
   server.registerTool("undo", { description: "Undo the last canvas edit (from the UI or any agent).", inputSchema: {}, annotations: WRITE },
     async () => text({ undone: ctx.undo("mcp") }));

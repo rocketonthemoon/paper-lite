@@ -100,6 +100,19 @@ test("exports share rules, icons and components instead of repeating them", { ti
     assert.equal(new Set(ids).size, ids.length, "unique symbol ids");
   });
 
+  await t.test("icons.svg: registered icons under their own names, and their placed copies aren't added again", async () => {
+    await mcpCall(srv.baseUrl, "register_icons", { icons: [{ name: "bell", svg: '<svg viewBox="0 0 16 16" fill="none"><path d="M8 2a4 4 0 00-4 4v3l-1 2h10l-1-2V6a4 4 0 00-4-4z" stroke="#444"/></svg>' }] });
+    const ab = await mcpCall(srv.baseUrl, "create_artboard", { name: "Alerts", width: 400, height: 300 });
+    await mcpCall(srv.baseUrl, "write_html", { parentId: ab.id, html: `<div data-name="Row"><icon name="bell"></icon><span>One</span></div><div data-name="Row 2"><icon name="bell" style="width:24px;height:24px"></icon></div>` });
+    const files = unzip(Buffer.from(await (await fetch(`${srv.baseUrl}/api/export/zip?format=html`)).arrayBuffer()));
+    const sprite = files["icons.svg"];
+    const ids = [...sprite.matchAll(/<symbol id="([^"]+)"/g)].map((m) => m[1]);
+    assert.equal(ids[0], "icon-bell", "registered icons come first, by name");
+    assert.equal(sprite.split('d="M8 2a4 4').length - 1, 1, "two placed copies of the registered icon: still one symbol");
+    assert.match(sprite, /<symbol id="icon-bell" viewBox="0 0 16 16" fill="none">/);
+    assert.ok(files["tokens.json"], "the W3C tokens file is still exported");
+  });
+
   await t.test("icons aren't shared when the root CSS styles SVG content (selectors wouldn't reach into <use>)", async () => {
     await call("PATCH", "/api/root-css", { css: ".nav:hover path { stroke: red; }" });
     const html = await text(`/api/export?format=html&nodeId=${s.rootId}`);

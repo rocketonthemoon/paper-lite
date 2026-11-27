@@ -3,7 +3,7 @@
 import { ed } from "./state.js";
 import { answerMeasure } from "./measure.js";
 import { $, GENERIC_FONTS, SVG_TAGS, TAGS, TEXT_TAGS, VOID_TAGS, ago, api, clock, commentsPanelEl, elOf, expanded, inspector, num, plural, px, rightHead, toast, viewKey, world } from "./core.js";
-import { applyView, baseStylesOf, kebabCss, layerRows, render, renderLayers, resolveVars, rootOf, rulesUsing, updateOverlay } from "./render.js";
+import { applyView, baseStylesOf, kebabCss, layerRows, render, renderLayers, resolveVars, rootOf, rulesUsing, setViewportOverride, updateOverlay } from "./render.js";
 import { classableStyles, copyText, ctxAction, downloadZip, hex6, inspectorAction, inspectorChange, inspectorFocusout, inspectorInput, inspectorKeydown, inspectorModel, renderInspector, renderRightHead, rightHeadModel } from "./inspector.js";
 import { createNode, select, shareSelection } from "./selection.js";
 import { fitTo, worldBounds } from "./view.js";
@@ -64,7 +64,7 @@ export function connect() {
       if (n) ed.S.nodes[id] = n;
       else delete ed.S.nodes[id];
     }
-    applyState(p.source, { ...ed.S, version: p.version, name: p.name, pages: p.pages, rootId: p.rootId, rootCss: p.rootCss || ed.S.rootCss });
+    applyState(p.source, { ...ed.S, version: p.version, name: p.name, pages: p.pages, rootId: p.rootId, rootCss: p.rootCss || ed.S.rootCss, components: p.components || ed.S.components });
   }));
   function applyState(source, state) {
     const prevProject = ed.S?.id, prevKey = viewKey();
@@ -220,6 +220,7 @@ export function setup() {
     dashMenuModel: () => ({ onlyProject: ed.projects.length < 2 }),
     overlay: { labels: [], ctx: null, agents: { boxes: [], cursors: [] }, crumbs: { page: "Page 1", artboard: "" } },
     ctxAction: (act) => ctxAction(act),
+    setViewportOverride: (id, w) => setViewportOverride(id, w),
     // Inspector and its header (inspector/Inspector.svelte, RightHead.svelte): field events and data-action buttons
     inspectorInput: (e) => inspectorInput(e),
     inspectorChange: (e) => inspectorChange(e),

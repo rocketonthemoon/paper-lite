@@ -3,7 +3,7 @@
 // below (inspectorChange, inspectorKeydown, inspectorAction, …).
 import { ed } from "./state.js";
 import { $, api, elOf, inspector, inspectorFoot, num, patch, patchStyles, toast } from "./core.js";
-import { classUsage, definedClassList, rootOf } from "./render.js";
+import { classUsage, definedClassList, rootOf, setViewportOverride } from "./render.js";
 import { duplicateSelected, removeSelected } from "./selection.js";
 import { zoomCmd } from "./view.js";
 import { fontStack, uploadFonts } from "./fonts.js";
@@ -92,6 +92,7 @@ export function inspectorModel() {
     fontLib: ed.fontLib,
     rootCss: rootOf(),
     definedClasses: definedClassList(),
+    viewportOverride: n ? (ed.viewportOverrides[n.id] || null) : null,
     mcpUrl: `${location.origin}/mcp`,
   };
 }
@@ -277,6 +278,10 @@ export async function inspectorAction(b) {
   if (!ed.sel) return;
   if (act === "zoom-sel") return zoomCmd("selection");
   if (act === "preview") return openPreview(ed.sel);
+  if (act === "preview-vp") {
+    const w = b.dataset.w ? Number(b.dataset.w) : null;
+    return setViewportOverride(ed.sel, w && ed.viewportOverrides[ed.sel] !== w ? w : null);
+  }
   if (act === "preset-size") {
     const styles = { height: b.dataset.h === "fit-content" ? "fit-content" : Number(b.dataset.h) };
     if (b.dataset.w) styles.width = Number(b.dataset.w);
