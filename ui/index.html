@@ -1888,33 +1888,20 @@ function pagePanel() {
   </div>`;
 }
 
-function renderRightHead(n) {
-  if (n) {
-    const ab = n.parentId === S.rootId;
-    const isAgent = agentNodes.some((a) => a.id === n.id);
-    rightHead.innerHTML = `
-      <div class="right-id" data-kind="${ab ? "artboard" : "layer"}">
-        <span class="right-title" title="${esc(n.name)}">${esc(n.name)}</span>
-        ${isAgent ? `<span class="mcp-badge" title="Edited via MCP">MCP</span>` : ""}
-      </div>
-      <div class="right-acts">
-        <button class="icon-btn" data-action="preview" title="Preview ${ab ? "this screen" : "its screen"} in a new tab (P)" aria-label="Preview screen"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M9.5 2.5h4v4M13.5 2.5L7.5 8.5M12 9.5V13a.5.5 0 01-.5.5H3a.5.5 0 01-.5-.5V4.5A.5.5 0 013 4h3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
-        <button class="icon-btn" data-action="zoom-sel" title="Zoom to selection (Shift+2)" aria-label="Zoom to selection"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><circle cx="8" cy="8" r="4.5"/><path d="M8 1v3M8 12v3M1 8h3M12 8h3"/></svg></button>
-        <button class="icon-btn" data-action="duplicate" title="Duplicate (Ctrl+D)" aria-label="Duplicate"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="5" y="5" width="8.5" height="8.5" rx="1.5"/><path d="M11 5V3.5A1 1 0 0010 2.5H3.5a1 1 0 00-1 1V10a1 1 0 001 1H5"/></svg></button>
-        <button class="icon-btn del-act" data-action="delete" title="Delete (Del)" aria-label="Delete"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5"/></svg></button>
-      </div>`;
-  } else {
-    const root = S.nodes[S.rootId];
-    const abCount = root.children.length;
-    let layerCount = 0;
-    const count = (id) => { layerCount += 1; (S.nodes[id]?.children || []).forEach(count); };
-    root.children.forEach(count);
-    rightHead.innerHTML = `
-      <div class="right-id" data-kind="page">
-        <span class="right-title" title="${esc(root.name)}">${esc(root.name)}</span>
-      </div>
-      <span class="right-meta">${abCount} ${abCount === 1 ? "artboard" : "artboards"} · ${layerCount.toLocaleString()} ${layerCount === 1 ? "layer" : "layers"}</span>`;
-  }
+// The header above the inspector is ui/src/components/RightHead.svelte; this is the data it shows. Its buttons
+// (data-action) are handled by the #right click listener below.
+function rightHeadModel() {
+  if (!S) return null;
+  const n = sel && S.nodes[sel];
+  if (n) return { kind: n.parentId === S.rootId ? "artboard" : "layer", name: n.name, agent: agentNodes.some((a) => a.id === n.id) };
+  const root = S.nodes[S.rootId];
+  let layers = 0;
+  const count = (id) => { layers += 1; (S.nodes[id]?.children || []).forEach(count); };
+  root.children.forEach(count);
+  return { kind: "page", name: root.name, artboards: root.children.length, layers };
+}
+function renderRightHead() {
+  window.weft.events.dispatchEvent(new Event("right-head"));
 }
 
 // Placement stays on the layer; everything else can become a shared class.
@@ -1956,7 +1943,7 @@ function renderInspector(force = false) {
   inspectorDirty = false;
   const n = sel && S.nodes[sel];
   const scroll = inspector.scrollTop;
-  renderRightHead(n);
+  renderRightHead();
   inspector.innerHTML = n ? nodePanel(n) : pagePanel();
   // Copy actions live in the context bar and the Export menu; the footer stays empty.
   inspectorFoot.hidden = true;
@@ -3471,6 +3458,8 @@ window.weft = {
   // Command palette (CommandPalette.svelte)
   cmdkEntries: () => buildCmdkEntries(),
   closeCmdk: () => openCmdk(false),
+  // Inspector header (RightHead.svelte)
+  rightHeadModel: () => rightHeadModel(),
   // Layers tree (LayersPanel.svelte)
   layerRows: () => layerRows(),
   select: (id) => select(id),
@@ -3582,7 +3571,7 @@ function connect() {
       if (agentNodes.length) chip.textContent = `Agent editing ${plural(agentNodes.length, "layer")}`;
     }
     renderLayers();
-    if (S) renderRightHead(sel && S.nodes[sel]);
+    if (S) renderRightHead();
     if (!commentsPanelEl.hidden) renderCommentsPanel();
     updateOverlay();
     if (followAgent && agentNodes.length && S) {
