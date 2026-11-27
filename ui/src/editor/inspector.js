@@ -171,8 +171,20 @@ export async function downloadZip(projectId = ed.S?.id, format = "html") {
   }
 }
 
+// The context bar's buttons (../components/canvas/ContextBar.svelte), on the selected layer.
+export function ctxAction(act) {
+  if (!ed.sel) return;
+  if (act === "copy") return copyExport("html", ed.sel);
+  if (act === "preview") return openPreview(ed.sel);
+  if (act === "duplicate") return duplicateSelected();
+  if (act === "flex") return toggleFlex(ed.sel);
+  if (act === "comment") return openNewComment(ed.sel);
+}
+
 // Listeners and initial state; ./index.js runs each module's setup() once, in startup order.
 export function setup() {
+  // The context bar is placed over the canvas; a press on it must not reach the canvas or close menus.
+  $("#ctx-bar").addEventListener("pointerdown", (e) => e.stopPropagation());
   inspector.addEventListener("input", (e) => {
     if (e.target.matches('.swatch input[type="color"]')) {
       const sw = e.target.closest(".swatch");
@@ -293,15 +305,4 @@ export function setup() {
   });
 
   // Contextual Bar actions
-  $("#ctx-bar").addEventListener("pointerdown", (e) => e.stopPropagation());
-  $("#ctx-bar").addEventListener("click", (e) => {
-    const b = e.target.closest("[data-ctx]");
-    if (!b || !ed.sel) return;
-    const act = b.dataset.ctx;
-    if (act === "copy") return copyExport("html", ed.sel);
-    if (act === "preview") return openPreview(ed.sel);
-    if (act === "duplicate") return duplicateSelected();
-    if (act === "flex") return toggleFlex(ed.sel);
-    if (act === "comment") return openNewComment(ed.sel);
-  });
 }

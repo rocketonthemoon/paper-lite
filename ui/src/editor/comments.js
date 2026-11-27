@@ -182,18 +182,17 @@ export function renderCommentsPanel() {
   window.weft.events.dispatchEvent(new Event("comments"));
 }
 
+// Clicking an agent's cursor (../components/canvas/AgentsLayer.svelte) selects and shows the layer it is on.
+export function focusAgentNode(nid) {
+  if (ed.S?.nodes[nid]) { select(nid); zoomCmd("selection"); }
+}
+
 // Listeners and initial state; ./index.js runs each module's setup() once, in startup order.
 export function setup() {
   setFollowAgent(ed.followAgent);
   followBtn.addEventListener("click", () => {
     setFollowAgent(!ed.followAgent);
     toast(ed.followAgent ? "Following agent" : "Follow agent off");
-  });
-  $("#agents").addEventListener("click", (e) => {
-    const cur = e.target.closest("[data-agent-node]");
-    if (!cur) return;
-    const nid = cur.dataset.agentNode;
-    if (ed.S?.nodes[nid]) { select(nid); zoomCmd("selection"); }
   });
 
   commentThreadEl.addEventListener("pointerdown", (e) => e.stopPropagation());
