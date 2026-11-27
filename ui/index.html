@@ -2469,52 +2469,17 @@ async function uploadFonts(files) {
 // ---------------------------------------------------------------------------
 // Pages
 // ---------------------------------------------------------------------------
+// The page list is ui/src/components/PagesList.svelte (switch, rename, delete); this keeps the title in sync and
+// hands it the pages.
 function renderPages() {
   $("#project-name").textContent = S.name;
   document.title = `${S.name} · weft`;
-  if ($("#pages input")) return; // a rename is in progress; it re-renders when it finishes
-  $("#pages").innerHTML = S.pages.map((id) => {
-    const p = S.nodes[id];
-    const cnt = p.children ? p.children.length : 0;
-    return `<div class="page-row${id === S.rootId ? " cur" : ""}" data-page="${esc(id)}">
-      <span class="nm">${esc(p.name)}</span>
-      <span class="pg-cnt">${cnt}</span>
-      ${S.pages.length > 1 ? `<button class="icon-btn del" data-del-page="${esc(id)}" title="Delete page" aria-label="Delete page"><svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>` : ""}
-    </div>`;
-  }).join("");
+  window.weft.events.dispatchEvent(new Event("pages"));
 }
-
-$("#pages").addEventListener("click", async (e) => {
-  const del = e.target.closest("[data-del-page]");
-  if (del) {
-    const page = S.nodes[del.dataset.delPage];
-    if (confirm(`Delete page "${page.name}" and its ${page.children.length} artboard(s)? You can undo this.`)) await api("DELETE", `/api/pages/${encodeURIComponent(page.id)}`);
-    return;
-  }
-  const row = e.target.closest(".page-row");
-  if (row && row.dataset.page !== S.rootId && !row.querySelector("input")) api("POST", `/api/pages/${encodeURIComponent(row.dataset.page)}/open`);
-});
-$("#pages").addEventListener("dblclick", (e) => {
-  const row = e.target.closest(".page-row");
-  if (!row || e.target.closest("[data-del-page]")) return;
-  const id = row.dataset.page;
-  const nm = row.querySelector(".nm");
-  const input = Object.assign(document.createElement("input"), { value: S.nodes[id].name });
-  nm.replaceWith(input);
-  input.focus(); input.select();
-  let done = false;
-  const finish = (save) => {
-    if (done) return;
-    done = true;
-    const name = input.value.trim();
-    const changed = save && name && S.nodes[id] && name !== S.nodes[id].name;
-    input.replaceWith(nm); // restore the row first so live re-renders aren't held back
-    if (changed) { nm.textContent = name; api("PATCH", `/api/pages/${encodeURIComponent(id)}`, { name }).then(() => renderPages()); }
-    else renderPages();
-  };
-  input.addEventListener("keydown", (k) => { k.stopPropagation(); if (k.key === "Enter") finish(true); if (k.key === "Escape") finish(false); });
-  input.addEventListener("blur", () => finish(true));
-});
+function pagesModel() {
+  if (!S) return [];
+  return S.pages.map((id) => ({ id, name: S.nodes[id].name, artboards: S.nodes[id].children?.length || 0, current: id === S.rootId }));
+}
 $("#add-page").addEventListener("click", () => api("POST", "/api/pages", {}));
 
 // ---------------------------------------------------------------------------
@@ -3305,6 +3270,8 @@ window.weft = {
   h: { px, num, hex6, resolveVars, baseStylesOf, rulesUsing, kebabCss, fontStack, classableStyles, TAGS, TEXT_TAGS, VOID_TAGS, SVG_TAGS },
   // Inspector header (RightHead.svelte)
   rightHeadModel: () => rightHeadModel(),
+  // Pages (PagesList.svelte)
+  pages: () => pagesModel(),
   // Layers tree (LayersPanel.svelte)
   layerRows: () => layerRows(),
   select: (id) => select(id),

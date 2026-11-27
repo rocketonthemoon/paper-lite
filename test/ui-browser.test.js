@@ -905,3 +905,45 @@ test("browser: Inspector (Svelte): updates held while typing, Escape cancels, En
   await cdp.evalJs("select(null)");
   await waitFor(`document.getElementById("root-css")?.value.includes(".card")`, "page panel with root CSS");
 });
+
+test("browser: pages list (Svelte): rename survives live updates, Escape cancels, click switches page", { timeout: 120_000 }, async (t) => {
+  const browserBin = findBrowser();
+  if (!browserBin) {
+    t.skip("No headless Chromium/Chrome binary found");
+    return;
+  }
+  const srv = await startTestServer();
+  t.after(() => srv.stop());
+  const cdp = await startBrowser(browserBin);
+  t.after(() => cdp.stop());
+  const rest = async (method, url, body) => {
+    const res = await fetch(srv.baseUrl + url, { method, headers: { "content-type": "application/json" }, body: body && JSON.stringify(body) });
+    assert.ok(res.ok, `${method} ${url} → ${res.status}`);
+    return res.json();
+  };
+  const waitFor = async (expr, label) => {
+    for (let i = 0; i < 100; i++) { if (await cdp.evalJs(expr)) return; await sleep(50); }
+    assert.fail(`timed out waiting for ${label}`);
+  };
+  const s0 = await rest("GET", "/api/state");
+  const p2 = await rest("POST", "/api/pages", { name: "Second" });
+  await rest("POST", `/api/pages/${s0.rootId}/open`);
+  await cdp.send("Page.navigate", { url: srv.baseUrl });
+  await waitFor(`document.querySelectorAll("#pages .page-row").length === 2`, "page rows");
+  const row = (id) => `document.querySelector('#pages .page-row[data-page="${id}"]')`;
+  assert.equal(await cdp.evalJs(`${row(s0.rootId)}.classList.contains("cur")`), true);
+
+  // Rename: the box keeps what was typed through a live update; Escape cancels.
+  await cdp.evalJs(`${row(p2.id)}.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }))`);
+  await waitFor(`document.activeElement === document.querySelector("#pages input")`, "rename box");
+  await cdp.evalJs(`(() => { const i = document.querySelector("#pages input"); i.value = "Half"; i.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+  await rest("POST", "/api/pages", { name: "Third" });
+  await waitFor(`document.querySelectorAll("#pages .page-row").length === 3`, "live update");
+  assert.equal(await cdp.evalJs(`document.querySelector("#pages input").value`), "Half");
+  await cdp.evalJs(`document.querySelector("#pages input").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))`);
+  await waitFor(`!document.querySelector("#pages input") && ${row(p2.id)}.querySelector(".nm").textContent === "Second"`, "cancelled");
+  assert.equal((await rest("GET", "/api/state")).nodes[p2.id].name, "Second");
+  // Clicking a row switches page.
+  await cdp.evalJs(`${row(p2.id)}.click()`);
+  await waitFor(`${row(p2.id)}.classList.contains("cur")`, "switched page");
+});

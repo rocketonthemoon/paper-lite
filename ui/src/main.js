@@ -5,6 +5,7 @@ import HistoryPanel from "./components/HistoryPanel.svelte";
 import CommentsPanel from "./components/CommentsPanel.svelte";
 import CommandPalette from "./components/CommandPalette.svelte";
 import LayersPanel from "./components/LayersPanel.svelte";
+import PagesList from "./components/PagesList.svelte";
 import RightHead from "./components/RightHead.svelte";
 import Inspector from "./components/inspector/Inspector.svelte";
 
@@ -12,6 +13,7 @@ mount(HistoryPanel, { target: document.getElementById("history-panel") });
 mount(CommentsPanel, { target: document.getElementById("comments-panel") });
 mount(CommandPalette, { target: document.getElementById("cmdk") });
 mount(LayersPanel, { target: document.getElementById("layers") });
+mount(PagesList, { target: document.getElementById("pages") });
 mount(RightHead, { target: document.getElementById("right-head") });
 mount(Inspector, { target: document.getElementById("inspector") });
 
@@ -21,6 +23,7 @@ const replay = (type) => window.weft.events.dispatchEvent(new Event(type));
 replay("history");
 replay("comments");
 replay("layers");
+replay("pages");
 replay("right-head");
 replay("inspector");
 if (!document.getElementById("cmdk").hidden) replay("cmdk-open");
