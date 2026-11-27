@@ -1801,8 +1801,11 @@ inspector.addEventListener("input", (e) => {
     if (txt) txt.value = e.target.value;
   }
 });
+// Escape leaves a field without saving: blurring it would fire "change", so that one change is ignored.
+let cancellingField = null;
 inspector.addEventListener("change", (e) => {
   const t = e.target;
+  if (t === cancellingField) return;
   if (t.id === "font-file") return uploadFonts([...t.files]);
   if (t.id === "google-family") return;
   if (t.id === "css-json") return;
@@ -1855,7 +1858,12 @@ inspector.addEventListener("keydown", (e) => {
   }
   if (e.key === "Enter" && e.target.id === "google-family") { e.preventDefault(); $("#right").querySelector('[data-action="add-google"]')?.click(); return; }
   if (e.key === "Enter" && e.target.matches("input")) e.target.blur();
-  if (e.key === "Escape" && e.target.matches("input, textarea")) { e.target.blur(); renderInspector(true); }
+  if (e.key === "Escape" && e.target.matches("input, textarea")) {
+    cancellingField = e.target;
+    e.target.blur();
+    cancellingField = null;
+    renderInspector(true); // fresh fields show the saved values again
+  }
 });
 inspector.addEventListener("focusout", () => setTimeout(() => {
   if (inspectorDirty && !inspector.contains(document.activeElement)) renderInspector(true);

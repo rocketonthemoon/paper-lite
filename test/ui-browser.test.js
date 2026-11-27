@@ -826,7 +826,7 @@ test("browser: Layers panel (Svelte): rename cancel / live updates / artboard la
   await waitFor(`[...document.querySelectorAll("#layers .row .nm")].some((n) => n.textContent === "From agent")`, "agent layer in tree");
 });
 
-test("browser: Inspector (Svelte): updates held while typing, Escape/Enter/arrows commit, fresh fields per layer", { timeout: 120_000 }, async (t) => {
+test("browser: Inspector (Svelte): updates held while typing, Escape cancels, Enter/arrows commit, fresh fields per layer", { timeout: 120_000 }, async (t) => {
   const browserBin = findBrowser();
   if (!browserBin) {
     t.skip("No headless Chromium/Chrome binary found");
@@ -870,12 +870,12 @@ test("browser: Inspector (Svelte): updates held while typing, Escape/Enter/arrow
   assert.equal(await cdp.evalJs(`${W}.value`), "120", "typed value kept while editing");
   assert.equal(await cdp.evalJs(`document.querySelector('#inspector input[data-field="name"]').value`), "A", "held back while a field is focused");
 
-  // Escape leaves the field (which, as before this change, applies what was typed) and shows the held-back update.
+  // Escape discards what was typed and shows the saved values, including the held-back update.
   await keyW("Escape");
   await waitFor(`document.querySelector('#inspector input[data-field="name"]').value === "A (renamed elsewhere)"`, "held-back update shown");
-  for (let i = 0; i < 100 && (await node(a.id)).styles.width !== "120px"; i++) await sleep(50);
-  assert.equal((await node(a.id)).styles.width, "120px");
-  await waitFor(`${W}.value === "120"`, "field shows the saved value");
+  await waitFor(`${W}.value === "100"`, "field shows the saved value again");
+  await sleep(300);
+  assert.equal((await node(a.id)).styles.width, "100px", "Escape doesn't save");
 
   // Enter commits; arrow keys step (Shift = 10).
   await typeW("140");
