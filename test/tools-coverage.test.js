@@ -860,7 +860,16 @@ test("persistence: projects and edits survive a restart", { timeout: 60_000 }, a
   await ok(B, "add_font", { family: "Inter" });
   await ok(B, "update_root_css", { css: ":root { --brand: #0000ff; } .saved { color: var(--brand); &:hover { color: #000; } @media (max-width: 600px) { color: red; } }" });
   await ok(B, "write_html", { parentId: ab.id, html: `<p data-name="Shared text" class="saved">Shared</p>` });
-  await sleep(300);
+
+  // Saves are batched (PERSIST_THROTTLE_MS, 300 ms by default) and each goes through a temp file that is renamed into
+  // place. Wait until the batched writes have landed: no temp files in two checks in a row, after the throttle.
+  const tempFiles = async () => (await fs.readdir(path.join(srv.dataDir, "projects"))).filter((f) => f.endsWith(".tmp"));
+  await sleep(400);
+  for (let quiet = 0, i = 0; quiet < 2; i++) {
+    assert.ok(i < 100, `writes still in progress after 10s: ${(await tempFiles()).join(", ")}`);
+    quiet = (await tempFiles()).length ? 0 : quiet + 1;
+    await sleep(100);
+  }
 
   // Restart against the same data directory.
   const files = await fs.readdir(path.join(srv.dataDir, "projects"));
