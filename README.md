@@ -88,7 +88,7 @@ If your client only supports stdio, start the server first, then use the relay:
 | [`renderer.js`](renderer.js) | Chrome DevTools Protocol client for screenshots and computed styles |
 | [`checkpoint-store.js`](checkpoint-store.js) | Checkpoints as commits in a per-project bare git repo ([isomorphic-git](https://isomorphic-git.org)) |
 | [`fonts.js`](fonts.js) | Uploaded fonts (WOFF2/WOFF/TTF/OTF), Google Fonts, and `/fonts.css` |
-| [`ui/`](ui/) | Browser canvas UI source (Vite + Svelte 5; `npm run build` writes `public/`). [`ui/index.html`](ui/index.html) holds the editor; panels are moving into Svelte components in [`ui/src/`](ui/src/) |
+| [`ui/`](ui/) | Browser canvas UI source (Vite + Svelte 5; `npm run build` writes `public/`). [`ui/index.html`](ui/index.html) is the page (markup and CSS); [`ui/src/editor/`](ui/src/editor/) is the canvas engine and editor state, and panels and menus are Svelte components in [`ui/src/components/`](ui/src/components/) |
 | [`shared/root-css.js`](shared/root-css.js) | Root CSS parser/serialiser used by both the server and the editor (served at `/root-css.js`) |
 
 ## HTTP endpoints

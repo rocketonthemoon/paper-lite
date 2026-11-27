@@ -1,5 +1,5 @@
 <script>
-  // Dashboard sidebar → the four most recently updated projects. Clicks are handled by the legacy listener.
+  // Dashboard sidebar → the four most recently updated projects. Clicks are handled by the editor engine.
   import { weft } from "../../lib/bridge.svelte.js";
   import { dash } from "../../lib/dashboard.svelte.js";
 </script>

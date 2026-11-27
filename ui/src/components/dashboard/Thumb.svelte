@@ -1,5 +1,5 @@
 <script>
-  // A project's thumbnail. The legacy loadThumb() fetches the project's preview and draws it into .dash-thumb-world;
+  // A project's thumbnail. The editor's loadThumb() fetches the project's preview and draws it into .dash-thumb-world;
   // it runs again only when the project changed since it was drawn.
   import { weft } from "../../lib/bridge.svelte.js";
   let { p, compact = false } = $props();

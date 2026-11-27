@@ -1,6 +1,6 @@
 <script>
   // Header above the inspector: the selected layer or artboard with its actions, or the page with its counts.
-  // Buttons carry data-action and are handled by the legacy #right click listener (preview, zoom, duplicate, delete).
+  // Buttons carry data-action and are handled by the editor engine's #right click listener (preview, zoom, duplicate, delete).
   import { flushSync } from "svelte";
   import { weft } from "../lib/bridge.svelte.js";
 

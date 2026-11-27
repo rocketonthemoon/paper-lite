@@ -1,6 +1,6 @@
 <script>
   // The inspector body (#inspector): the selected layer's properties, or the page's settings when nothing is selected.
-  // The legacy script decides when to render (it holds updates back while a field is being edited) and fires
+  // The editor engine (src/editor) decides when to render (it holds updates back while a field is being edited) and fires
   // "inspector"; detail.force asks for fresh fields, e.g. after Escape discards what was typed.
   import { flushSync } from "svelte";
   import { weft } from "../../lib/bridge.svelte.js";

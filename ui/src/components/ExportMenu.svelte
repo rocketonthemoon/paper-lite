@@ -1,6 +1,6 @@
 <script>
   // Export menu (#export-menu): copy the selection or page as HTML/CSS or JSX, or download the project as a ZIP.
-  // The legacy script opens and closes it; this reads the scope summary when it opens and runs the actions.
+  // The editor engine (src/editor) opens and closes it; this reads the scope summary when it opens and runs the actions.
   import { flushSync } from "svelte";
   import { weft } from "../lib/bridge.svelte.js";
 

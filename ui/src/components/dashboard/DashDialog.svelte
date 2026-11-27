@@ -1,5 +1,5 @@
 <script>
-  // The dashboard's dialog (#dash-modal): new project, rename, or delete confirmation. The legacy openDashModal()
+  // The dashboard's dialog (#dash-modal): new project, rename, or delete confirmation. The editor's openDashModal()
   // passes the options (title, message, value, okText, danger, input, onOk) and shows / hides the backdrop.
   import { flushSync } from "svelte";
   import { weft } from "../../lib/bridge.svelte.js";

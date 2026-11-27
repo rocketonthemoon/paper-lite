@@ -1,6 +1,6 @@
 <script>
   // Dashboard → the project grid or list, or "no matches" for a search. Clicks on cards / menus are handled by the
-  // legacy listener on #dash-content (data-open-project, data-dash-menu).
+  // editor engine's listener on #dash-content (data-open-project, data-dash-menu).
   import { weft } from "../../lib/bridge.svelte.js";
   import { dash } from "../../lib/dashboard.svelte.js";
   import Thumb from "./Thumb.svelte";

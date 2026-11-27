@@ -1,7 +1,7 @@
 <script>
   // The project menu under the project name: switch project, new, all projects, and rename / duplicate / export /
   // delete for the open one. New, rename and delete ask inside the menu (a small form) before acting.
-  // Opening, closing on outside click and Escape stay in the legacy script.
+  // Opening, closing on outside click and Escape stay in the editor engine (src/editor).
   import { flushSync } from "svelte";
   import { weft, api, toast } from "../lib/bridge.svelte.js";
 

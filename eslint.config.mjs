@@ -68,10 +68,11 @@ export default [
     },
   },
   {
-    files: [".tmp-ui-lint.js"],
+    // The editor engine: browser APIs, plus the classic scripts on the page (interact.js, /root-css.js).
+    files: ["ui/src/editor/**/*.js"],
     languageOptions: {
       ecmaVersion: 2024,
-      sourceType: "script",
+      sourceType: "module",
       globals: {
         Blob: "readonly",
         CSS: "readonly",

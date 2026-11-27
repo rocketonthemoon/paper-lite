@@ -1,5 +1,5 @@
 <script>
-  // Right panel → Comments: this page's threads, open or resolved. Rows come from the legacy script
+  // Right panel → Comments: this page's threads, open or resolved. Rows come from the editor engine (src/editor)
   // (weft.commentRows()); the pins and thread popover on the canvas are comments/*.svelte.
   import { flushSync } from "svelte";
   import { weft, api } from "../lib/bridge.svelte.js";
@@ -7,7 +7,7 @@
   let rows = $state.raw([]);
   let filter = $state("open");
   let showResolvedPins = $state(weft.showResolvedPins);
-  // Update the DOM right away, like the legacy panels did, so legacy code reading it afterwards sees the new rows.
+  // Update the DOM right away, like the old panels did, so editor code reading it afterwards sees the new rows.
   weft.events.addEventListener("comments", () => { rows = weft.commentRows(); flushSync(); });
 
   const openRows = $derived(rows.filter((r) => r.status !== "resolved"));

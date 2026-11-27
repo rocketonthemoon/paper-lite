@@ -1,5 +1,6 @@
-// Entry for the Svelte parts of the editor. The rest of the UI is still the inline script in ui/index.html, which runs
-// first and exposes window.weft (see lib/bridge.svelte.js); panels move into components here one at a time.
+// Entry for the editor page. editor/ is the canvas engine and editor state; it runs first and exposes window.weft
+// (see lib/bridge.svelte.js), which the panels and menus mounted below read.
+import "./editor/editor.js"; // first: it sets up window.weft, which the components read
 import { mount } from "svelte";
 import HistoryPanel from "./components/HistoryPanel.svelte";
 import CommentsPanel from "./components/CommentsPanel.svelte";
@@ -49,7 +50,7 @@ mount(RootVars, { target: document.getElementById("root-vars") });
 mount(DashMenu, { target: document.getElementById("dash-menu") });
 mount(DashDialog, { target: document.getElementById("dash-modal") });
 
-// The legacy script starts first (this module loads after it), so it may already have sent data, or the user may
+// The editor engine (src/editor) starts first (this module loads after it), so it may already have sent data, or the user may
 // have opened the palette, before these components listened. Replay the current state now.
 const replay = (type) => window.weft.events.dispatchEvent(new Event(type));
 replay("history");

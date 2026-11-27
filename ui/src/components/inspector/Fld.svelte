@@ -1,5 +1,5 @@
 <script>
-  // A labelled style field: <input data-style={key}>. The legacy inspector listeners commit it on change.
+  // A labelled style field: <input data-style={key}>. The editor engine's inspector listeners commit it on change.
   import { weft } from "../../lib/bridge.svelte.js";
   let { label, key, value, placeholder, disabled = false, title, mono = false, kind, list = "root-vars", wide = false } = $props();
 </script>
