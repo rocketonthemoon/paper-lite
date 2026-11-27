@@ -113,6 +113,29 @@ test("exports share rules, icons and components instead of repeating them", { ti
     assert.ok(files["tokens.json"], "the W3C tokens file is still exported");
   });
 
+  await t.test("JSX: declared components become <Card title=… />; instances changed beyond slot text are written out", async () => {
+    await mcpCall(srv.baseUrl, "create_component", { name: "promo-card", html: `<div style="padding:12px;border:1px solid #ddd"><h3 data-slot="title" style="margin:0">Title</h3><p data-slot="body-copy">Body text</p></div>` });
+    const ab = await mcpCall(srv.baseUrl, "create_artboard", { name: "Promos", width: 400, height: 600 });
+    const inst = (overrides) => mcpCall(srv.baseUrl, "instantiate_component", { component: "promo-card", parentId: ab.id, ...(overrides ? { overrides } : {}) });
+    await inst({ title: "First" });
+    await inst();
+    await inst({ "body-copy": 'Say "hi" & bye' });
+    await inst({ root: { styles: { padding: "20px" } } });
+    const jsx = await text(`/api/export?format=jsx&nodeId=${ab.id}`);
+    assert.equal((jsx.match(/^function PromoCard\(\{ title = "Title", bodyCopy = "Body text" \}\) \{$/gm) || []).length, 1, "one component, a prop per text slot with its default");
+    assert.match(jsx, /<h3 style=\{styles\.title\}>\{title\}<\/h3>\n\s*<p>\{bodyCopy\}<\/p>/);
+    assert.match(jsx, /^ {6}<PromoCard title="First" \/>$/m, "only changed slots are passed");
+    assert.match(jsx, /^ {6}<PromoCard \/>$/m);
+    assert.match(jsx, /^ {6}<PromoCard bodyCopy=\{"Say \\"hi\\" & bye"\} \/>$/m, "quotes and & go in braces");
+    assert.match(jsx, /<div style=\{\{ padding: "20px", border: "1px solid #ddd" \}\}>\n\s*<h3 style=\{styles\.title\}>\{"Title"\}<\/h3>/, "a restyled instance is written out in full");
+    assert.equal((jsx.match(/<PromoCard/g) || []).length, 3);
+
+    const files = unzip(Buffer.from(await (await fetch(`${srv.baseUrl}/api/export/zip?format=jsx`)).arrayBuffer()));
+    assert.match(files["components/PromoCard.jsx"], /^export function PromoCard\(\{ title = "Title", bodyCopy = "Body text" \}\)/m);
+    const screen = Object.entries(files).find(([n]) => n.endsWith("/promos.jsx"))[1];
+    assert.match(screen, /import \{ PromoCard \} from "\.\.\/components\/PromoCard\.jsx";/);
+  });
+
   await t.test("icons aren't shared when the root CSS styles SVG content (selectors wouldn't reach into <use>)", async () => {
     await call("PATCH", "/api/root-css", { css: ".nav:hover path { stroke: red; }" });
     const html = await text(`/api/export?format=html&nodeId=${s.rootId}`);

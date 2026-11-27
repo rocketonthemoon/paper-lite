@@ -2328,13 +2328,60 @@ function componentName(name) {
 // `roots` are the exported top-level nodes (artboards or a single layer); they themselves are never folded.
 function jsxBuilder(doc, roots, { sheet } = {}) {
   const keyOf = subtreeKeys(doc);
+  // Declared components (create_component): an instance that matches its component's definition, apart from the
+  // text of its slots, is written as <Card title="…" />, and the component once, from the definition, with a prop per
+  // text slot. Instances changed in other ways (styles, attributes, layers added or removed) are written out in full.
+  const declared = new Map(); // instance root id -> { comp, props: { prop: text } }
+  const slotProps = new Map(); // component id -> Map(slot key -> prop name)
+  const propsOf = (comp) => {
+    if (slotProps.has(comp.id)) return slotProps.get(comp.id);
+    const map = new Map(), used = new Set();
+    const RESERVED = new Set(["class", "default", "function", "return", "new", "delete", "in", "if", "for", "var", "let", "const", "key", "children"]);
+    (function walk(sp) {
+      if (sp.slot && !SVG_TAGS.has(sp.tag) && !VOID_TAGS.has(sp.tag)) {
+        let name = String(sp.slot).replace(/[-_]+([a-zA-Z0-9])/g, (_, c) => c.toUpperCase()).replace(/[^A-Za-z0-9]/g, "");
+        if (!/^[A-Za-z]/.test(name) || RESERVED.has(name)) name = `${name ? `slot${name[0].toUpperCase()}${name.slice(1)}` : "slot"}Text`;
+        let unique = name, i = 2;
+        while (used.has(unique)) unique = `${name}${i++}`;
+        used.add(unique);
+        map.set(sp.key, unique);
+      }
+      (sp.children || []).forEach(walk);
+    })(comp.tree);
+    slotProps.set(comp.id, map);
+    return map;
+  };
+  const same = (a, b) => JSON.stringify(Object.entries(a || {}).sort()) === JSON.stringify(Object.entries(b || {}).sort());
+  const definedClasses = new Set(definedRootClasses(doc.rootCss));
+  const matchInstance = (id, sp, props, out) => {
+    const n = doc.nodes[id];
+    if (!n || n.tag !== sp.tag || !same(n.styles, sp.styles) || !same(n.attrs, sp.attrs)) return false;
+    if (JSON.stringify(n.classes || []) !== JSON.stringify((sp.classes || []).filter((c) => definedClasses.has(c)))) return false;
+    const prop = props.get(sp.key);
+    if (prop) { if ((n.text || "") !== (sp.text || "")) out[prop] = n.text || ""; }
+    else if ((n.text || "") !== (sp.text || "")) return false;
+    const kids = sp.children || [];
+    return n.children.length === kids.length && n.children.every((c, i) => matchInstance(c, kids[i], props, out));
+  };
+  const instanceOf = (id) => {
+    const n = doc.nodes[id];
+    const comp = n.componentId && !n.componentRootId && !roots.includes(id) ? doc.components?.[n.componentId] : null;
+    if (!comp?.tree) return null;
+    const props = {};
+    return matchInstance(id, comp.tree, propsOf(comp), props) ? { comp, props } : null;
+  };
+  const scan = (id) => { const d = instanceOf(id); if (d) declared.set(id, d); else doc.nodes[id].children.forEach(scan); };
+  roots.forEach((r) => doc.nodes[r].children.forEach(scan));
+
   // Count every subtree under the roots, then walk again so a subtree inside a repeated one is only counted once
-  // per distinct parent (icons inside three identical sidebars aren't "used three times").
+  // per distinct parent (icons inside three identical sidebars aren't "used three times"). Declared instances are
+  // already components, so they aren't counted.
   const raw = new Map();
-  const countAll = (id) => { raw.set(keyOf(id), (raw.get(keyOf(id)) || 0) + 1); doc.nodes[id].children.forEach(countAll); };
+  const countAll = (id) => { if (declared.has(id)) return; raw.set(keyOf(id), (raw.get(keyOf(id)) || 0) + 1); doc.nodes[id].children.forEach(countAll); };
   roots.forEach((r) => doc.nodes[r].children.forEach(countAll));
   const uses = new Map(), firstId = new Map();
   const visit = (id) => {
+    if (declared.has(id)) return;
     const k = keyOf(id), n = doc.nodes[id];
     if (raw.get(k) > 1 && n.children.length) {
       uses.set(k, (uses.get(k) || 0) + 1);
@@ -2345,7 +2392,15 @@ function jsxBuilder(doc, roots, { sheet } = {}) {
   };
   roots.forEach((r) => doc.nodes[r].children.forEach(visit));
   const names = new Set(roots.map((r) => componentName(doc.nodes[r].name)));
-  const comps = new Map(); // key -> { name, id, body, deps }
+  const comps = new Map(); // key -> { name, id, body, deps, params? }
+  for (const { comp } of declared.values()) {
+    if (comps.has(`declared:${comp.id}`)) continue;
+    const base = componentName(comp.name);
+    let name = base, i = 2;
+    while (names.has(name)) name = `${base}${i++}`;
+    names.add(name);
+    comps.set(`declared:${comp.id}`, { name, comp, body: null, deps: new Set(), params: "" });
+  }
   // Named after the first layer, without a trailing number ("Nav item 3" → NavItem); unnamed SVGs are Icon.
   const compBase = (n) => {
     if (n.tag === "svg" && (!n.name || n.name.toLowerCase() === "svg")) return "Icon";
@@ -2375,9 +2430,38 @@ function jsxBuilder(doc, roots, { sheet } = {}) {
 
   const jsxText = (t) => `{${JSON.stringify(t)}}`;
   const jsxName = (k) => (k.startsWith("aria-") ? k : k.replace(/-([a-z])/g, (_, c) => c.toUpperCase()));
+  // A declared component's body, from its definition; text slots read their prop.
+  const renderSpec = (sp, depth, props) => {
+    const pad = "  ".repeat(depth);
+    const cls = [...layerClasses(sp, doc), sheet && sheet.classFor(sp)].filter(Boolean).join(" ");
+    const attrs = Object.entries(sp.attrs || {}).map(([k, v]) => ` ${jsxName(k)}=${JSON.stringify(v)}`).join("");
+    const open = `${pad}<${sp.tag}${cls ? ` className="${cls}"` : ""}${attrs}${styleToken(sp)}`;
+    if (VOID_TAGS.has(sp.tag)) return `${open} />`;
+    const prop = props.get(sp.key);
+    const text = prop ? `{${prop}}` : sp.text ? jsxText(sp.text) : "";
+    const kids = sp.children || [];
+    if (!kids.length) return text ? `${open}>${text}</${sp.tag}>` : `${open} />`;
+    return [`${open}>`, ...(text ? [`${pad}  ${text}`] : []), ...kids.map((c) => renderSpec(c, depth + 1, props)), `${pad}</${sp.tag}>`].join("\n");
+  };
   const render = (id, depth, deps, self = null) => {
     const n = doc.nodes[id];
     const pad = "  ".repeat(depth);
+    const inst = declared.get(id);
+    if (inst) {
+      const c = comps.get(`declared:${inst.comp.id}`);
+      deps.add(c);
+      if (!c.body) {
+        const props = propsOf(inst.comp);
+        c.params = props.size ? `{ ${[...props].map(([key, name]) => {
+          const sp = (function find(t) { return t.key === key ? t : (t.children || []).map(find).find(Boolean); })(inst.comp.tree);
+          return `${name} = ${JSON.stringify(sp.text || "")}`;
+        }).join(", ")} }` : "";
+        c.body = renderSpec(inst.comp.tree, 2, props);
+      }
+      // A plain "…" attribute can't hold quotes or backslashes in JSX, and & would be read as an entity: those use {…}.
+      const passed = Object.entries(inst.props).map(([k, v]) => ` ${k}=${/["\\\n&{}<>]/.test(v) ? `{${JSON.stringify(v)}}` : `"${v}"`}`).join("");
+      return `${pad}<${c.name}${passed} />`;
+    }
     const comp = id !== self && !roots.includes(id) ? comps.get(keyOf(id)) : null;
     if (comp) {
       deps.add(comp);
@@ -2397,7 +2481,7 @@ function jsxBuilder(doc, roots, { sheet } = {}) {
     return [`${open}>`, ...text, ...n.children.map((c) => render(c, depth + 1, deps)), `${pad}</${n.tag}>`].join("\n");
   };
 
-  const fn = (name, body, exported = true) => `${exported ? "export " : ""}function ${name}() {\n  return (\n${body}\n  );\n}`;
+  const fn = (name, body, exported = true, params = "") => `${exported ? "export " : ""}function ${name}(${params}) {\n  return (\n${body}\n  );\n}`;
   return {
     // Render one root as an exported component; returns { code, deps } (code still holds style tokens).
     screen(id) {
@@ -2406,7 +2490,7 @@ function jsxBuilder(doc, roots, { sheet } = {}) {
       return { code: fn(componentName(doc.nodes[id].name), body), deps };
     },
     components: () => [...comps.values()].filter((c) => c.body),
-    component: (c, exported) => fn(c.name, c.body, exported),
+    component: (c, exported) => fn(c.name, c.body, exported, c.params || ""),
     // Replace style tokens: styles used more than once point at one `styles` entry, others stay inline.
     finishStyles(chunks) {
       const used = new Set(["styles"]);

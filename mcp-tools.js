@@ -291,7 +291,7 @@ export function registerTools(server, ctx) {
     text(await ctx.auditArtboards({ nodeIds, nodeId, width, checkContrast, checkTapTargets })));
 
   server.registerTool("get_jsx", {
-    description: "Code for a layer/artboard (or the whole page when nodeId is omitted): jsx = React components (className for shared classes, inline style objects for overrides, the root CSS they use in a header comment), html = <style> with the used root CSS and .layer-<id> overrides + markup. The project .zip export links every screen to the root tokens.css (fonts, variables) and components.css (classes, layer styles), with every icon in icons.svg.",
+    description: "Code for a layer/artboard (or the whole page when nodeId is omitted): jsx = React components (declared components from create_component become <Name title=\"…\" /> with a prop per text slot; className for shared classes, inline style objects for overrides, the root CSS they use in a header comment), html = <style> with the used root CSS and .layer-<id> overrides + markup. The project .zip export links every screen to the root tokens.css (fonts, variables) and components.css (classes, layer styles), with every icon in icons.svg.",
     inputSchema: { nodeId: z.string().optional(), format: z.enum(["jsx", "html"]).optional() },
     annotations: READ,
   }, async ({ nodeId, format = "jsx" }) => {
