@@ -35,6 +35,7 @@ export const ed = {
   // The toast's contents are ui/src/components/Toast.svelte; this shows and hides it.
   toastNow: null,
   layerFilter: "",
+  viewportOverrides: {}, // { [artboardId]: widthPx } local canvas responsive preview width
   // The dialog is ui/src/components/dashboard/DashDialog.svelte; this shows and hides it and holds its options.
   dashModalOpts: null,
   rightTab: localStorage.getItem("weft:right-tab") || "design",
