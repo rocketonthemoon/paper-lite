@@ -61,6 +61,13 @@ export function buildNodeEl(nodes, id) {
 const builtFrom = new WeakMap();
 export const markStale = (el) => { if (el) builtFrom.delete(el); };
 
+export function setViewportOverride(id, width) {
+  if (!id) return;
+  if (width && Number.isFinite(Number(width)) && Number(width) > 0) ed.viewportOverrides[id] = Math.round(Number(width));
+  else delete ed.viewportOverrides[id];
+  render();
+}
+
 // One element for node n: id, classes, attributes and text, without children.
 function nodeShell(n) {
   const svg = SVG_TAGS.has(n.tag);
@@ -153,6 +160,13 @@ export function render() {
   renderCanvasCss();
   window.weft.events.dispatchEvent(new Event("root-vars")); // RootVars.svelte
   syncChildEls(ed.S.nodes, ed.S.nodes[ed.S.rootId].children, world, world);
+  for (const abId of ed.S.nodes[ed.S.rootId].children) {
+    const el = elOf(abId);
+    if (!el) continue;
+    const vw = ed.viewportOverrides[abId];
+    if (vw) el.style.width = `${vw}px`;
+    else el.style.removeProperty("width");
+  }
   for (const el of world.querySelectorAll(".is-selected")) el.classList.remove("is-selected");
   const onb = $("#empty-onboarding");
   if (onb) {
@@ -240,8 +254,10 @@ export function updateOverlay() {
     const el = elOf(id);
     if (!el) return [];
     const r = rectOnStage(el), st = ed.S.nodes[id].styles;
-    const dim = r.w > 220 ? `${hug(st.width)} × ${hug(st.height)} · ${Math.round(ed.view.z * 100)}%` : "";
-    return [{ id, name: ed.S.nodes[id].name, dim, sel: id === ed.sel, x: r.x, y: r.y - 20, maxW: Math.max(40, r.w) }];
+    const vp = ed.viewportOverrides[id] || null;
+    const wLabel = vp ? `${vp}px` : hug(st.width);
+    const dim = r.w > 180 || vp ? `${wLabel} × ${hug(st.height)} · ${Math.round(ed.view.z * 100)}%` : "";
+    return [{ id, name: ed.S.nodes[id].name, dim, vp, sel: id === ed.sel, x: r.x, y: r.y - 20, maxW: Math.max(40, r.w) }];
   });
   const selEl = ed.sel && elOf(ed.sel);
   const selRect = selEl ? rectOnStage(selEl) : null;

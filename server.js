@@ -2734,8 +2734,10 @@ es.addEventListener("fonts", () => { if (!fontsSeen) { fontsSeen = true; return;
 }));
 app.get("/render/:id", wrap((req, res) => {
   const ab = artboardOf(req.params.id);
+  const w = Number(req.query.width);
+  const widthCss = Number.isFinite(w) && w > 0 ? `body>[data-layer]{width:${Math.round(w)}px!important}` : "";
   res.type("html").send(`<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="/fonts.css">
-<style>html,body{margin:0;background:transparent}</style></head><body>${toHtml(ab, { fontBase: "", markIds: true })}</body></html>`);
+<style>html,body{margin:0;background:transparent}${widthCss}</style></head><body>${toHtml(ab, { fontBase: "", markIds: true })}</body></html>`);
 }));
 app.get("/api/export", wrap((req, res) => {
   res.type("text/plain").send(exportCode(String(req.query.format || "html"), req.query.nodeId ? String(req.query.nodeId) : undefined));

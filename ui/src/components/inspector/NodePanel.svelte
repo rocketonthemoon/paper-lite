@@ -75,6 +75,8 @@
   <div class="grid2"><label class="fld wide"><span>Display</span><select data-style="display">{#each displays as [v, l] (v)}<option value={v} selected={(st.display || "") === v}>{l}</option>{/each}</select></label></div>
   {#if ab}
     <div class="chips">{#each presets as [lbl, pw, ph] (lbl)}<button type="button" class="chip" class:on={presetOn(pw, ph)} data-action="preset-size" data-w={pw ?? ""} data-h={ph}>{lbl}</button>{/each}</div>
+    <div class="hint" style="margin-top:6px">Viewport preview (@media)</div>
+    <div class="chips" id="vp-preview-chips">{#each [["390", 390], ["834", 834], ["1440", 1440], ["Actual", null]] as [lbl, vw] (lbl)}<button type="button" class="chip" class:on={vw === null ? !m.viewportOverride : m.viewportOverride === vw} data-action="preview-vp" data-w={vw ?? ""}>{lbl}</button>{/each}</div>
   {/if}
 </div>
 <div class="sec">

@@ -117,9 +117,9 @@ export class BlitzRenderer {
 
   // The same /render/:id page headless Chrome loads, so both see the same HTML and CSS (fonts are fetched by the
   // sidecar from the same server). Skipped when the sidecar already has this artboard at this size and content.
-  async load(artboardId, width, height) {
-    const url = `${this.baseUrl}/render/${encodeURIComponent(artboardId)}`;
+  async load(artboardId, width, height, { widthOverride = false } = {}) {
     const w = Math.max(1, Math.ceil(width)), h = Math.max(1, Math.ceil(height));
+    const url = `${this.baseUrl}/render/${encodeURIComponent(artboardId)}${widthOverride ? `?width=${w}` : ""}`;
     const key = this.contentKey?.() ?? null;
     const prev = this.shown;
     if (key !== null && prev && prev.key === key && prev.url === url && prev.width === w && prev.height === h) return;
@@ -130,9 +130,9 @@ export class BlitzRenderer {
     this.shown = { key, url, width: w, height: h };
   }
 
-  screenshot({ artboardId, nodeId, width, height, scale = 1, maxSize = 1600 }) {
+  screenshot({ artboardId, nodeId, width, height, scale = 1, maxSize = 1600, widthOverride = false }) {
     return this.run(async () => {
-      await this.load(artboardId, width, height);
+      await this.load(artboardId, width, height, { widthOverride });
       const r = await this.call("screenshot", { nodeId, scale, maxSize });
       return { png: Buffer.from(r.png, "base64"), width: r.width, height: r.height, scale: r.scale };
     });

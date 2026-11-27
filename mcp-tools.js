@@ -229,20 +229,33 @@ export function registerTools(server, ctx) {
   });
 
   server.registerTool("get_screenshot", {
-    description: "PNG screenshot of a layer or artboard rendered exactly like the canvas/export (headless Chrome). Default target: the user's selection, else the first artboard. Review your work with this once a section or screen is built, not after every small edit.",
-    inputSchema: { nodeId: z.string().optional(), scale: z.number().min(0.1).max(3).optional().describe("Default 1; large frames are capped at 1600px on the long edge") },
+    description: "PNG screenshot of a layer or artboard rendered exactly like the canvas/export (headless Chrome). Default target: the user's selection, else the first artboard. Pass width or widths ([390, 834, 1440]) to test @media breakpoints at multiple viewports without duplicating layers.",
+    inputSchema: {
+      nodeId: z.string().optional(),
+      scale: z.number().min(0.1).max(3).optional().describe("Default 1; large frames are capped at 1600px on the long edge"),
+      width: z.number().int().min(200).max(4096).optional().describe("Viewport/artboard width override in px"),
+      widths: z.array(z.number().int().min(200).max(4096)).min(1).max(6).optional().describe("Capture the target across multiple widths, e.g. [390, 834, 1440]"),
+    },
     annotations: READ,
-  }, async ({ nodeId, scale = 1 }) => {
+  }, async ({ nodeId, scale = 1, width, widths }) => {
     const id = nodeId || ctx.selection().ids[0] || S().nodes[S().rootId].children[0];
     if (!id) throw new Error("Canvas is empty");
     const target = ctx.getNode(id);
     const ab = ctx.artboardOf(id);
     ctx.look([id], "get_screenshot", target.name);
-    const shot = await ctx.renderer.screenshot({ artboardId: ab, nodeId: id, ...ctx.artboardSize(ab), scale });
-    return { content: [
-      { type: "image", data: shot.png.toString("base64"), mimeType: "image/png" },
-      { type: "text", text: `${S().nodes[id].name} (${id}) · ${shot.width}×${shot.height}px at scale ${shot.scale}` },
-    ] };
+    const baseSize = ctx.artboardSize(ab);
+    const widthList = widths?.length ? [...new Set(widths)] : (width !== undefined ? [width] : [null]);
+    const content = [];
+    for (const w of widthList) {
+      const size = w ? { width: w, height: baseSize.height, widthOverride: true } : baseSize;
+      const shot = await ctx.renderer.screenshot({ artboardId: ab, nodeId: id, ...size, scale });
+      const vpLabel = w ? ` @ ${w}px` : "";
+      content.push(
+        { type: "image", data: shot.png.toString("base64"), mimeType: "image/png" },
+        { type: "text", text: `${S().nodes[id].name} (${id})${vpLabel} · ${shot.width}×${shot.height}px at scale ${shot.scale}` },
+      );
+    }
+    return { content };
   });
 
   server.registerTool("get_jsx", {
