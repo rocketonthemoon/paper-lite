@@ -269,7 +269,7 @@ export function registerTools(server, ctx) {
 
   // ---------------------------------------------------------------- root css
   server.registerTool("get_root_css", {
-    description: "The project's root CSS: variables (vars), plain classes (classes), contextual rules (rules), definedClasses, nested CSS text (css), and class usage. Optionally filter by classes, select fields via include, or use format: summary | css | full.",
+    description: "The project's root CSS: variables (vars), plain classes (classes), contextual rules (rules), definedClasses, nested CSS text (css), class usage counts (usage), and unreferenced unusedClasses / unusedVars. Optionally filter by classes, select fields via include, or use format: summary | css | full.",
     inputSchema: {
       include: z.array(z.enum(["vars", "classes", "rules", "definedClasses", "css", "usage", "unused", "unusedClasses", "unusedVars"])).min(1).optional().describe("Subset of fields to return"),
       classes: z.array(z.string()).min(1).optional().describe("Scope to these classes and their referenced variables"),
@@ -279,15 +279,16 @@ export function registerTools(server, ctx) {
   }, async (args) => text(ctx.rootCss.get(args || {})));
 
   server.registerTool("update_root_css", {
-    description: "Add or change the root CSS in one undo step. Pass css text, real CSS with nesting, states and @media (\":root { --x: 1px; } .card { padding: var(--x); &:hover { opacity: .9; } @media (max-width: 640px) { padding: 8px; } }\"), and/or vars { \"--name\": value | null } and classes { name: { camelCase: value | null } | null }. Merges into the existing root CSS unless replace: true. Every layer using a changed variable or class updates everywhere.",
+    description: "Add or change the root CSS in one undo step. Pass css text, real CSS with nesting, states and @media (\":root { --x: 1px; } .card { padding: var(--x); &:hover { opacity: .9; } @media (max-width: 640px) { padding: 8px; } }\"), and/or vars { \"--name\": value | null } and classes { name: { camelCase: value | null } | null }. Merges into the existing root CSS unless replace: true. Pass pruneUnused: true to remove unreferenced classes and variables. Returns a concise confirmation summary (addedClasses, updatedClasses, removedClasses, warnings).",
     inputSchema: {
       css: z.string().optional().describe(":root { --name: value; } plus .class { prop: value; } blocks"),
       vars: z.record(z.string(), z.union([z.string(), z.number(), z.null()])).optional(),
       classes: z.record(z.string(), z.union([styleSchema, z.null()])).optional(),
       replace: z.boolean().optional().describe("Start from an empty root CSS (classes no longer defined are removed from layers)"),
+      pruneUnused: z.boolean().optional().describe("Remove unreferenced classes and variables in one undo step"),
     },
     annotations: WRITE,
-  }, async ({ css, vars, classes, replace }) => text(ctx.rootCss.update({ css, vars, classes, replace })));
+  }, async ({ css, vars, classes, replace, pruneUnused }) => text(await ctx.rootCss.update({ css, vars, classes, replace, pruneUnused })));
 
   // ---------------------------------------------------------------- write
   server.registerTool("write_html", {

@@ -13,7 +13,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import {
   HttpError, ID_RE, SVG_TAGS, VOID_TAGS, cleanName, cleanTag, emptyPage, emptyProject, lenientMerge, mergeAttrs, mergeStyles,
   newId, normalizeProject, emptyRootCss, mergeRootCss, rootCssText, rootCssFlat, rootBaseClasses, definedRootClasses,
-  isBaseRule, rootClassesIn, cleanClassList, varsIn,
+  isBaseRule, rootClassesIn, cleanClassList, varsIn, analyzeRootCssUsage, pruneUnusedRootCss,
 } from "./model.js";
 import { FontLibrary, familiesIn, renameWithRetry } from "./fonts.js";
 import { htmlToSpecs } from "./html-import.js";
@@ -1503,8 +1503,7 @@ function definedClasses(list) {
 
 function getRootCss(opts = {}, doc = state) {
   const root = doc.rootCss || emptyRootCss();
-  const usage = {};
-  for (const n of Object.values(doc.nodes)) for (const c of n.classes || []) usage[c] = (usage[c] || 0) + 1;
+  const { usage, unusedClasses: allUnusedClasses, unusedVars: allUnusedVars } = analyzeRootCssUsage(root, doc.nodes);
   const include = Array.isArray(opts?.include) && opts.include.length ? opts.include : null;
   const classesOpt = Array.isArray(opts?.classes) && opts.classes.length ? opts.classes : null;
   const format = opts?.format || "full";
@@ -1512,7 +1511,7 @@ function getRootCss(opts = {}, doc = state) {
   const wantedClasses = classesOpt
     ? new Set(cleanClassList(classesOpt.map((c) => String(c ?? "").trim().replace(/^\./, ""))))
     : null;
-  const collectVarsFrom = (rulesList, includeNodes = false) => {
+  const collectVarsFrom = (rulesList) => {
     const used = new Set();
     const addVars = (val) => {
       for (const ref of varsIn(val)) {
@@ -1523,7 +1522,6 @@ function getRootCss(opts = {}, doc = state) {
       }
     };
     for (const r of rulesList) for (const val of Object.values(r.styles)) addVars(val);
-    if (includeNodes) for (const n of Object.values(doc.nodes)) for (const val of Object.values(n.styles || {})) addVars(val);
     return used;
   };
 
@@ -1531,9 +1529,11 @@ function getRootCss(opts = {}, doc = state) {
   let scopedVars = root.vars;
   let scopedDefined = definedRootClasses(root);
   let scopedUsage = usage;
+  let unusedClasses = allUnusedClasses;
+  let unusedVars = allUnusedVars;
   if (wantedClasses) {
     const classRules = root.rules.filter((r) => rootClassesIn(r.selector).some((c) => wantedClasses.has(c)));
-    const neededVars = collectVarsFrom(classRules, false);
+    const neededVars = collectVarsFrom(classRules);
     scopedRules = [];
     for (const r of root.rules) {
       if (r.selector === ":root") {
@@ -1546,19 +1546,10 @@ function getRootCss(opts = {}, doc = state) {
     scopedVars = Object.fromEntries(Object.entries(root.vars).filter(([k]) => neededVars.has(k)));
     scopedDefined = scopedDefined.filter((c) => wantedClasses.has(c));
     scopedUsage = Object.fromEntries(Object.entries(usage).filter(([c]) => wantedClasses.has(c)));
+    unusedClasses = allUnusedClasses.filter((c) => wantedClasses.has(c));
+    const unusedVarSet = new Set(allUnusedVars);
+    unusedVars = Object.keys(scopedVars).filter((k) => unusedVarSet.has(k));
   }
-
-  const computeUnused = () => {
-    const unusedClasses = scopedDefined.filter((c) => !usage[c]);
-    const activeRules = root.rules.filter((r) => {
-      if (r.selector === ":root") return false;
-      const cls = rootClassesIn(r.selector);
-      return cls.length === 0 || cls.some((c) => usage[c] > 0);
-    });
-    const allUsedVars = collectVarsFrom(activeRules, true);
-    const unusedVars = Object.keys(scopedVars).filter((k) => !allUsedVars.has(k));
-    return { unusedClasses, unusedVars };
-  };
 
   const scopedRoot = { vars: scopedVars, rules: scopedRules };
   const baseClasses = rootBaseClasses(scopedRoot);
@@ -1569,7 +1560,6 @@ function getRootCss(opts = {}, doc = state) {
     const want = new Set(include);
     if (want.has("unused")) { want.add("unusedClasses"); want.add("unusedVars"); }
     if (format === "css") want.add("css");
-    const unused = (want.has("unusedClasses") || want.has("unusedVars")) ? computeUnused() : null;
     const out = {};
     if (want.has("vars")) out.vars = scopedVars;
     if (want.has("classes")) out.classes = baseClasses;
@@ -1577,13 +1567,12 @@ function getRootCss(opts = {}, doc = state) {
     if (want.has("definedClasses")) out.definedClasses = scopedDefined;
     if (want.has("css")) out.css = cssText;
     if (want.has("usage")) out.usage = scopedUsage;
-    if (want.has("unusedClasses")) out.unusedClasses = unused.unusedClasses;
-    if (want.has("unusedVars")) out.unusedVars = unused.unusedVars;
+    if (want.has("unusedClasses")) out.unusedClasses = unusedClasses;
+    if (want.has("unusedVars")) out.unusedVars = unusedVars;
     return out;
   }
 
   if (format === "summary") {
-    const { unusedClasses, unusedVars } = computeUnused();
     return {
       varsCount: Object.keys(scopedVars).length,
       rulesCount: scopedRules.length,
@@ -1605,14 +1594,24 @@ function getRootCss(opts = {}, doc = state) {
   }
 
   // classes: the plain `.name { }` rules; rules: everything else (states, @media, nested, element selectors).
-  return { vars: scopedVars, classes: baseClasses, rules: nonBaseRules, definedClasses: scopedDefined, css: cssText, usage: scopedUsage };
+  return {
+    vars: scopedVars,
+    classes: baseClasses,
+    rules: nonBaseRules,
+    definedClasses: scopedDefined,
+    css: cssText,
+    usage: scopedUsage,
+    unusedClasses,
+    unusedVars,
+  };
 }
 
 // Patch the root CSS. `css` text is parsed and merged like vars/classes; replace: true starts from empty.
 // Removing a class also removes it from every layer that used it, in the same undo step.
-function updateRootCss({ vars, classes, css, replace = false } = {}, source = "api") {
+async function updateRootCss({ vars, classes, css, replace = false, pruneUnused = false } = {}, source = "api") {
   const before = state.rootCss || emptyRootCss();
-  const next = mergeRootCss(before, { css, vars, classes }, { replace });
+  let next = mergeRootCss(before, { css, vars, classes }, { replace });
+  if (pruneUnused) next = pruneUnusedRootCss(next, state.nodes);
   // Changed variables and rules, by name (a rule is named by its selector and @media).
   const ruleKey = (r) => (r.media ? `@media ${r.media} { ${r.selector} }` : r.selector);
   const ruleMap = (root) => {
@@ -1620,14 +1619,36 @@ function updateRootCss({ vars, classes, css, replace = false } = {}, source = "a
     for (const r of root.rules) m.set(ruleKey(r), JSON.stringify([m.get(ruleKey(r)), r.styles]));
     return m;
   };
+  const classSig = (root) => {
+    const m = new Map();
+    for (const r of root.rules) {
+      for (const c of rootClassesIn(r.selector)) {
+        const list = m.get(c) || [];
+        list.push([r.selector, r.media || "", r.styles]);
+        m.set(c, list);
+      }
+    }
+    for (const [c, list] of m) m.set(c, JSON.stringify(list));
+    return m;
+  };
   const rb = ruleMap(before), rn = ruleMap(next);
+  const cb = classSig(before), cn = classSig(next);
   const changed = [
     ...Object.keys({ ...before.vars, ...next.vars }).filter((k) => before.vars[k] !== next.vars[k]),
     ...[...new Set([...rb.keys(), ...rn.keys()])].filter((k) => rb.get(k) !== rn.get(k)),
   ];
-  const stillDefined = new Set(definedRootClasses(next));
+  const addedClasses = [...cn.keys()].filter((c) => !cb.has(c));
+  const removedClasses = [...cb.keys()].filter((c) => !cn.has(c));
+  const updatedClasses = [...cn.keys()].filter((c) => cb.has(c) && cb.get(c) !== cn.get(c));
+  const addedVars = Object.keys(next.vars).filter((k) => !(k in before.vars));
+  const removedVars = Object.keys(before.vars).filter((k) => !(k in next.vars));
+  const updatedVars = Object.keys(next.vars).filter((k) => k in before.vars && before.vars[k] !== next.vars[k]);
+
+  const stillDefinedList = definedRootClasses(next);
+  const stillDefined = new Set(stillDefinedList);
   const dropped = definedRootClasses(before).filter((c) => !stillDefined.has(c));
   const touchedIds = [];
+  const warnings = [];
   mutate(source, (s) => {
     s.rootCss = next;
     if (dropped.length) {
@@ -1639,7 +1660,36 @@ function updateRootCss({ vars, classes, css, replace = false } = {}, source = "a
       }
     }
   }, { tool: source === "mcp" ? "update_root_css" : "Edit root CSS", target: changed.length ? `Root CSS · ${changed.slice(0, 3).join(", ")}${changed.length > 3 ? "…" : ""}` : "Root CSS", nodeIds: touchedIds });
-  return { ...getRootCss(), changed, removedFromLayers: touchedIds.length || undefined };
+  // Ensure full persistence before returning so subsequent write_html / restarts always see the updated root CSS.
+  await flushWrites();
+  if (touchedIds.length) {
+    warnings.push(`Removed ${dropped.map((c) => `.${c}`).join(", ")} from ${touchedIds.length} layer${touchedIds.length === 1 ? "" : "s"}`);
+  }
+  const missingVars = new Set();
+  for (const r of next.rules) {
+    for (const v of Object.values(r.styles)) {
+      for (const ref of varsIn(v)) {
+        if (!(ref in next.vars) && !next.rules.some((rr) => rr.selector === ":root" && ref in rr.styles)) {
+          missingVars.add(ref);
+        }
+      }
+    }
+  }
+  if (missingVars.size) warnings.push(`Undefined variables referenced in root CSS: ${[...missingVars].join(", ")}`);
+  return {
+    addedClasses,
+    updatedClasses,
+    removedClasses,
+    addedVars,
+    updatedVars,
+    removedVars,
+    changed,
+    definedClasses: stillDefinedList,
+    varsCount: Object.keys(next.vars).length,
+    rulesCount: next.rules.length,
+    ...(touchedIds.length ? { removedFromLayers: touchedIds.length } : {}),
+    warnings,
+  };
 }
 
 // Nudges for agents: hard-coded values that already exist as a root variable, and var() names that don't exist.

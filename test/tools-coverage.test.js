@@ -565,7 +565,7 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
   });
 
   await t.test("root CSS: shared variables, classes, states, @media and nesting drive every layer", async () => {
-    assert.deepEqual(await ok(B, "get_root_css"), { vars: {}, classes: {}, rules: [], definedClasses: [], css: "", usage: {} });
+    assert.deepEqual(await ok(B, "get_root_css"), { vars: {}, classes: {}, rules: [], definedClasses: [], css: "", usage: {}, unusedClasses: [], unusedVars: [] });
     const set = await ok(B, "update_root_css", {
       css: `/* tokens */
         :root { --color-primary: #0000ff; --color-on-primary: #ffffff; --space-3: 12px; --radius: 12px; --font-ui: 'Geist', sans-serif; }
@@ -577,19 +577,43 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
         }
         .muted-text { font-family: var(--font-ui); -webkit-line-clamp: 2; }`,
     });
+    assert.equal(set.css, undefined, "update_root_css returns a concise summary rather than full CSS");
     assert.deepEqual(set.changed.sort(), ["--color-on-primary", "--color-primary", "--font-ui", "--radius", "--space-3", ".muted-text", ".stat-card",
       ".stat-card .stat-value", ".stat-card:hover", "@media (max-width: 900px) { .stat-card .stat-value }", "@media (max-width: 900px) { .stat-card }"].sort());
-    assert.equal(set.classes["stat-card"].borderRadius, "var(--radius)", "kebab-case becomes camelCase");
-    assert.equal(set.classes["muted-text"].WebkitLineClamp, "2");
-    assert.deepEqual(set.rules.map((r) => r.selector), [".stat-card:hover", ".stat-card .stat-value", ".stat-card", ".stat-card .stat-value"]);
+    assert.deepEqual(set.addedClasses.sort(), ["muted-text", "stat-card", "stat-value"]);
+    assert.deepEqual(set.addedVars.sort(), ["--color-on-primary", "--color-primary", "--font-ui", "--radius", "--space-3"]);
     assert.deepEqual(set.definedClasses.sort(), ["muted-text", "stat-card", "stat-value"]);
-    assert.match(set.css, /^\.stat-card \{\n {2}padding: var\(--space-3\);[\s\S]*\n {2}&:hover \{\n {4}background: #000080;/m, "nested text comes back");
-    // vars/classes patches merge; null removes.
-    const merged = await ok(B, "update_root_css", { vars: { "--space-3": "14px", "--unused": "1px" }, classes: { pill: { borderRadius: 999 } } });
-    assert.equal(merged.vars["--space-3"], "14px");
-    assert.equal(merged.classes.pill.borderRadius, "999px", "numbers become px like inline styles");
-    await ok(B, "update_root_css", { vars: { "--unused": null, "--space-3": "12px" }, classes: { pill: null } });
-    assert.equal((await ok(B, "get_root_css")).classes.pill, undefined);
+    assert.equal(set.varsCount, 5);
+    assert.equal(set.rulesCount, 6);
+    assert.deepEqual(set.warnings, []);
+    const got0 = await ok(B, "get_root_css");
+    assert.equal(got0.classes["stat-card"].borderRadius, "var(--radius)", "kebab-case becomes camelCase");
+    assert.equal(got0.classes["muted-text"].WebkitLineClamp, "2");
+    assert.deepEqual(got0.rules.map((r) => r.selector), [".stat-card:hover", ".stat-card .stat-value", ".stat-card", ".stat-card .stat-value"]);
+    assert.deepEqual(got0.definedClasses.sort(), ["muted-text", "stat-card", "stat-value"]);
+    assert.match(got0.css, /^\.stat-card \{\n {2}padding: var\(--space-3\);[\s\S]*\n {2}&:hover \{\n {4}background: #000080;/m, "nested text comes back");
+    assert.deepEqual(got0.unusedClasses.sort(), ["muted-text", "stat-card", "stat-value"]);
+    // vars/classes patches merge; null removes (including quoted keys).
+    const merged = await ok(B, "update_root_css", {
+      vars: { "--space-3": "14px", "--unused": "1px", "\"--nf-border\"": "1px solid #333" },
+      classes: { pill: { borderRadius: 999 }, "nf-mobile-btn-list": { gap: 8 } },
+    });
+    assert.ok(merged.updatedVars.includes("--space-3") && merged.addedVars.includes("--unused"));
+    assert.ok(merged.addedClasses.includes("pill") && merged.addedClasses.includes("nf-mobile-btn-list"));
+    const gotMerged = await ok(B, "get_root_css");
+    assert.equal(gotMerged.vars["--space-3"], "14px");
+    assert.equal(gotMerged.vars["--nf-border"], "1px solid #333");
+    assert.equal(gotMerged.classes.pill.borderRadius, "999px", "numbers become px like inline styles");
+    const removed = await ok(B, "update_root_css", {
+      vars: { "--unused": null, "--space-3": "12px", "--nf-border": null },
+      classes: { pill: null, "\"nf-mobile-btn-list\"": null },
+    });
+    assert.deepEqual(removed.removedVars.sort(), ["--nf-border", "--unused"]);
+    assert.deepEqual(removed.removedClasses.sort(), ["nf-mobile-btn-list", "pill"]);
+    const afterRemove = await ok(B, "get_root_css");
+    assert.equal(afterRemove.classes.pill, undefined);
+    assert.equal(afterRemove.classes["nf-mobile-btn-list"], undefined);
+    assert.equal(afterRemove.vars["--nf-border"], undefined);
     const basic = await ok(B, "get_basic_info");
     assert.deepEqual(basic.rootCss.classes.sort(), ["muted-text", "stat-card", "stat-value"]);
     assert.ok(basic.rootCss.vars.includes("--color-primary"));
@@ -728,6 +752,36 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
     assert.match(jsx, /className="stat-card">\{"Two"\}/);
     assert.doesNotMatch(jsx, /style=\{\{/);
     await ok(B, "delete_nodes", { nodeIds: sharedIds });
+  });
+
+  await t.test("root CSS P0: replace flushes to disk, @media merges, pruneUnused + undo", async () => {
+    const prev = await ok(B, "get_root_css");
+    await ok(B, "update_root_css", { css: ":root { --dead-only: #123456; } .dead-class { color: var(--dead-only); }" });
+    const beforePrune = await ok(B, "get_root_css");
+    assert.ok(beforePrune.unusedClasses.includes("dead-class"));
+    assert.ok(beforePrune.unusedVars.includes("--dead-only"));
+
+    const pruned = await ok(B, "update_root_css", { pruneUnused: true });
+    assert.ok(pruned.removedClasses.includes("dead-class"));
+    assert.ok(pruned.removedVars.includes("--dead-only"));
+    assert.equal((await ok(B, "get_root_css")).classes["dead-class"], undefined);
+    await ok(B, "undo");
+    assert.ok((await ok(B, "get_root_css")).classes["dead-class"], "undo restores pruned CSS");
+
+    const rep = await ok(B, "update_root_css", {
+      replace: true,
+      css: ":root { --nf-red: #e50914; } .nf-hero { color: var(--nf-red); @media (max-width:640px) { padding: 8px; } } @media ( max-width : 640px ) { .nf-hero { gap: 4px; } }",
+    });
+    assert.deepEqual(rep.addedClasses, ["nf-hero"]);
+    const onDisk = JSON.parse(await fs.readFile(path.join(srv.dataDir, "projects", `${projectId}.json`), "utf8")).rootCss;
+    assert.equal(onDisk.vars["--nf-red"], "#e50914", "replace: true is flushed to disk before returning");
+    assert.equal(onDisk.rules.filter((r) => r.selector === ".nf-hero" && r.media).length, 1, "@media rules merge canonically");
+
+    const created = await ok(B, "write_html", { parentId: board, html: `<div class="nf-hero">Hero</div>` });
+    assert.deepEqual((await ok(B, "get_node_info", { nodeId: created.created[0].id })).classes, ["nf-hero"]);
+    assert.equal((created.warnings || []).some((w) => /nf-hero/.test(w)), false);
+    await ok(B, "delete_nodes", { nodeIds: [created.created[0].id] });
+    await ok(B, "update_root_css", { replace: true, css: prev.css });
   });
 
   await t.test("preview: a screen opens as a live page sized to its artboard", async () => {
