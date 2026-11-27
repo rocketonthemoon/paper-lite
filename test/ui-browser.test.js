@@ -1069,3 +1069,60 @@ test("browser: dashboard (Svelte): thumbnails kept across unrelated updates, act
   await cdp.evalJs(`document.getElementById("dash-grid-new").click()`);
   await waitFor(`!document.getElementById("dash-modal").hidden && document.getElementById("dash-modal-input")`, "new project dialog");
 });
+
+test("browser: canvas overlay (Svelte): artboard labels, context bar, breadcrumb and agent cursors follow live edits", { timeout: 120_000 }, async (t) => {
+  const browserBin = findBrowser();
+  if (!browserBin) {
+    t.skip("No headless Chromium/Chrome binary found");
+    return;
+  }
+  const srv = await startTestServer();
+  t.after(() => srv.stop());
+  const cdp = await startBrowser(browserBin);
+  t.after(() => cdp.stop());
+  const rest = async (method, url, body) => {
+    const res = await fetch(srv.baseUrl + url, { method, headers: { "content-type": "application/json" }, body: body && JSON.stringify(body) });
+    assert.ok(res.ok, `${method} ${url} → ${res.status}`);
+    return res.json();
+  };
+  const waitFor = async (expr, label) => {
+    for (let i = 0; i < 100; i++) { if (await cdp.evalJs(expr)) return; await sleep(50); }
+    assert.fail(`timed out waiting for ${label}`);
+  };
+  const s0 = await rest("GET", "/api/state");
+  const ab = await rest("POST", "/api/nodes", { parentId: s0.rootId, tag: "section", name: "Home", styles: { left: 0, top: 0, width: 600, height: 400 } });
+  const card = await rest("POST", "/api/nodes", { parentId: ab.id, tag: "div", name: "Card", styles: { position: "absolute", left: "20px", top: "40px", width: "100px", height: "50px" } });
+  await cdp.send("Page.navigate", { url: srv.baseUrl });
+  const label = `document.querySelector('#labels .ab-label[data-id="${ab.id}"]')`;
+  await waitFor(`document.querySelector("#live.live") && ${label}`, "label");
+  assert.equal(await cdp.evalJs(`document.getElementById("crumb-ab").textContent`), "Home");
+  assert.equal(await cdp.evalJs(`document.getElementById("crumb-page").textContent`), "Page 1");
+
+  // The label element is kept across live edits; its text and selection state update in place.
+  await cdp.evalJs(`window.__label = ${label}`);
+  await rest("PATCH", `/api/nodes/${ab.id}`, { name: "Home v2" });
+  await waitFor(`${label}?.querySelector(".ab-nm").textContent === "Home v2"`, "renamed label");
+  assert.ok(await cdp.evalJs(`window.__label === ${label}`), "same label element");
+  await cdp.evalJs(`select(${JSON.stringify(ab.id)})`);
+  assert.ok(await cdp.evalJs(`${label}.classList.contains("sel")`));
+  assert.equal(await cdp.evalJs(`document.getElementById("ctx-preview").hidden`), false, "screens offer Preview");
+
+  // Context bar for a layer: name, no Preview, Flex icon follows the layer's display.
+  await cdp.evalJs(`select(${JSON.stringify(card.id)})`);
+  assert.equal(await cdp.evalJs(`document.getElementById("ctx-name").textContent`), "Card");
+  assert.equal(await cdp.evalJs(`document.getElementById("ctx-preview").hidden`), true);
+  assert.equal(await cdp.evalJs(`document.getElementById("crumb-ab").textContent`), "Home v2", "breadcrumb shows the selection's artboard");
+  const flexPath = `document.querySelector("#ctx-flex path").getAttribute("d")`;
+  assert.equal(await cdp.evalJs(flexPath), "M8 3v10M3 8h10");
+  await rest("PATCH", `/api/nodes/${card.id}`, { styles: { display: "flex" } });
+  await waitFor(`${flexPath} === "M3.5 8h9"`, "flex icon after live edit");
+  const bar = await cdp.evalJs(`(() => { const b = document.getElementById("ctx-bar").getBoundingClientRect(), c = document.querySelector('#world [data-node-id="${card.id}"]').getBoundingClientRect(); return { show: getComputedStyle(document.getElementById("ctx-bar")).display, above: b.bottom <= c.top }; })()`);
+  assert.deepEqual(bar, { show: "flex", above: true }, "bar shown above the layer");
+
+  // An agent working on the card: dashed box and a cursor; clicking the cursor selects the layer.
+  await cdp.evalJs(`select(null)`);
+  await mcpCall(srv.baseUrl, "update_styles", { updates: [{ nodeIds: [card.id], styles: { opacity: 0.9 } }] });
+  await waitFor(`document.querySelectorAll("#agents .agent-box").length === 1 && document.querySelector("#agents .agent-cursor .agent-cursor-tag strong")`, "agent box and cursor");
+  await cdp.evalJs(`document.querySelector("#agents .agent-cursor").click()`);
+  await waitFor(`sel === ${JSON.stringify(card.id)}`, "cursor click selects");
+});
