@@ -76,6 +76,7 @@ export default [
         Blob: "readonly",
         CSS: "readonly",
         ClipboardItem: "readonly",
+        CustomEvent: "readonly",
         DOMMatrix: "readonly",
         Element: "readonly",
         Event: "readonly",
