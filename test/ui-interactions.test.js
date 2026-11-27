@@ -489,6 +489,160 @@ test("UI interactions: drawing, editing, shortcuts, panels, projects and live sy
     assert.equal(await ui.evalJs(`document.querySelector('#world [data-node-id="${rectId}"]').tagName`), "SECTION");
   });
 
+  await t.test("root CSS: the page editor defines variables, classes, states, breakpoints and nesting for the canvas", async () => {
+    const post = async (body) => (await fetch(`${B}/api/nodes`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })).json();
+    const tile = await post({ parentId: board, name: "Tile", tag: "div", styles: { width: 120, height: 60, borderRadius: 6 } });
+    const tileText = await post({ parentId: tile.id, name: "Tile label", tag: "span", text: "Tile" });
+    const node = async () => (await state()).nodes[tile.id];
+    const root = async () => (await state()).rootCss;
+    const rule = async (selector, media) => (await root()).rules.find((r) => r.selector === selector && (r.media || "") === (media || ""));
+    const cs = (id, prop) => ui.evalJs(`getComputedStyle(document.querySelector('#world [data-node-id="${id}"]')).${prop}`);
+    const applyRoot = (css) => ui.evalJs(`(() => { const ta = document.getElementById("root-css"); ta.value = ${JSON.stringify(css)}; document.querySelector('[data-action="apply-root-css"]').click(); return true; })()`);
+    const css1 = `:root {
+  --brand: #0000ff;
+  --pad: 10px;
+}
+
+.tile {
+  background-color: var(--brand);
+  padding: var(--pad);
+  &:hover {
+    background-color: #000000;
+  }
+  & .tile-label {
+    color: #ff0000;
+  }
+  @media (max-width: 395px) {
+    padding: 2px;
+  }
+}
+
+.tile-label {
+  font-size: 13px;
+}`;
+
+    await ui.evalJs("select(null)");
+    await waitFor(() => ui.evalJs(`Boolean(document.getElementById("root-css"))`), "root CSS editor on the page panel");
+    await applyRoot(css1);
+    await waitFor(async () => (await root()).vars["--brand"] === "#0000ff" && (await rule(".tile:hover"))?.styles.backgroundColor === "#000000", "root CSS saved");
+    await waitFor(() => ui.evalJs(`document.querySelector("#root-css-sec .sec-h").textContent.includes("2 variables · 2 classes · 5 rules")`), "counts shown");
+    assert.equal(await ui.evalJs(`document.getElementById("root-css").value`), css1, "the editor shows the nested text exactly as written");
+    assert.equal(await ui.evalJs(`document.querySelector("#root-css-sec .var-row .sw").style.background`), "rgb(0, 0, 255)", "colour variables get a swatch");
+
+    // Add the shared classes to layers from their inspector.
+    const addClass = async (id, name) => {
+      await pick(id);
+      await waitFor(() => ui.evalJs(`Boolean(document.querySelector("#inspector [data-class-add] option[value='${name}']"))`), `class picker offers .${name}`);
+      await ui.evalJs(`(() => { const s = document.querySelector("#inspector [data-class-add]"); s.value = ${JSON.stringify(name)}; s.dispatchEvent(new Event("change", { bubbles: true })); })()`);
+    };
+    await addClass(tile.id, "tile");
+    await waitFor(async () => JSON.stringify((await node()).classes) === '["tile"]', "class added");
+    await addClass(tileText.id, "tile-label");
+    await waitFor(async () => JSON.stringify((await state()).nodes[tileText.id].classes) === '["tile-label"]', "nested-rule class added");
+    await waitFor(async () => (await cs(tile.id, "paddingTop")) === "10px", "class styles render on the canvas");
+    assert.equal(await cs(tile.id, "backgroundColor"), "rgb(0, 0, 255)", "variables resolve on the canvas");
+    assert.equal(await cs(tile.id, "borderTopLeftRadius"), "6px", "the layer's own styles still apply");
+    assert.equal(await cs(tileText.id, "color"), "rgb(255, 0, 0)", "nested rule applies");
+    assert.equal(await cs(tileText.id, "fontSize"), "13px");
+    assert.match(await ui.evalJs(`document.querySelector("#inspector .class-chip").title`), /font-size: 13px/);
+    assert.equal(await ui.evalJs(`document.querySelector('#world [data-node-id="${tile.id}"]').classList.contains("wc-tile")`), true, "canvas classes are prefixed");
+
+    // :hover is real on the canvas.
+    await ui.evalJs("select(null)");
+    await settle();
+    const r = await nodeRect(tile.id);
+    await ui.move(r.x + 4, r.y + 4);
+    await waitFor(async () => (await cs(tile.id, "backgroundColor")) === "rgb(0, 0, 0)", ":hover applies on the canvas");
+    await ui.move(5, 5);
+    await waitFor(async () => (await cs(tile.id, "backgroundColor")) === "rgb(0, 0, 255)", "hover ends");
+
+    // Width @media follows the artboard, not the editor window: the 390px artboard gets the mobile padding, the 400px one doesn't.
+    const phone = await post({ parentId: (await state()).rootId, name: "Phone", tag: "div", styles: { left: 4000, top: 0, width: 390, height: 200 } });
+    const phoneTile = await post({ parentId: phone.id, name: "Phone tile", tag: "div", classes: ["tile"] });
+    await waitFor(async () => (await cs(phoneTile.id, "paddingTop")) === "2px", "breakpoint applies inside the 390px artboard");
+    assert.equal(await cs(tile.id, "paddingTop"), "10px", "but not inside the wider artboard");
+
+    // Editing one variable restyles the layers.
+    await waitFor(() => ui.evalJs(`Boolean(document.getElementById("root-css"))`), "editor");
+    await applyRoot(css1.replace("--pad: 10px", "--pad: 14px").replace("#0000ff", "#00aa00"));
+    await waitFor(async () => (await cs(tile.id, "paddingTop")) === "14px" && (await cs(tile.id, "backgroundColor")) === "rgb(0, 170, 0)", "variable change restyles the layer");
+
+    // A parse error is reported and nothing changes.
+    const v = (await state()).version;
+    await applyRoot(".tile { #bad { color: red; } }");
+    await waitFor(() => ui.evalJs(`document.getElementById("toast").textContent.includes("ids and attribute selectors")`), "error toast");
+    assert.equal((await state()).version, v);
+
+    // Make a class from a layer's own styles: the styles move into the root CSS, placement stays on the layer.
+    await pick(tile.id);
+    await ui.evalJs(`window.prompt = () => "tile-base"`);
+    await waitFor(() => ui.evalJs(`Boolean(document.querySelector('#inspector [data-action="make-class"]:not([disabled])'))`), "make class enabled");
+    await ui.evalJs(`document.querySelector('#inspector [data-action="make-class"]').click()`);
+    await waitFor(async () => JSON.stringify((await node()).classes) === '["tile","tile-base"]', "new class applied");
+    assert.deepEqual((await rule(".tile-base")).styles, { width: "120px", height: "60px", borderRadius: "6px" });
+    assert.deepEqual(Object.keys((await node()).styles), [], "the layer no longer repeats those styles");
+    await waitFor(async () => (await cs(tile.id, "width")) === "120px" && (await cs(tile.id, "borderTopLeftRadius")) === "6px", "looks the same after moving styles to the class");
+
+    // Remove a class from the layer with its chip.
+    await waitFor(() => ui.evalJs(`Boolean(document.querySelector('#inspector [data-action="remove-class"][data-class="tile"]'))`), "chip");
+    await ui.evalJs(`document.querySelector('#inspector [data-action="remove-class"][data-class="tile"]').click()`);
+    await waitFor(async () => JSON.stringify((await node()).classes) === '["tile-base"]', "class removed from layer");
+
+    // Deleting a class that layers use asks first, then takes it off them.
+    await ui.evalJs("select(null)");
+    await waitFor(() => ui.evalJs(`Boolean(document.getElementById("root-css"))`), "editor");
+    await ui.evalJs(`window.__asked = ""; window.confirm = (m) => { window.__asked = m; return false; }`);
+    await applyRoot(":root { --brand: #00aa00; } .tile { color: red; }");
+    await waitFor(() => ui.evalJs("window.__asked"), "confirm shown");
+    assert.match(await ui.evalJs("window.__asked"), /\.tile-base \(1 layer\)/);
+    assert.ok(await rule(".tile-base"), "cancelling keeps the class");
+    await ui.evalJs(`window.confirm = () => true`);
+    await applyRoot("");
+    await waitFor(async () => !Object.keys((await root()).vars).length && !(await root()).rules.length && !(await node()).classes, "root CSS cleared and classes taken off the layers");
+    for (const id of [tile.id, phone.id]) await fetch(`${B}/api/nodes/${id}`, { method: "DELETE" });
+    await synced();
+  });
+
+  await t.test("preview: selecting a screen offers Preview, which opens a live page in a new tab", async () => {
+    await ui.evalJs(`window.__opened = []; window.open = (url, target) => { window.__opened.push([url, target]); return {}; }`);
+    await pick(board);
+    await waitFor(() => ui.evalJs(`getComputedStyle(document.getElementById("ctx-preview")).display !== "none" && getComputedStyle(document.getElementById("ctx-bar")).display !== "none"`), "Preview in the context bar for a screen");
+    await ui.evalJs(`document.getElementById("ctx-preview").click()`);
+    assert.deepEqual(await ui.evalJs("window.__opened"), [[`/preview/${board}`, "_blank"]]);
+    await waitFor(() => ui.evalJs(`document.getElementById("toast").textContent.startsWith("Previewing")`), "toast");
+
+    // Inside a screen: the context bar stays compact, but P and the inspector header still preview the screen.
+    await pick(rectId);
+    await waitFor(() => ui.evalJs(`getComputedStyle(document.getElementById("ctx-preview")).display === "none"`), "no context-bar Preview on a layer");
+    await ui.evalJs(`document.querySelector('#right-head [data-action="preview"]').click()`);
+    await ui.evalJs("document.activeElement.blur()");
+    await ui.key("p");
+    assert.deepEqual((await ui.evalJs("window.__opened")).slice(1), [[`/preview/${board}`, "_blank"], [`/preview/${board}`, "_blank"]]);
+
+    // A blocked pop-up is explained.
+    await ui.evalJs(`window.open = () => null`);
+    await ui.key("p");
+    await waitFor(() => ui.evalJs(`document.getElementById("toast").textContent.includes("blocked the preview tab")`), "pop-up blocked message");
+
+    // The preview page itself: the screen at its width, live-reloading when the screen changes.
+    await ui.evalJs(`(() => { const f = document.createElement("iframe"); f.id = "__pv"; f.style.cssText = "position:fixed;left:0;top:0;width:900px;height:700px;opacity:0;pointer-events:none"; f.src = "/preview/${board}"; document.body.append(f); })()`);
+    const inner = (expr) => ui.evalJs(`(() => { try { const d = document.getElementById("__pv").contentDocument.getElementById("frame").contentDocument; return ${expr}; } catch { return null; } })()`);
+    await waitFor(() => inner(`Boolean(d.querySelector('[data-layer="${rectId}"]'))`), "preview frame shows the screen");
+    await waitFor(() => ui.evalJs(`document.getElementById("__pv").contentDocument.getElementById("live").textContent.includes("Live")`), "preview is live");
+    const boardWidth = (await nodeBy((n) => n.id === board)).styles.width;
+    assert.equal(await ui.evalJs(`document.getElementById("__pv").contentDocument.getElementById("frame").offsetWidth + "px"`), boardWidth);
+    const label = await nodeBy((n) => n.parentId === board && n.tag === "p");
+    await fetch(`${B}/api/nodes/${label.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: "Live preview text" }) });
+    await waitFor(() => inner(`d.body.textContent.includes("Live preview text")`), "preview reloads after an edit");
+    await ui.evalJs(`document.getElementById("__pv").contentDocument.getElementById("w-fill").click()`);
+    // Fills the preview window's content area (a vertical scrollbar may take a few pixels).
+    await waitFor(() => ui.evalJs(`(() => { const d = document.getElementById("__pv").contentDocument; return d.getElementById("frame").offsetWidth === d.getElementById("main").clientWidth && d.getElementById("frame").offsetWidth > 850; })()`), "Fill window stretches the frame");
+    await waitFor(() => inner(`d.querySelector('[data-layer="${board}"]').offsetWidth === d.documentElement.clientWidth`), "the screen fills the frame");
+    await fetch(`${B}/api/nodes/${label.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: label.text }) });
+    await ui.evalJs(`document.getElementById("__pv").remove(); delete window.open; window.__opened = null`);
+    await synced();
+  });
+
   await t.test("text inspector: font size, weight, alignment and text area", async () => {
     await ui.evalJs(`select(${JSON.stringify(textId)})`);
     const st = async () => (await nodeBy((n) => n.id === textId));

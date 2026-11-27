@@ -4,7 +4,8 @@ A self-hosted HTML/CSS design canvas with a built-in MCP server. AI agents build
 
 ## Features
 
-- **Real HTML layers.** Artboards are plain DOM elements (`div`, `section`, `button`, `svg`, …) with camelCase inline CSS, not a proprietary vector format.
+- **Real HTML layers.** Artboards are plain DOM elements (`div`, `section`, `button`, `svg`, …) styled by the shared root CSS plus their own camelCase styles, not a proprietary vector format.
+- **One root CSS per project.** Variables, classes, states (`:hover`, `:focus-visible`, …), `@media` and nesting (`&:hover`, `& .title`, `&--primary`) live in one shared stylesheet. Layers use `class="card"` and `var(--color-primary)` and keep only their own overrides. On the canvas, width `@media` queries follow each artboard's width; the ZIP export links every screen to a single `styles.css`.
 - **Live collaboration.** Agent edits, live cursors, selections, comments, checkpoints, and labelled undo history sync to the browser over SSE.
 - **Screenshots.** Headless Chrome renders artboards for `get_screenshot` and `get_computed_styles`.
 - **Export.** Export to React JSX, standalone HTML, or a ZIP bundle (comments are excluded from all exports).
@@ -62,7 +63,7 @@ If your client only supports stdio, start the server first, then use the relay:
 }
 ```
 
-## MCP tools (44)
+## MCP tools (46)
 
 | Category | Tools |
 | --- | --- |
@@ -71,6 +72,7 @@ If your client only supports stdio, start the server first, then use the relay:
 | Inspection & selection | `get_guide`, `get_basic_info`, `get_selection`, `set_selection`, `get_tree_summary`, `get_children`, `get_node_info`, `find_nodes`, `get_computed_styles`, `get_screenshot` |
 | Comments & collaboration | `get_comments`, `reply_to_comment`, `resolve_comment`, `finish_working_on_nodes`, `set_session_title` |
 | Checkpoints & history | `save_checkpoint`, `list_checkpoints`, `restore_checkpoint`, `undo`, `redo` |
+| Root CSS (shared styles) | `get_root_css`, `update_root_css` |
 | Fonts & export | `list_fonts`, `add_font`, `remove_font`, `get_jsx` |
 
 ## Project structure
@@ -78,7 +80,7 @@ If your client only supports stdio, start the server first, then use the relay:
 | File | Role |
 | --- | --- |
 | [`server.js`](server.js) | Express 5 server: REST API, SSE (`/events`), JSON persistence, history/checkpoints/comments/activity, export, and `/mcp` |
-| [`mcp-tools.js`](mcp-tools.js) | Zod schemas and handlers for all 44 MCP tools |
+| [`mcp-tools.js`](mcp-tools.js) | Zod schemas and handlers for all 46 MCP tools |
 | [`mcp-stdio.js`](mcp-stdio.js) | stdio ↔ HTTP relay for stdio-only clients |
 | [`model.js`](model.js) | Project/node/comment normalization, CSS and attribute validation |
 | [`html-import.js`](html-import.js) | `parse5`-based HTML → node converter used by `write_html` |

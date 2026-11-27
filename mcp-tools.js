@@ -1,11 +1,12 @@
-// weft MCP tool set (44 tools). Modelled on Paper's MCP so agents can drive the canvas end to end:
+// weft MCP tool set (46 tools). Modelled on Paper's MCP so agents can drive the canvas end to end:
 // read (info / tree / nodes / comments / computed styles / screenshots / code) → write (HTML, styles, text, structure)
 // → review (screenshot) → reply_to_comment / finish_working_on_nodes. Every write is one undoable step and shows live in the UI.
 import * as z from "zod";
 
-export const SERVER_INSTRUCTIONS = `weft is a live HTML/CSS design canvas. Layers are real DOM nodes with camelCase inline styles.
+export const SERVER_INSTRUCTIONS = `weft is a live HTML/CSS design canvas. Layers are real DOM nodes styled by the project's shared root CSS (variables + classes) plus camelCase inline overrides.
 Start every session with get_guide (once) and get_basic_info (open project, pages, artboards, fonts, openComments). Use get_selection to see what the user is focused on, and get_comments to check reviewer notes.
-Write designs with write_html (inline style="" only, one visual group per call), save_checkpoint before major rewrites, set_session_title to label your run, then get_screenshot to review, reply_to_comment if responding to feedback, and call finish_working_on_nodes when done. All writes are undoable (undo).`;
+Style through the project's root CSS: get_root_css shows the shared variables, classes, states, @media and nested rules; update_root_css adds them (real CSS with nesting). Layers use class="card" and var(--color-primary); inline style="" only holds what differs.
+Write designs with write_html (one visual group per call), save_checkpoint before major rewrites, set_session_title to label your run, then get_screenshot to review, reply_to_comment if responding to feedback, and call finish_working_on_nodes when done. All writes are undoable (undo).`;
 
 const GUIDE = `# weft MCP guide
 
@@ -17,8 +18,36 @@ const GUIDE = `# weft MCP guide
 - Fonts: list_fonts shows the font library (Geist + Geist Mono built in, plus user-uploaded files and Google Fonts).
   Use the returned cssFamily as fontFamily. add_font adds a Google family or a local .woff2/.woff/.ttf/.otf file.
 
+## Root CSS (shared styles)
+- Every project has one root CSS: variables in :root and shared classes. It is the single source of truth for
+  colours, type, spacing, radii and repeated components. get_root_css reads it (vars, classes, css text, usage).
+- Before building screens, set up the tokens and components you need with update_root_css, e.g.
+  update_root_css({ css: ":root { --color-primary: #0000ff; --space-4: 16px; --radius-md: 12px; } .card { padding: var(--space-4); border-radius: var(--radius-md); }" })
+  or { vars: { "--color-primary": "#0000ff" }, classes: { card: { padding: "var(--space-4)" } } }. null removes one.
+- Layers share it: <div class="card" style="gap: 8px">. Use var(--name) for every colour, font, size and spacing that
+  has a variable, never the raw value.
+- It is real CSS with nesting: states, breakpoints and descendants belong in the root CSS, not on layers:
+    .card { padding: var(--space-4);
+      &:hover { box-shadow: var(--shadow-1); }        /* :hover :focus-visible :active :disabled :first-child … */
+      & .card-title { font-size: 20px; }              /* also > + ~, :not() :is() :has() :nth-child() */
+      &--featured { border-color: var(--color-primary); }   /* & concatenates, like Sass: .card--featured */
+      @media (max-width: 640px) { padding: var(--space-2); & .card-title { font-size: 16px; } }
+    }
+    @media (prefers-color-scheme: dark) { :root { --color-bg: #0a0b0d; } }
+  Selectors may use classes, canvas tags and * (no ids or [attributes]). Only @media at-rules are supported.
+- Cascade everywhere (canvas, screenshots, exports): :root variables → plain .class rules → the layer's own styles →
+  states, @media and nested rules. So a layer's own style beats its base class, and :hover / breakpoints still apply.
+- Breakpoints: screenshots render at the artboard's width; on the canvas, width queries follow each artboard's width.
+  Design the mobile artboard (390px) and desktop artboard (1280px+) from the same classes.
+- Inline styles are for layout and one-off overrides only. If two layers repeat the same styles, make a class.
+- Changing a variable or class restyles every layer that uses it, on every screen. Removing a class removes it from
+  the layers that use it. write_html and update_styles warn when a raw value duplicates a variable.
+- update_root_css({ css }) merges each rule into the rule with the same selector and @media (or appends it);
+  replace: true makes the text the whole root CSS, in order. get_root_css returns the nested text as css.
+
 ## Workflow
-1. get_basic_info: project, pages, artboards on the current page (id, name, position, size), fonts, the user's selection, openComments count.
+1. get_basic_info: project, pages, artboards on the current page (id, name, position, size), fonts, root CSS names, the user's selection, openComments count.
+1b. get_root_css: the variables and classes to build with; add missing ones with update_root_css before writing layers.
 2. get_selection / get_tree_summary / find_nodes / get_node_info / get_comments: read before you write. Ids are short hex strings.
 3. Safety & runs: save_checkpoint before big rewrites; set_session_title("Short run summary") to name your activity session.
 4. Create:
@@ -31,7 +60,8 @@ const GUIDE = `# weft MCP guide
 8. Code: get_jsx({ nodeId, format: "jsx" | "html" }).
 
 ## HTML rules (write_html)
-- Inline styles only: <div style="display:flex; gap:12px">. class / id / <style> / scripts are ignored.
+- class="card primary" applies shared classes from the root CSS (undefined ones are dropped with a warning).
+  style="" holds the layer's own styles. id / <style> / scripts are ignored; put shared CSS in update_root_css.
 - Allowed tags: div section header footer nav main article aside h1–h6 p span strong em small label a button img ul ol li
   figure figcaption hr br, plus svg g path circle rect ellipse line polyline polygon. Others are mapped: b→strong, i→em
   quietly; table/form/input→div with a warning.
@@ -42,6 +72,7 @@ const GUIDE = `# weft MCP guide
 - Images: <img src="https://…" alt="…">.
 
 ## Styling
+- Colours, fonts and spacing come from root CSS variables: color: var(--color-text).
 - Prefer flexbox (display:flex; flexDirection; gap; padding) over absolute positioning.
 - Numbers in update_styles become px (except opacity, zIndex, fontWeight, lineHeight, flexGrow…). null removes a property.
 - Fonts: only families from list_fonts (or system-ui / serif / monospace) render. Use px for font sizes, em for letter-spacing.
@@ -59,6 +90,7 @@ const text = (value) => ({ content: [{ type: "text", text: typeof value === "str
 const READ = { readOnlyHint: true, openWorldHint: false };
 const WRITE = { readOnlyHint: false, destructiveHint: false, openWorldHint: false };
 const ids = z.array(z.string()).min(1);
+const classesSchema = z.array(z.string()).max(12).describe('Shared classes from the root CSS, applied in order, e.g. ["card", "card-elevated"]');
 const styleSchema = z
   .record(z.string(), z.union([z.string(), z.number(), z.null()]))
   .describe('camelCase CSS, e.g. {"backgroundColor":"#4c7dff","width":320}. Numbers become px; null removes.');
@@ -83,7 +115,7 @@ export function registerTools(server, ctx) {
   }, async () => text(GUIDE));
 
   server.registerTool("get_basic_info", {
-    description: "Overview: open project, its pages (current one marked), artboards on the current page (id, name, x, y, size, child count), layer count, font library, the user's selection, openComments count, and nodes agents are working on.",
+    description: "Overview: open project, its pages (current one marked), artboards on the current page (id, name, x, y, size, child count), layer count, font library, root CSS variable and class names, the user's selection, openComments count, and nodes agents are working on.",
     inputSchema: {},
     annotations: READ,
   }, async () => {
@@ -100,6 +132,7 @@ export function registerTools(server, ctx) {
       }),
       layers: Object.keys(s.nodes).length - s.pages.length,
       fonts: ctx.fonts.list().map((f) => f.cssFamily).filter((v, i, a) => a.indexOf(v) === i),
+      rootCss: (({ vars, definedClasses }) => ({ vars: Object.keys(vars), classes: definedClasses }))(ctx.rootCss.get()),
       selection: ctx.selection().ids,
       openComments: ctx.comments.openCount(),
       agentWorkingOn: ctx.presence().map((p) => p.id),
@@ -132,7 +165,7 @@ export function registerTools(server, ctx) {
   }, async ({ nodeId }) => text(ctx.getNode(nodeId).children.map(summary)));
 
   server.registerTool("get_node_info", {
-    description: "Everything about one layer: name, tag, text, camelCase styles, attributes, parent, artboard, ancestor path and child summaries.",
+    description: "Everything about one layer: name, tag, text, shared classes, its own camelCase styles, attributes, parent, artboard, ancestor path and child summaries.",
     inputSchema: { nodeId: z.string() },
     annotations: READ,
   }, async ({ nodeId }) => {
@@ -141,7 +174,7 @@ export function registerTools(server, ctx) {
     const path = [];
     for (let p = S().nodes[n.parentId]; p && !ctx.isPage(p.id); p = S().nodes[p.parentId]) path.unshift(p.name);
     return text({
-      id: n.id, name: n.name, tag: n.tag, text: n.text || undefined, styles: n.styles, attrs: Object.keys(n.attrs || {}).length ? n.attrs : undefined,
+      id: n.id, name: n.name, tag: n.tag, text: n.text || undefined, classes: n.classes?.length ? n.classes : undefined, styles: n.styles, attrs: Object.keys(n.attrs || {}).length ? n.attrs : undefined,
       parentId: n.parentId, pageId: ctx.pageOf(n.id), artboardId: ctx.isPage(n.id) ? undefined : ctx.artboardOf(n.id),
       path: path.join(" / "), children: n.children.map(summary),
     });
@@ -199,7 +232,7 @@ export function registerTools(server, ctx) {
   });
 
   server.registerTool("get_jsx", {
-    description: "Code for a layer/artboard (or the whole page when nodeId is omitted): jsx = React components with inline style objects, html = <style> with .layer-<id> classes + markup.",
+    description: "Code for a layer/artboard (or the whole page when nodeId is omitted): jsx = React components (className for shared classes, inline style objects for overrides, the root CSS they use in a header comment), html = <style> with the used root CSS and .layer-<id> overrides + markup. The project .zip export links every screen to one root styles.css.",
     inputSchema: { nodeId: z.string().optional(), format: z.enum(["jsx", "html"]).optional() },
     annotations: READ,
   }, async ({ nodeId, format = "jsx" }) => {
@@ -207,9 +240,27 @@ export function registerTools(server, ctx) {
     return text(ctx.exportCode(format, nodeId));
   });
 
+  // ---------------------------------------------------------------- root css
+  server.registerTool("get_root_css", {
+    description: "The project's root CSS: variables (vars), plain classes (classes, camelCase styles), every other rule (rules: states, @media, nested; { selector, media?, styles }), all class names layers can use (definedClasses), the whole thing as nested CSS text (css), and how many layers use each class (usage). Build with these instead of raw values.",
+    inputSchema: {},
+    annotations: READ,
+  }, async () => text(ctx.rootCss.get()));
+
+  server.registerTool("update_root_css", {
+    description: "Add or change the root CSS in one undo step. Pass css text, real CSS with nesting, states and @media (\":root { --x: 1px; } .card { padding: var(--x); &:hover { opacity: .9; } @media (max-width: 640px) { padding: 8px; } }\"), and/or vars { \"--name\": value | null } and classes { name: { camelCase: value | null } | null }. Merges into the existing root CSS unless replace: true. Every layer using a changed variable or class updates everywhere.",
+    inputSchema: {
+      css: z.string().optional().describe(":root { --name: value; } plus .class { prop: value; } blocks"),
+      vars: z.record(z.string(), z.union([z.string(), z.number(), z.null()])).optional(),
+      classes: z.record(z.string(), z.union([styleSchema, z.null()])).optional(),
+      replace: z.boolean().optional().describe("Start from an empty root CSS (classes no longer defined are removed from layers)"),
+    },
+    annotations: WRITE,
+  }, async ({ css, vars, classes, replace }) => text(ctx.rootCss.update({ css, vars, classes, replace })));
+
   // ---------------------------------------------------------------- write
   server.registerTool("write_html", {
-    description: "Add designs by writing HTML with inline styles. Default: append the parsed elements as children of parentId (omit parentId to create top-level artboards). mode=replace swaps targetNodeId for the parsed elements. Returns created ids. See get_guide for the HTML rules.",
+    description: "Add designs by writing HTML: class=\"card\" for shared root CSS classes, inline style=\"\" for overrides (use var(--name) for root variables). Default: append the parsed elements as children of parentId (omit parentId to create top-level artboards). mode=replace swaps targetNodeId for the parsed elements. Returns created ids. See get_guide for the HTML rules.",
     inputSchema: {
       html: z.string().min(1),
       parentId: z.string().optional(),
@@ -245,6 +296,7 @@ export function registerTools(server, ctx) {
     description: "Create a single layer (prefer write_html for anything with children).",
     inputSchema: {
       parentId: z.string(), name: z.string().optional(), tag: z.string().optional(), text: z.string().optional(),
+      classes: classesSchema.optional(),
       styles: styleSchema.optional(), attrs: z.record(z.string(), z.string()).optional(), index: z.number().int().optional(),
     },
     annotations: WRITE,
@@ -264,13 +316,15 @@ export function registerTools(server, ctx) {
       nodeIds: targetIds,
     });
     ctx.touch(touched, "update_styles", keys);
-    return text({ updated: touched.length });
+    const hints = ctx.rootCss.hints(touched);
+    return text(hints.length ? { updated: touched.length, hints } : { updated: touched.length });
   });
 
   server.registerTool("update_node", {
-    description: "Patch one layer: name, tag, text, styles (merged unless replaceStyles), attrs.",
+    description: "Patch one layer: name, tag, text, classes (replaces the list; [] clears), styles (merged unless replaceStyles), attrs.",
     inputSchema: {
       nodeId: z.string(), name: z.string().optional(), tag: z.string().optional(), text: z.string().optional(),
+      classes: classesSchema.optional(),
       styles: styleSchema.optional(), replaceStyles: z.boolean().optional(), attrs: z.record(z.string(), z.union([z.string(), z.null()])).optional(),
     },
     annotations: WRITE,

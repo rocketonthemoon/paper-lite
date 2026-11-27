@@ -1,5 +1,6 @@
 // Canvas document model: validation of tags / styles / attributes, comments and normalisation of project documents.
 import { randomBytes } from "node:crypto";
+import "./public/root-css.js";
 
 export const ALLOWED_TAGS = new Set([
   "div", "section", "header", "footer", "nav", "main", "article", "aside",
@@ -76,6 +77,127 @@ export function mergeAttrs(base, patch, tag) {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Root CSS: one project-wide stylesheet every layer shares: variables in :root, classes, states (:hover…),
+// @media and nesting. Parsing/serialising lives in public/root-css.js so the editor uses the exact same rules.
+// Stored as { vars: { "--name": value }, rules: [{ selector, media?, styles }] } in author order.
+// ---------------------------------------------------------------------------
+const RC = globalThis.WeftRootCss;
+export const { VAR_NAME_RE, CLASS_NAME_RE } = RC;
+export const parseRootCss = RC.parse;
+export const rootCssText = RC.toText;
+export const rootCssFlat = RC.flatCss;
+export const isBaseRule = RC.isBase;
+export const rootClassesIn = RC.classesIn;
+/** Every class the root CSS defines anywhere (base, state, nested or media rules). */
+export const definedRootClasses = (root) => RC.definedClasses(root);
+const MAX_VARS = 400, MAX_RULES = 800, MAX_LAYER_CLASSES = 12;
+
+export const emptyRootCss = () => ({ vars: {}, rules: [] });
+
+function cleanVarValue(name, value) {
+  if (!VAR_NAME_RE.test(name)) throw new HttpError(400, `CSS variable names look like --color-primary: "${name}"`);
+  return cleanStyleValue(name, typeof value === "number" ? String(value) : value);
+}
+
+// Rule styles: camelCase properties (like layer styles) plus scoped --variables; null/"" removes.
+function mergeRuleStyles(base, patch, where) {
+  const out = { ...(base || {}) };
+  for (const [key, value] of Object.entries(patch || {})) {
+    if (value === null || value === "") { delete out[key]; continue; }
+    if (key.startsWith("--")) out[key] = cleanVarValue(key, value);
+    else if (!/^[a-zA-Z][a-zA-Z0-9]*$/.test(key)) throw new HttpError(400, `${where}: style keys must be camelCase: "${key}"`);
+    else out[key] = cleanStyleValue(key, value);
+  }
+  return out;
+}
+
+const asHttp = (fn) => {
+  try { return fn(); } catch (err) { throw err instanceof HttpError ? err : new HttpError(err.status || 400, err.message); }
+};
+
+// A rule as stored: canonical selector, validated media and styles.
+function cleanRule(rule) {
+  return asHttp(() => {
+    const media = rule.media == null || rule.media === "" ? undefined : RC.checkMedia(rule.media);
+    const selector = rule.selector === ":root" ? ":root" : RC.checkSelector(String(rule.selector ?? ""));
+    if (selector === ":root" && !media) throw new HttpError(400, "Top-level :root variables go in vars");
+    const styles = mergeRuleStyles({}, rule.styles, selector);
+    if (selector === ":root" && Object.keys(styles).some((k) => !k.startsWith("--"))) throw new HttpError(400, ":root only holds variables");
+    return { selector, ...(media ? { media } : {}), styles };
+  });
+}
+
+const sameRule = (a, b) => a.selector === b.selector && (a.media || "") === (b.media || "");
+
+/**
+ * Apply a root-CSS patch.
+ * - css: root CSS text. With replace it becomes the whole root CSS, in order; otherwise each rule merges into the
+ *   existing rule with the same selector and @media (or is appended) and :root variables merge.
+ * - vars: { "--name": value | null }.
+ * - classes: { name: { camelCase: value | null } | null }: the plain `.name { }` rule; null removes it.
+ */
+export function mergeRootCss(base, { css, vars, classes } = {}, { replace = false } = {}) {
+  const out = replace ? emptyRootCss() : structuredClone(base || emptyRootCss());
+  out.vars ||= {};
+  out.rules ||= [];
+  if (css !== undefined && css !== null) {
+    const parsed = asHttp(() => RC.parse(css));
+    for (const [k, v] of Object.entries(parsed.vars)) out.vars[k] = cleanVarValue(k, v);
+    for (const raw of parsed.rules) {
+      const rule = cleanRule(raw);
+      const hit = replace ? null : out.rules.find((r) => sameRule(r, rule));
+      if (hit) hit.styles = mergeRuleStyles(hit.styles, rule.styles, rule.selector);
+      else out.rules.push(rule);
+    }
+  }
+  for (const [name, value] of Object.entries(vars || {})) {
+    if (value === null || value === "") {
+      if (!VAR_NAME_RE.test(name)) throw new HttpError(400, `CSS variable names look like --color-primary: "${name}"`);
+      delete out.vars[name];
+    } else {
+      out.vars[name] = cleanVarValue(name, value);
+    }
+  }
+  for (const [name, styles] of Object.entries(classes || {})) {
+    if (!CLASS_NAME_RE.test(name)) throw new HttpError(400, `Class names start with a letter and use letters, digits, - or _: "${name}"`);
+    const selector = `.${name}`;
+    if (styles === null) { out.rules = out.rules.filter((r) => !(r.selector === selector && !r.media)); continue; }
+    if (typeof styles !== "object") throw new HttpError(400, `Class "${name}" must be an object of camelCase styles`);
+    const hit = out.rules.find((r) => r.selector === selector && !r.media);
+    if (hit) hit.styles = mergeRuleStyles(hit.styles, styles, selector);
+    else out.rules.push({ selector, styles: mergeRuleStyles({}, styles, selector) });
+  }
+  out.rules = out.rules.filter((r) => Object.keys(r.styles).length);
+  if (Object.keys(out.vars).length > MAX_VARS) throw new HttpError(400, `At most ${MAX_VARS} CSS variables`);
+  if (out.rules.length > MAX_RULES) throw new HttpError(400, `At most ${MAX_RULES} root CSS rules`);
+  return out;
+}
+
+/** The plain `.class { }` rules as { name: styles } (merged when a class has several). */
+export function rootBaseClasses(root) {
+  const out = {};
+  for (const r of root?.rules || []) if (RC.isBase(r)) Object.assign((out[r.selector.slice(1)] ||= {}), r.styles);
+  return out;
+}
+
+/** A layer's class list from an array or a space-separated string: valid, unique, in order. */
+export function cleanClassList(value) {
+  const list = Array.isArray(value) ? value : String(value ?? "").split(/\s+/);
+  const out = [];
+  for (const raw of list) {
+    const c = String(raw ?? "").trim();
+    if (!c) continue;
+    if (!CLASS_NAME_RE.test(c)) throw new HttpError(400, `Class names start with a letter and use letters, digits, - or _: "${c}"`);
+    if (!out.includes(c)) out.push(c);
+  }
+  if (out.length > MAX_LAYER_CLASSES) throw new HttpError(400, `A layer can use at most ${MAX_LAYER_CLASSES} classes`);
+  return out;
+}
+
+/** Variables referenced by a style value, e.g. "1px solid var(--line)" → ["--line"]. */
+export const varsIn = (value) => [...String(value ?? "").matchAll(/var\(\s*(--[\w-]+)/g)].map((m) => m[1]);
+
 // Validate one property at a time so a single bad value is dropped (with a warning) instead of failing a whole import.
 export function lenientMerge(merge, obj, warnings, where) {
   const out = {};
@@ -98,7 +220,7 @@ export function emptyPage(name = "Page 1", id = newId()) {
 /** A new, empty project document: one empty page and an empty comments list. */
 export function emptyProject(id, name) {
   const page = emptyPage("Page 1");
-  return { version: 1, id, name: cleanName(name, "Untitled"), pages: [page.id], rootId: page.id, nodes: { [page.id]: page }, comments: [] };
+  return { version: 1, id, name: cleanName(name, "Untitled"), pages: [page.id], rootId: page.id, nodes: { [page.id]: page }, rootCss: emptyRootCss(), comments: [] };
 }
 
 function normalizeComments(rawComments) {
@@ -181,6 +303,17 @@ export function normalizeProject(raw, { id, name, warnings = null } = {}) {
       styles: warnings ? lenientMerge(mergeStyles, n.styles, warnings, label) : mergeStyles({}, n.styles),
       attrs: warnings ? lenientMerge((b, p) => mergeAttrs(b, p, tag), n.attrs, warnings, label) : mergeAttrs({}, n.attrs, tag),
     };
+    if (n.classes !== undefined) {
+      let classes = [];
+      if (!warnings) classes = cleanClassList(n.classes);
+      else {
+        // Lenient: keep the valid names, report the rest.
+        for (const c of Array.isArray(n.classes) ? n.classes : String(n.classes ?? "").split(/\s+/)) {
+          try { classes = cleanClassList([...classes, c]); } catch (err) { warnings.push(`${label}: ${err.message}`); }
+        }
+      }
+      if (classes.length) nodes[nid].classes = classes;
+    }
     for (const cid of Array.isArray(n.children) ? n.children : []) if (walk(cid, nid)) nodes[nid].children.push(cid);
     return nodes[nid];
   };
@@ -193,6 +326,27 @@ export function normalizeProject(raw, { id, name, warnings = null } = {}) {
     pages,
     rootId,
     nodes,
+    rootCss: normalizeRootCss(raw.rootCss, warnings),
     comments: normalizeComments(raw.comments),
   };
+}
+
+function normalizeRootCss(raw, warnings) {
+  if (!raw || typeof raw !== "object") return emptyRootCss();
+  // Older saves kept plain classes as { classes: { name: styles } }.
+  const rules = [...(Array.isArray(raw.rules) ? raw.rules : []),
+    ...Object.entries(raw.classes && typeof raw.classes === "object" ? raw.classes : {}).map(([name, styles]) => ({ selector: `.${name}`, styles }))];
+  const out = emptyRootCss();
+  const report = (where, err) => { if (!warnings) throw err; warnings.push(`Root CSS ${where}: ${err.message}`); };
+  for (const [k, v] of Object.entries(raw.vars && typeof raw.vars === "object" ? raw.vars : {})) {
+    try { out.vars[k] = cleanVarValue(k, v); } catch (err) { report(k, err); }
+  }
+  for (const r of rules) {
+    if (!r || typeof r !== "object") continue;
+    try {
+      const rule = cleanRule(r);
+      if (Object.keys(rule.styles).length) out.rules.push(rule);
+    } catch (err) { report(String(r.selector ?? "rule").slice(0, 60), err); }
+  }
+  return out;
 }

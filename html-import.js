@@ -43,7 +43,7 @@ export function parseInlineStyle(text) {
 const squash = (t) => t.replace(/\s+/g, " ");
 
 /**
- * @returns {{ specs: Array<{tag,name,text,styles,attrs,children}>, warnings: string[] }}
+ * @returns {{ specs: Array<{tag,name,text,styles,attrs,classes?,children}>, warnings: string[] }}
  */
 export function htmlToSpecs(html) {
   const warnings = [];
@@ -65,9 +65,9 @@ export function htmlToSpecs(html) {
     for (const { name, value } of el.attrs || []) {
       if (name === "style") Object.assign(spec.styles, parseInlineStyle(value));
       else if (name === "data-name" || name === "data-label" || name === "aria-label" && !spec.name) spec.name = value;
-      else if (name === "class" || name === "id" || name.startsWith("data-") || name.startsWith("on")) {
-        if (name === "class" && warnings.length < 50) warnings.push(`<${raw} class="${value}">: classes are ignored — use inline style=""`);
-      } else spec.attrs[name] = value;
+      else if (name === "class") spec.classes = value.split(/\s+/).filter(Boolean); // shared classes from the root CSS
+      else if (name === "id" || name.startsWith("data-") || name.startsWith("on")) continue;
+      else spec.attrs[name] = value;
     }
 
     const kids = (el.childNodes || []).filter((c) => !SKIP.has(c.nodeName));

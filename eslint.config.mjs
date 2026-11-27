@@ -39,6 +39,16 @@ export default [
     },
   },
   {
+    files: ["public/root-css.js"],
+    languageOptions: { ecmaVersion: 2024, sourceType: "script", globals: { window: "readonly" } },
+    rules: {
+      "no-unused-vars": ["error", { caughtErrors: "none", argsIgnorePattern: "^_" }],
+      "no-undef": "error",
+      "no-redeclare": "error",
+      "no-dupe-keys": "error",
+    },
+  },
+  {
     files: [".tmp-ui-lint.js"],
     languageOptions: {
       ecmaVersion: 2024,
@@ -60,6 +70,7 @@ export default [
         ResizeObserver: "readonly",
         URL: "readonly",
         URLSearchParams: "readonly",
+        WeftRootCss: "readonly",
         alert: "readonly",
         cancelAnimationFrame: "readonly",
         clearInterval: "readonly",
