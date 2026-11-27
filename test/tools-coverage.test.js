@@ -14,7 +14,7 @@ const PAPER_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const EXPECTED_TOOLS = [
-  "add_font", "create_artboard", "create_component", "create_node", "create_page", "create_project", "delete_component", "delete_icon", "delete_nodes", "delete_page",
+  "add_font", "audit_artboard", "create_artboard", "create_component", "create_node", "create_page", "create_project", "delete_component", "delete_icon", "delete_nodes", "delete_page",
   "delete_project", "duplicate_nodes", "duplicate_project", "export_design_tokens", "find_nodes", "finish_working_on_nodes", "get_basic_info", "get_children", "get_comments", "get_computed_styles",
   "get_guide", "get_jsx", "get_node_info", "get_root_css", "get_screenshot", "get_selection", "get_tree_summary", "git_pull", "git_push", "git_status",
   "import_design_tokens", "import_root_css", "instantiate_component", "list_checkpoints", "list_components", "list_fonts", "list_icons", "list_projects", "move_nodes", "open_project",
@@ -954,6 +954,52 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
     assert.match(captions[1].text, new RegExp(section));
     await fails(B, "get_screenshot", { nodeId: "ghost" }, /not found/);
     await fails(B, "get_screenshot", { nodeIds: [board, "ghost"] }, /not found/);
+  });
+
+  await t.test("diagnostics: audit_artboard and get_screenshot({ diagnostics: true })", { skip: !browser && "no Chrome/Chromium available" }, async () => {
+    const cleanAb = (await ok(B, "create_artboard", { name: "Healthy", width: 800, height: "fit-content" })).id;
+    await ok(B, "write_html", {
+      parentId: cleanAb,
+      html: `<div style="padding:24px;background:#ffffff"><p style="margin:0;color:#0a0b0d">Healthy text</p></div>`,
+    });
+    const cleanAudit = await ok(B, "audit_artboard", { nodeIds: [cleanAb], checkContrast: true });
+    assert.equal(cleanAudit.ok, true);
+    assert.equal(cleanAudit.audits.length, 1);
+    assert.equal(cleanAudit.summary.brokenImages, 0);
+
+    const sickAb = (await ok(B, "create_artboard", { name: "AuditTarget", width: 390, height: "fit-content" })).id;
+    await ok(B, "write_html", {
+      parentId: sickAb,
+      html: `<div data-name="Wrap" style="padding:12px;background:#ffffff">
+        <img data-name="BrokenImg" src="http://127.0.0.1:1/nope.png" alt="Broken" style="width:40px;height:40px;display:block">
+        <div data-name="Over" style="width:120px;white-space:nowrap">Long_unbreakable_horizontal_overflow_text_string</div>
+        <p data-name="BadFont" style="font-family:'MissingAuditFont',sans-serif;color:#111111;margin:0">Font check</p>
+        <p data-name="Faint" style="color:#cccccc;margin:0">Too light</p>
+        <button data-name="TinyBtn" style="width:24px;height:24px">Go</button>
+      </div>`,
+    });
+    const audit = await ok(B, "audit_artboard", { nodeIds: [sickAb], checkContrast: true });
+    assert.equal(audit.ok, false);
+    assert.equal(audit.summary.brokenImages, 1);
+    assert.ok(audit.summary.overflows >= 1);
+    assert.ok(audit.audits[0].missingFonts.some((f) => f.family === "MissingAuditFont"));
+    assert.ok(audit.summary.tapTargets >= 1);
+    assert.ok(audit.summary.lowContrast >= 1);
+
+    // Responsive width override
+    const wideAudit = await ok(B, "audit_artboard", { nodeId: cleanAb, width: 390 });
+    assert.equal(wideAudit.audits[0].width, 390);
+
+    // Attached diagnostics on get_screenshot
+    const diagShot = await call(B, "get_screenshot", { nodeId: sickAb, diagnostics: true, checkContrast: true });
+    assert.equal(diagShot.isError, false, diagShot.text);
+    const diagText = diagShot.result.content.filter((c) => c.type === "text").at(-1)?.text;
+    const diagJson = JSON.parse(diagText);
+    assert.equal(diagJson.diagnostics.ok, false);
+    assert.equal(diagJson.diagnostics.summary.brokenImages, 1);
+
+    await fails(B, "audit_artboard", { nodeIds: ["ghost"] }, /not found/);
+    await ok(B, "delete_nodes", { nodeIds: [cleanAb, sickAb] });
   });
 
   // ---------------------------------------------------------------- pages

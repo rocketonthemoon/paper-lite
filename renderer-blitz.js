@@ -117,9 +117,12 @@ export class BlitzRenderer {
 
   // The same /render/:id page headless Chrome loads, so both see the same HTML and CSS (fonts are fetched by the
   // sidecar from the same server). Skipped when the sidecar already has this artboard at this size and content.
-  async load(artboardId, width, height, { widthOverride = false } = {}) {
-    const w = Math.max(1, Math.ceil(width)), h = Math.max(1, Math.ceil(height));
-    const url = `${this.baseUrl}/render/${encodeURIComponent(artboardId)}${widthOverride ? `?width=${w}` : ""}`;
+  async load(artboardId, width, height, opts = {}) {
+    const rawOverride = typeof opts === "number" ? opts : opts?.widthOverride;
+    const wOverride = typeof rawOverride === "number" && Number.isFinite(rawOverride) && rawOverride > 0 ? Math.round(rawOverride) : null;
+    const useWidthQuery = Boolean(wOverride || rawOverride === true);
+    const w = Math.max(1, Math.ceil(wOverride || width)), h = Math.max(1, Math.ceil(height));
+    const url = `${this.baseUrl}/render/${encodeURIComponent(artboardId)}${useWidthQuery ? `?width=${w}` : ""}`;
     const key = this.contentKey?.() ?? null;
     const prev = this.shown;
     if (key !== null && prev && prev.key === key && prev.url === url && prev.width === w && prev.height === h) return;
@@ -182,8 +185,12 @@ export class PreferBlitz {
     return this.chrome[method](args);
   }
 
-  screenshot(args) { return this.attempt("screenshot", args); }
+  screenshot(args) {
+    if (args?.diagnostics) return this.chrome.screenshot(args);
+    return this.attempt("screenshot", args);
+  }
   computed(args) { return this.attempt("computed", args); }
+  audit(args) { return this.chrome.audit(args); }
 
   stop() {
     this.blitz.stop();

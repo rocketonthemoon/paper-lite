@@ -1,9 +1,10 @@
 // Headless Chrome renderer (DevTools protocol over WebSocket, no puppeteer) used by MCP for
-// get_screenshot and get_computed_styles. One browser + one page, requests serialized.
+// get_screenshot, get_computed_styles, and audit_artboard. One browser + one page, requests serialized.
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { buildDomAuditScript } from "./audit.js";
 
 // Tried in order until one starts. Real Chrome builds come before Ubuntu's /usr/bin/chromium-browser, which is often
 // only a Snap wrapper that can't run headless (e.g. on CI runners).
@@ -216,9 +217,12 @@ export class Renderer {
     return next;
   }
 
-  async load(artboardId, width, height, { widthOverride = false } = {}) {
-    const w = Math.max(1, Math.ceil(width)), h = Math.max(1, Math.ceil(height));
-    const url = `${this.baseUrl}/render/${encodeURIComponent(artboardId)}${widthOverride ? `?width=${w}` : ""}`;
+  async load(artboardId, width, height, opts = {}) {
+    const rawOverride = typeof opts === "number" ? opts : opts?.widthOverride;
+    const wOverride = typeof rawOverride === "number" && Number.isFinite(rawOverride) && rawOverride > 0 ? Math.round(rawOverride) : null;
+    const useWidthQuery = Boolean(wOverride || rawOverride === true);
+    const w = Math.max(1, Math.ceil(wOverride || width)), h = Math.max(1, Math.ceil(height));
+    const url = `${this.baseUrl}/render/${encodeURIComponent(artboardId)}${useWidthQuery ? `?width=${w}` : ""}`;
     const key = this.contentKey?.() ?? null;
     const prev = this.shown;
     // Same artboard, same size, nothing changed since it loaded: the page already shows it.
@@ -236,8 +240,8 @@ export class Renderer {
     this.shown = { key, url, width: w, height: h };
   }
 
-  /** Screenshot a node (rendered inside its artboard). Returns { png: Buffer, width, height, scale }. */
-  screenshot({ artboardId, nodeId, width, height, scale = 1, maxSize = 1600, widthOverride = false }) {
+  /** Screenshot a node (rendered inside its artboard). Returns { png: Buffer, width, height, scale, diagnostics? }. */
+  screenshot({ artboardId, nodeId, width, height, scale = 1, maxSize = 1600, widthOverride = false, diagnostics = false, checkContrast = false, checkTapTargets } = {}) {
     return this.run(async () => {
       await this.load(artboardId, width, height, { widthOverride });
       const rect = await this.evaluate(`(() => { const el = document.querySelector('[data-layer="${nodeId}"], .layer-${nodeId}'); if (!el) return null;
@@ -246,7 +250,27 @@ export class Renderer {
       const s = Math.min(scale, maxSize / Math.max(rect.w, rect.h));
       const { data } = await this.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: true,
         clip: { x: rect.x, y: rect.y, width: rect.w, height: rect.h, scale: s } });
-      return { png: Buffer.from(data, "base64"), width: Math.round(rect.w * s), height: Math.round(rect.h * s), scale: Number(s.toFixed(3)) };
+      let diag = null;
+      if (diagnostics) {
+        const effectiveWidth = typeof widthOverride === "number" && Number.isFinite(widthOverride) && widthOverride > 0 ? Math.round(widthOverride) : width;
+        diag = await this.evaluate(buildDomAuditScript({ artboardId, width: effectiveWidth, checkContrast, checkTapTargets }));
+      }
+      return {
+        png: Buffer.from(data, "base64"),
+        width: Math.round(rect.w * s),
+        height: Math.round(rect.h * s),
+        scale: Number(s.toFixed(3)),
+        ...(diag ? { diagnostics: diag } : {}),
+      };
+    });
+  }
+
+  /** Run DOM & rendering health diagnostics on an artboard (images, overflows, fonts, tap targets, contrast). */
+  audit({ artboardId, width, height, widthOverride = null, checkContrast = false, checkTapTargets } = {}) {
+    return this.run(async () => {
+      await this.load(artboardId, width, height, widthOverride);
+      const effectiveWidth = Number.isFinite(widthOverride) && widthOverride > 0 ? Math.round(widthOverride) : width;
+      return this.evaluate(buildDomAuditScript({ artboardId, width: effectiveWidth, checkContrast, checkTapTargets }));
     });
   }
 

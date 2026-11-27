@@ -28,6 +28,7 @@ import { htmlToSpecs, parseInlineStyle } from "../html-import.js";
 import { expandIconSpecs, parseSvgIcon } from "../icons.js";
 import { FontLibrary, familiesIn, parseFontFileName, renameWithRetry } from "../fonts.js";
 import { analyzeDesignLint, exportDesignTokens, importDesignTokens } from "../design-tokens.js";
+import { extractCustomFontFamilies, parseRgbaColor, blendColor, contrastRatio, isLargeText, buildDomAuditScript } from "../audit.js";
 
 test("model: cleanTag normalises case and rejects disallowed tags", () => {
   assert.equal(cleanTag("DIV"), "div");
@@ -263,6 +264,34 @@ test("fonts: renameWithRetry renames, and fails fast on errors that aren't trans
   } finally {
     await fs.rm(tmp, { recursive: true, force: true });
   }
+});
+
+test("audit: WCAG color, contrast, font extraction, and script generation", () => {
+  assert.deepEqual(
+    extractCustomFontFamilies("'Bebas Neue', 'Inter', system-ui, sans-serif"),
+    ["Bebas Neue", "Inter"],
+  );
+  assert.deepEqual(extractCustomFontFamilies("system-ui, -apple-system, sans-serif"), []);
+
+  assert.deepEqual(parseRgbaColor("rgb(255, 0, 128)"), { r: 255, g: 0, b: 128, a: 1 });
+  assert.deepEqual(parseRgbaColor("rgba(0, 0, 0, 0.5)"), { r: 0, g: 0, b: 0, a: 0.5 });
+  assert.equal(parseRgbaColor("not-a-color"), null);
+
+  const halfBlackOnWhite = blendColor({ r: 0, g: 0, b: 0, a: 0.5 }, { r: 255, g: 255, b: 255, a: 1 });
+  assert.equal(Math.round(halfBlackOnWhite.r), 128);
+
+  assert.equal(contrastRatio("rgb(0, 0, 0)", "rgb(255, 255, 255)"), 21);
+  assert.ok(contrastRatio("rgb(153, 153, 153)", "rgb(255, 255, 255)") < 4.5);
+  assert.ok(contrastRatio("rgba(0, 0, 0, 0.5)", "rgb(255, 255, 255)") < 4.5);
+
+  assert.equal(isLargeText("24px", "400"), true);
+  assert.equal(isLargeText("19px", "700"), true);
+  assert.equal(isLargeText("16px", "400"), false);
+
+  const script = buildDomAuditScript({ artboardId: "ab123456", width: 390, checkContrast: true });
+  assert.match(script, /ab123456/);
+  assert.match(script, /brokenImages/);
+  assert.match(script, /lowContrast/);
 });
 
 test("root CSS: nesting, states and @media parse into ordered rules and round-trip as text", () => {
