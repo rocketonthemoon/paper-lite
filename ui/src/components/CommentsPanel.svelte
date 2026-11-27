@@ -1,6 +1,6 @@
 <script>
   // Right panel → Comments: this page's threads, open or resolved. Rows come from the legacy script
-  // (weft.commentRows()), which also owns the pins and the thread popover on the canvas.
+  // (weft.commentRows()); the pins and thread popover on the canvas are comments/*.svelte.
   import { flushSync } from "svelte";
   import { weft, api } from "../lib/bridge.svelte.js";
 

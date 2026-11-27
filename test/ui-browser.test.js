@@ -746,8 +746,36 @@ test("browser: Comments panel (Svelte): open/resolved tabs, rows open threads, l
   await cdp.evalJs(`document.querySelector('#comments-panel .cmt-row[data-open-cmt="${ca.id}"]').click()`);
   await waitFor(`!document.getElementById("comment-thread").hidden && document.querySelector("#comment-thread .ct-text")?.textContent === "Fix alpha"`, "thread opened");
   // A new comment from elsewhere shows up live.
-  await rest("POST", "/api/comments", { nodeId: b.id, text: "Another" });
+  const cc = await rest("POST", "/api/comments", { nodeId: b.id, text: "Another" });
   await waitFor(`document.querySelector('#comments-panel [data-cf="open"]').textContent === "Open · 2"`, "live update");
+
+  // Thread popover (comments/CommentThread.svelte): the More menu opens and closes on a click elsewhere in it.
+  const q = (s) => `document.querySelector('#comment-thread ${s}')`;
+  await cdp.evalJs(`${q('[data-ct="more-toggle"]')}.click()`);
+  assert.equal(await cdp.evalJs(`${q("#ct-more-menu")}.hidden`), false);
+  assert.equal(await cdp.evalJs(`${q('[data-ct="more-toggle"]')}.getAttribute("aria-expanded")`), "true");
+  await cdp.evalJs(`${q(".ct-msgs")}.click()`);
+  assert.equal(await cdp.evalJs(`${q("#ct-more-menu")}.hidden`), true, "click elsewhere closes the menu");
+  // A draft and the visibility toggle survive live updates to the same thread, and reset for another thread.
+  const typeDraft = (v) => cdp.evalJs(`(() => { const ta = document.getElementById("ct-input"); ta.value = ${JSON.stringify(v)}; ta.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+  await typeDraft("half-written");
+  await cdp.evalJs(`document.getElementById("ct-vis").click()`);
+  await mcpCall(srv.baseUrl, "reply_to_comment", { id: ca.id, text: "On it" });
+  await waitFor(`document.querySelectorAll("#comment-thread .ct-msg").length === 2`, "reply arrives");
+  assert.equal(await cdp.evalJs(`document.getElementById("ct-input").value`), "half-written");
+  assert.equal(await cdp.evalJs(`document.getElementById("ct-vis").classList.contains("on")`), false);
+  await cdp.evalJs(`document.querySelector('#comment-pins [data-pin-id="${cc.id}"]').click()`);
+  await waitFor(`document.querySelector("#comment-thread .ct-text")?.textContent === "Another"`, "other thread");
+  assert.equal(await cdp.evalJs(`document.getElementById("ct-input").value`), "", "fresh composer for another thread");
+  assert.equal(await cdp.evalJs(`document.getElementById("ct-vis").classList.contains("on")`), true);
+  assert.ok(await cdp.evalJs(`document.querySelector('#comment-pins [data-pin-id="${cc.id}"]').classList.contains("sel")`), "its pin is highlighted");
+  // Ctrl+Enter replies and clears; Escape closes.
+  await typeDraft("Thanks");
+  await cdp.evalJs(`document.getElementById("ct-input").dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true }))`);
+  await waitFor(`document.querySelectorAll("#comment-thread .ct-msg").length === 2 && document.getElementById("ct-input").value === ""`, "reply sent");
+  assert.equal((await rest("GET", "/api/comments")).find((c) => c.id === cc.id).messages[1].text, "Thanks");
+  await cdp.evalJs(`document.getElementById("ct-input").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))`);
+  await waitFor(`document.getElementById("comment-thread").hidden && !document.querySelector("#comment-thread .ct-head")`, "closed");
 });
 
 test("browser: Layers panel (Svelte): rename cancel / live updates / artboard label, hover box, refused drops", { timeout: 120_000 }, async (t) => {
@@ -1040,4 +1068,126 @@ test("browser: dashboard (Svelte): thumbnails kept across unrelated updates, act
   // The "New project" card opens the dialog.
   await cdp.evalJs(`document.getElementById("dash-grid-new").click()`);
   await waitFor(`!document.getElementById("dash-modal").hidden && document.getElementById("dash-modal-input")`, "new project dialog");
+});
+
+test("browser: canvas overlay (Svelte): artboard labels, context bar, breadcrumb and agent cursors follow live edits", { timeout: 120_000 }, async (t) => {
+  const browserBin = findBrowser();
+  if (!browserBin) {
+    t.skip("No headless Chromium/Chrome binary found");
+    return;
+  }
+  const srv = await startTestServer();
+  t.after(() => srv.stop());
+  const cdp = await startBrowser(browserBin);
+  t.after(() => cdp.stop());
+  const rest = async (method, url, body) => {
+    const res = await fetch(srv.baseUrl + url, { method, headers: { "content-type": "application/json" }, body: body && JSON.stringify(body) });
+    assert.ok(res.ok, `${method} ${url} → ${res.status}`);
+    return res.json();
+  };
+  const waitFor = async (expr, label) => {
+    for (let i = 0; i < 100; i++) { if (await cdp.evalJs(expr)) return; await sleep(50); }
+    assert.fail(`timed out waiting for ${label}`);
+  };
+  const s0 = await rest("GET", "/api/state");
+  const ab = await rest("POST", "/api/nodes", { parentId: s0.rootId, tag: "section", name: "Home", styles: { left: 0, top: 0, width: 600, height: 400 } });
+  const card = await rest("POST", "/api/nodes", { parentId: ab.id, tag: "div", name: "Card", styles: { position: "absolute", left: "20px", top: "40px", width: "100px", height: "50px" } });
+  await cdp.send("Page.navigate", { url: srv.baseUrl });
+  const label = `document.querySelector('#labels .ab-label[data-id="${ab.id}"]')`;
+  await waitFor(`document.querySelector("#live.live") && ${label}`, "label");
+  assert.equal(await cdp.evalJs(`document.getElementById("crumb-ab").textContent`), "Home");
+  assert.equal(await cdp.evalJs(`document.getElementById("crumb-page").textContent`), "Page 1");
+
+  // The label element is kept across live edits; its text and selection state update in place.
+  await cdp.evalJs(`window.__label = ${label}`);
+  await rest("PATCH", `/api/nodes/${ab.id}`, { name: "Home v2" });
+  await waitFor(`${label}?.querySelector(".ab-nm").textContent === "Home v2"`, "renamed label");
+  assert.ok(await cdp.evalJs(`window.__label === ${label}`), "same label element");
+  await cdp.evalJs(`select(${JSON.stringify(ab.id)})`);
+  assert.ok(await cdp.evalJs(`${label}.classList.contains("sel")`));
+  assert.equal(await cdp.evalJs(`document.getElementById("ctx-preview").hidden`), false, "screens offer Preview");
+
+  // Context bar for a layer: name, no Preview, Flex icon follows the layer's display.
+  await cdp.evalJs(`select(${JSON.stringify(card.id)})`);
+  assert.equal(await cdp.evalJs(`document.getElementById("ctx-name").textContent`), "Card");
+  assert.equal(await cdp.evalJs(`document.getElementById("ctx-preview").hidden`), true);
+  assert.equal(await cdp.evalJs(`document.getElementById("crumb-ab").textContent`), "Home v2", "breadcrumb shows the selection's artboard");
+  const flexPath = `document.querySelector("#ctx-flex path").getAttribute("d")`;
+  assert.equal(await cdp.evalJs(flexPath), "M8 3v10M3 8h10");
+  await rest("PATCH", `/api/nodes/${card.id}`, { styles: { display: "flex" } });
+  await waitFor(`${flexPath} === "M3.5 8h9"`, "flex icon after live edit");
+  const bar = await cdp.evalJs(`(() => { const b = document.getElementById("ctx-bar").getBoundingClientRect(), c = document.querySelector('#world [data-node-id="${card.id}"]').getBoundingClientRect(); return { show: getComputedStyle(document.getElementById("ctx-bar")).display, above: b.bottom <= c.top }; })()`);
+  assert.deepEqual(bar, { show: "flex", above: true }, "bar shown above the layer");
+
+  // An agent working on the card: dashed box and a cursor; clicking the cursor selects the layer.
+  await cdp.evalJs(`select(null)`);
+  await mcpCall(srv.baseUrl, "update_styles", { updates: [{ nodeIds: [card.id], styles: { opacity: 0.9 } }] });
+  await waitFor(`document.querySelectorAll("#agents .agent-box").length === 1 && document.querySelector("#agents .agent-cursor .agent-cursor-tag strong")`, "agent box and cursor");
+  await cdp.evalJs(`document.querySelector("#agents .agent-cursor").click()`);
+  await waitFor(`sel === ${JSON.stringify(card.id)}`, "cursor click selects");
+
+  // Export menu (ExportMenu.svelte): the selection's preview, and the ZIP format is kept between openings.
+  await cdp.evalJs(`document.getElementById("export-btn").click()`);
+  await waitFor(`!document.getElementById("export-menu").hidden && document.querySelector("#export-menu .exp-code")`, "export menu");
+  assert.match(await cdp.evalJs(`document.querySelector("#export-menu .exp-code").textContent`), /^<div style=\{\{\n {2}position: "absolute", left: 20, top: 40,\n/);
+  assert.equal(await cdp.evalJs(`document.querySelector('#export-menu [data-exp="download-zip"]').textContent.trim()`), "Download untitled.zip");
+  await cdp.evalJs(`document.querySelector('#export-menu [data-exp-fmt="jsx"]').click()`);
+  await cdp.evalJs(`document.getElementById("export-btn").click()`);
+  assert.equal(await cdp.evalJs(`document.getElementById("export-menu").hidden`), true);
+  await cdp.evalJs(`select(null); document.getElementById("export-btn").click()`);
+  assert.equal(await cdp.evalJs(`Boolean(document.querySelector("#export-menu .exp-code"))`), false, "no selection section");
+  assert.ok(await cdp.evalJs(`document.querySelector('#export-menu [data-exp-fmt="jsx"]').classList.contains("on")`), "format kept");
+});
+
+test("browser: toast and dashboard dialog / card menu (Svelte)", { timeout: 120_000 }, async (t) => {
+  const browserBin = findBrowser();
+  if (!browserBin) {
+    t.skip("No headless Chromium/Chrome binary found");
+    return;
+  }
+  const srv = await startTestServer();
+  t.after(() => srv.stop());
+  const cdp = await startBrowser(browserBin);
+  t.after(() => cdp.stop());
+  const waitFor = async (expr, label) => {
+    for (let i = 0; i < 100; i++) { if (await cdp.evalJs(expr)) return; await sleep(50); }
+    assert.fail(`timed out waiting for ${label}`);
+  };
+  await cdp.send("Page.navigate", { url: `${srv.baseUrl}/#dashboard` });
+  await waitFor(`document.querySelector("#live.live") && document.querySelector("#dash-content [data-dash-menu]")`, "dashboard");
+
+  // Toast: text is escaped, the action runs its callback and hides the toast.
+  await cdp.evalJs(`toast("<b>Saved</b>", { agent: true, action: "Undo", onAction: () => { window.__acted = true; } })`);
+  assert.equal(await cdp.evalJs(`document.querySelector("#toast .toast-msg").textContent`), "<b>Saved</b>");
+  assert.ok(await cdp.evalJs(`Boolean(document.querySelector("#toast .toast-dot")) && document.getElementById("toast").classList.contains("show")`));
+  await cdp.evalJs(`document.querySelector("#toast .toast-act").click()`);
+  assert.equal(await cdp.evalJs(`window.__acted === true && !document.getElementById("toast").classList.contains("show")`), true);
+  await cdp.evalJs(`toast("Plain")`);
+  assert.equal(await cdp.evalJs(`document.querySelector("#toast .toast-act")`), null, "no action button");
+
+  // Card menu: the only project can't be deleted.
+  await cdp.evalJs(`document.querySelector("#dash-content [data-dash-menu]").click()`);
+  assert.equal(await cdp.evalJs(`document.querySelector('#dash-menu [data-dact="delete"]').disabled`), true);
+  // Rename dialog: prefilled and selected; Escape closes. A new dialog starts from its own value, not leftover typing.
+  await cdp.evalJs(`document.querySelector('#dash-menu [data-dact="rename"]').click()`);
+  assert.equal(await cdp.evalJs(`document.activeElement.id`), "dash-modal-input");
+  assert.equal(await cdp.evalJs(`document.getElementById("dash-modal-input").value`), "Untitled");
+  await cdp.evalJs(`document.getElementById("dash-modal-input").value = "typed"`);
+  await cdp.evalJs(`document.getElementById("dash-modal-input").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))`);
+  assert.equal(await cdp.evalJs(`document.getElementById("dash-modal").hidden && !document.querySelector(".dash-dialog")`), true);
+  await cdp.evalJs(`document.getElementById("dash-new").click()`);
+  assert.equal(await cdp.evalJs(`document.getElementById("dash-modal-input").value`), "Untitled");
+  // An empty name is refused; Enter with a name creates the project.
+  await cdp.evalJs(`document.getElementById("dash-modal-input").value = "  "; document.getElementById("dash-modal-ok").click()`);
+  assert.equal(await cdp.evalJs(`document.getElementById("dash-modal").hidden`), false, "empty name keeps the dialog open");
+  await cdp.evalJs(`(() => { const i = document.getElementById("dash-modal-input"); i.value = "Made here"; i.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); })()`);
+  await waitFor(`document.getElementById("project-name").textContent === "Made here"`, "project created");
+  // With two projects, delete is allowed and confirms without an input.
+  await cdp.evalJs(`openDashboard(true)`);
+  await waitFor(`document.querySelectorAll("#dash-content [data-dash-menu]").length === 2`, "two cards");
+  await cdp.evalJs(`document.querySelector("#dash-content [data-dash-menu]").click()`);
+  assert.equal(await cdp.evalJs(`document.querySelector('#dash-menu [data-dact="delete"]').disabled`), false);
+  await cdp.evalJs(`document.querySelector('#dash-menu [data-dact="delete"]').click()`);
+  assert.equal(await cdp.evalJs(`document.getElementById("dash-modal-input")`), null);
+  assert.match(await cdp.evalJs(`document.querySelector(".dash-dialog h3").textContent`), /^Delete /);
 });
