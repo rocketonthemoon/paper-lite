@@ -825,3 +825,83 @@ test("browser: Layers panel (Svelte): rename cancel / live updates / artboard la
   await cdp.evalJs(`${row(card.id)}.querySelector("[data-twist]").click()`);
   await waitFor(`[...document.querySelectorAll("#layers .row .nm")].some((n) => n.textContent === "From agent")`, "agent layer in tree");
 });
+
+test("browser: Inspector (Svelte): updates held while typing, Escape/Enter/arrows commit, fresh fields per layer", { timeout: 120_000 }, async (t) => {
+  const browserBin = findBrowser();
+  if (!browserBin) {
+    t.skip("No headless Chromium/Chrome binary found");
+    return;
+  }
+  const srv = await startTestServer();
+  t.after(() => srv.stop());
+  const cdp = await startBrowser(browserBin);
+  t.after(() => cdp.stop());
+  const rest = async (method, url, body) => {
+    const res = await fetch(srv.baseUrl + url, { method, headers: { "content-type": "application/json" }, body: body && JSON.stringify(body) });
+    assert.ok(res.ok, `${method} ${url} → ${res.status}`);
+    return res.json();
+  };
+  const waitFor = async (expr, label) => {
+    for (let i = 0; i < 100; i++) { if (await cdp.evalJs(expr)) return; await sleep(50); }
+    assert.fail(`timed out waiting for ${label}`);
+  };
+  const node = async (id) => (await rest("GET", "/api/state")).nodes[id];
+  await rest("PATCH", "/api/root-css", { classes: { card: { padding: "8px" }, muted: { color: "#777" } } });
+  const s0 = await rest("GET", "/api/state");
+  const board = await rest("POST", "/api/nodes", { parentId: s0.rootId, tag: "div", name: "Board", styles: { width: "300px", height: "200px" } });
+  const a = await rest("POST", "/api/nodes", { parentId: board.id, tag: "div", name: "A", styles: { width: "100px" } });
+  const b = await rest("POST", "/api/nodes", { parentId: board.id, tag: "div", name: "B", styles: { width: "50px" } });
+  await cdp.send("Page.navigate", { url: srv.baseUrl });
+  await waitFor(`document.querySelector("#live.live") && S?.nodes?.[${JSON.stringify(a.id)}]`, "app");
+  await cdp.evalJs(`select(${JSON.stringify(a.id)})`);
+  const W = `document.querySelector('#inspector input[data-style="width"]')`;
+  await waitFor(`${W}?.value === "100"`, "A's width shown");
+  // Real typing (CDP insertText), so the browser fires "change" when the field is left, as for a person.
+  const typeW = async (v) => {
+    await cdp.evalJs(`(() => { const i = ${W}; i.focus(); i.select(); })()`);
+    await cdp.send("Input.insertText", { text: v });
+  };
+  const keyW = (k, extra = {}) => cdp.evalJs(`${W}.dispatchEvent(new KeyboardEvent("keydown", { key: "${k}", bubbles: true, cancelable: true, ...${JSON.stringify(extra)} }))`);
+
+  // Typing is not overwritten by a live update; the update shows once the field is left.
+  await typeW("120");
+  await rest("PATCH", `/api/nodes/${a.id}`, { name: "A (renamed elsewhere)" });
+  await waitFor(`S.nodes[${JSON.stringify(a.id)}].name === "A (renamed elsewhere)"`, "update arrived");
+  assert.equal(await cdp.evalJs(`${W}.value`), "120", "typed value kept while editing");
+  assert.equal(await cdp.evalJs(`document.querySelector('#inspector input[data-field="name"]').value`), "A", "held back while a field is focused");
+
+  // Escape leaves the field (which, as before this change, applies what was typed) and shows the held-back update.
+  await keyW("Escape");
+  await waitFor(`document.querySelector('#inspector input[data-field="name"]').value === "A (renamed elsewhere)"`, "held-back update shown");
+  for (let i = 0; i < 100 && (await node(a.id)).styles.width !== "120px"; i++) await sleep(50);
+  assert.equal((await node(a.id)).styles.width, "120px");
+  await waitFor(`${W}.value === "120"`, "field shows the saved value");
+
+  // Enter commits; arrow keys step (Shift = 10).
+  await typeW("140");
+  await keyW("Enter");
+  for (let i = 0; i < 100 && (await node(a.id)).styles.width !== "140px"; i++) await sleep(50);
+  assert.equal((await node(a.id)).styles.width, "140px");
+  await cdp.evalJs(`${W}.focus()`);
+  await keyW("ArrowUp", { shiftKey: true });
+  for (let i = 0; i < 100 && (await node(a.id)).styles.width !== "150px"; i++) await sleep(50);
+  assert.equal((await node(a.id)).styles.width, "150px");
+  await cdp.evalJs(`${W}.blur()`);
+
+  // Another layer gets its own fields; edits from elsewhere update the open layer in place.
+  await cdp.evalJs(`select(${JSON.stringify(b.id)})`);
+  await waitFor(`${W}.value === "50"`, "B's width");
+  await rest("PATCH", `/api/nodes/${b.id}`, { styles: { width: 75 } });
+  await waitFor(`${W}.value === "75"`, "live update in place");
+
+  // Adding a shared class from the picker applies it and resets the picker.
+  await cdp.evalJs(`(() => { const s = document.querySelector('#inspector select[data-class-add]'); s.value = "card"; s.dispatchEvent(new Event("change", { bubbles: true })); })()`);
+  await waitFor(`[...document.querySelectorAll("#inspector .class-chip")].some((c) => c.textContent.startsWith(".card"))`, "class chip");
+  assert.deepEqual((await node(b.id)).classes, ["card"]);
+  assert.equal(await cdp.evalJs(`document.querySelector('#inspector select[data-class-add]').value`), "", "picker reset");
+  assert.deepEqual(await cdp.evalJs(`[...document.querySelectorAll('#inspector select[data-class-add] option')].map((o) => o.value)`), ["", "muted"]);
+
+  // Nothing selected: the page settings, with the root CSS text.
+  await cdp.evalJs("select(null)");
+  await waitFor(`document.getElementById("root-css")?.value.includes(".card")`, "page panel with root CSS");
+});
