@@ -137,7 +137,7 @@ const sameRule = (a, b) => a.selector === b.selector && (a.media || "") === (b.m
  * - vars: { "--name": value | null }.
  * - classes: { name: { camelCase: value | null } | null }: the plain `.name { }` rule; null removes it.
  */
-export function mergeRootCss(base, { css, vars, classes } = {}, { replace = false } = {}) {
+export function mergeRootCss(base, { css, vars, classes, rules } = {}, { replace = false } = {}) {
   const out = replace ? emptyRootCss() : structuredClone(base || emptyRootCss());
   out.vars ||= {};
   out.rules ||= [];
@@ -145,6 +145,14 @@ export function mergeRootCss(base, { css, vars, classes } = {}, { replace = fals
     const parsed = asHttp(() => RC.parse(css));
     for (const [k, v] of Object.entries(parsed.vars)) out.vars[k] = cleanVarValue(k, v);
     for (const raw of parsed.rules) {
+      const rule = cleanRule(raw);
+      const hit = replace ? null : out.rules.find((r) => sameRule(r, rule));
+      if (hit) hit.styles = mergeRuleStyles(hit.styles, rule.styles, rule.selector);
+      else out.rules.push(rule);
+    }
+  }
+  if (Array.isArray(rules)) {
+    for (const raw of rules) {
       const rule = cleanRule(raw);
       const hit = replace ? null : out.rules.find((r) => sameRule(r, rule));
       if (hit) hit.styles = mergeRuleStyles(hit.styles, rule.styles, rule.selector);
