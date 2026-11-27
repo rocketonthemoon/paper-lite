@@ -1228,7 +1228,6 @@ let pointerHeld = false;
 let spaceDown = false;
 let inspectorDirty = false;
 let cssJsonOpen = false;      // UX #03: collapsed raw CSS JSON by default
-let exportZipFmt = "html";
 let comments = [];            // thread comments synced via SSE
 let agentNodes = [];          // [{ id, label }] nodes an MCP agent is working on
 let agentCursors = [];        // live MCP agent cursors
@@ -2414,9 +2413,9 @@ function fontStack(value) {
   return `'${fam}', ${/mono|code/i.test(fam) ? "ui-monospace, monospace" : "system-ui, sans-serif"}`;
 }
 
+// The <datalist> is ui/src/components/FontList.svelte.
 function renderFontList() {
-  const fams = [...new Set(fontLib.map((f) => f.family))];
-  $("#font-families").innerHTML = [...fams, ...GENERIC_FONTS].map((f) => `<option value="${esc(f)}"></option>`).join("");
+  window.weft.events.dispatchEvent(new Event("fonts"));
 }
 
 const readAsBase64 = (file) => new Promise((resolve, reject) => {
@@ -2932,39 +2931,6 @@ $("#rail").addEventListener("click", (e) => {
   if (b.dataset.tool) setTool(b.dataset.tool);
 });
 const exportMenu = $("#export-menu");
-function formatExportPreview(node) {
-  const rawEntries = Object.entries(node.styles || {}).slice(0, 6);
-  const head = `<span class="t">&lt;${esc(node.tag)}</span> style={{`;
-  if (!rawEntries.length) return `${head} <span class="cmdk-dim">/* no styles */</span> }}<span class="t">&gt;</span>`;
-  const fmtVal = (v) => {
-    if (typeof v === "number") return `<span class="n">${v}</span>`;
-    const s = String(v ?? "");
-    const pxMatch = /^(-?\d+(?:\.\d+)?)px$/.exec(s.trim());
-    if (pxMatch) return `<span class="n">${esc(pxMatch[1])}</span>`;
-    if (/^-?\d+(?:\.\d+)?$/.test(s.trim())) return `<span class="n">${esc(s.trim())}</span>`;
-    return `<span class="s">${esc(JSON.stringify(s))}</span>`;
-  };
-  const parts = rawEntries.map(([k, v], i) => {
-    const comma = i < rawEntries.length - 1 ? "," : "";
-    const plain = `${k}: ${typeof v === "number" || /^-?\d+(?:\.\d+)?(?:px)?$/.test(String(v ?? "").trim()) ? px(v) : JSON.stringify(String(v ?? ""))}${comma}`;
-    return { html: `${esc(k)}: ${fmtVal(v)}${comma}`, len: plain.length };
-  });
-  const lines = [];
-  let line = [], lineLen = 0;
-  for (const p of parts) {
-    if (line.length && lineLen + 1 + p.len > 44) {
-      lines.push("  " + line.join(" "));
-      line = [p.html];
-      lineLen = p.len;
-    } else {
-      line.push(p.html);
-      lineLen += (line.length > 1 ? 1 : 0) + p.len;
-    }
-  }
-  if (line.length) lines.push("  " + line.join(" "));
-  lines[lines.length - 1] += ` }}<span class="t">&gt;</span>`;
-  return `${head}\n${lines.join("\n")}`;
-}
 function countProjectLayers() {
   if (!S) return 0;
   const seen = new Set();
@@ -2979,55 +2945,32 @@ function countProjectLayers() {
   }
   return seen.size;
 }
-function renderExportMenu() {
-  if (!S) return;
+// The menu's contents are ui/src/components/ExportMenu.svelte; it reads this when the menu opens.
+function exportMenuModel() {
+  if (!S) return null;
   const selNode = sel && S.nodes[sel];
   const root = S.nodes[S.rootId];
-  const totalLayers = countProjectLayers();
-  const slug = S.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "project";
-  exportMenu.innerHTML = `
-    ${selNode ? `<section class="exp-scope">
-      <div class="exp-scope-h"><strong>Selection</strong><span class="sel-nm">${esc(selNode.name)}</span></div>
-      <pre class="exp-code">${formatExportPreview(selNode)}</pre>
-      <div class="btnrow">
-        <button type="button" class="btn primary" data-exp="copy-sel-html"><span>Copy HTML + CSS</span><span class="exp-kbd">Ctrl C</span></button>
-        <button type="button" class="btn" data-exp="copy-sel-jsx">Copy JSX</button>
-      </div>
-    </section>` : ""}
-    <section class="exp-scope">
-      <div class="exp-scope-h"><strong>Page</strong><span class="exp-meta">${esc(root.name)} · ${plural(root.children.length, "artboard")}</span></div>
-      <div class="btnrow">
-        <button type="button" class="btn" data-exp="copy-page-html">Copy HTML + CSS</button>
-        <button type="button" class="btn" data-exp="copy-page-jsx">Copy JSX</button>
-      </div>
-    </section>
-    <section class="exp-scope subtle">
-      <div class="exp-scope-h"><strong>Whole project</strong><span class="exp-meta">.zip · ${plural(S.pages.length, "page")} · ${plural(totalLayers, "layer")}</span></div>
-      <div class="seg">
-        ${["html", "jsx", "both"].map((f) => `<button type="button" data-exp-fmt="${f}" class="${exportZipFmt === f ? "on" : ""}">${f === "both" ? "Both" : f.toUpperCase()}</button>`).join("")}
-      </div>
-      <button type="button" class="btn" data-exp="download-zip"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 2.5v8M4.5 7.5L8 11l3.5-3.5M3 13.5h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>Download ${esc(slug)}.zip</button>
-    </section>`;
+  return {
+    sel: selNode ? { name: selNode.name, node: { tag: selNode.tag, styles: selNode.styles } } : null,
+    page: `${root.name} · ${plural(root.children.length, "artboard")}`,
+    project: `.zip · ${plural(S.pages.length, "page")} · ${plural(countProjectLayers(), "layer")}`,
+    slug: S.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "project",
+  };
+}
+function exportAction(act, zipFmt) {
+  if (act === "copy-sel-html") return copyExport("html", sel);
+  if (act === "copy-sel-jsx") return copyExport("jsx", sel);
+  if (act === "copy-page-html") return copyExport("html", null);
+  if (act === "copy-page-jsx") return copyExport("jsx", null);
+  if (act === "download-zip") return downloadZip(S?.id, zipFmt);
 }
 function openExportMenu(open = exportMenu.hidden) {
   if (open) openProjectMenu(false);
   exportMenu.hidden = !open;
   $("#export-btn").setAttribute("aria-expanded", String(open));
-  if (open) renderExportMenu();
+  if (open) window.weft.events.dispatchEvent(new Event("export-menu"));
 }
 $("#export-btn").addEventListener("click", () => openExportMenu());
-exportMenu.addEventListener("click", (e) => {
-  const fmt = e.target.closest("[data-exp-fmt]");
-  if (fmt) { exportZipFmt = fmt.dataset.expFmt; return renderExportMenu(); }
-  const act = e.target.closest("[data-exp]")?.dataset.exp;
-  if (!act) return;
-  openExportMenu(false);
-  if (act === "copy-sel-html") return copyExport("html", sel);
-  if (act === "copy-sel-jsx") return copyExport("jsx", sel);
-  if (act === "copy-page-html") return copyExport("html", null);
-  if (act === "copy-page-jsx") return copyExport("jsx", null);
-  if (act === "download-zip") return downloadZip(S?.id, exportZipFmt);
-});
 document.addEventListener("pointerdown", (e) => { if (!exportMenu.hidden && !e.target.closest("#export-menu, #export-btn")) openExportMenu(false); });
 $("#layer-filter").addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
@@ -3134,6 +3077,11 @@ window.weft = {
   submitComment: (text, agentsCanSee) => submitComment(text, agentsCanSee),
   closeCommentThread: () => closeCommentThread(),
   // Canvas overlay and breadcrumb (canvas/*.svelte), measured by updateOverlay()
+  // Export menu (ExportMenu.svelte) and font suggestions (FontList.svelte)
+  exportMenu: () => exportMenuModel(),
+  closeExportMenu: () => openExportMenu(false),
+  exportAction: (act, zipFmt) => exportAction(act, zipFmt),
+  fontFamilies: () => [...new Set([...fontLib.map((f) => f.family), ...GENERIC_FONTS])],
   overlay: { labels: [], ctx: null, agents: { boxes: [], cursors: [] }, crumbs: { page: "Page 1", artboard: "" } },
 };
 function renderHistory() {

@@ -18,6 +18,8 @@ import ArtboardLabels from "./components/canvas/ArtboardLabels.svelte";
 import ContextBar from "./components/canvas/ContextBar.svelte";
 import AgentsLayer from "./components/canvas/AgentsLayer.svelte";
 import Crumbs from "./components/canvas/Crumbs.svelte";
+import ExportMenu from "./components/ExportMenu.svelte";
+import FontList from "./components/FontList.svelte";
 
 mount(HistoryPanel, { target: document.getElementById("history-panel") });
 mount(CommentsPanel, { target: document.getElementById("comments-panel") });
@@ -36,6 +38,8 @@ mount(ArtboardLabels, { target: document.getElementById("labels") });
 mount(ContextBar, { target: document.getElementById("ctx-bar") });
 mount(AgentsLayer, { target: document.getElementById("agents") });
 mount(Crumbs, { target: document.getElementById("crumbs") });
+mount(ExportMenu, { target: document.getElementById("export-menu") });
+mount(FontList, { target: document.getElementById("font-families") });
 
 // The legacy script starts first (this module loads after it), so it may already have sent data, or the user may
 // have opened the palette, before these components listened. Replay the current state now.
@@ -49,6 +53,8 @@ if (!document.getElementById("dashboard").hidden) replay("dashboard");
 replay("right-head");
 replay("inspector");
 replay("overlay");
+replay("fonts");
+if (!document.getElementById("export-menu").hidden) replay("export-menu");
 replay("comment-pins");
 replay("comment-thread");
 if (!document.getElementById("cmdk").hidden) replay("cmdk-open");

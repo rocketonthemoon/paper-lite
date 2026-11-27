@@ -1125,4 +1125,16 @@ test("browser: canvas overlay (Svelte): artboard labels, context bar, breadcrumb
   await waitFor(`document.querySelectorAll("#agents .agent-box").length === 1 && document.querySelector("#agents .agent-cursor .agent-cursor-tag strong")`, "agent box and cursor");
   await cdp.evalJs(`document.querySelector("#agents .agent-cursor").click()`);
   await waitFor(`sel === ${JSON.stringify(card.id)}`, "cursor click selects");
+
+  // Export menu (ExportMenu.svelte): the selection's preview, and the ZIP format is kept between openings.
+  await cdp.evalJs(`document.getElementById("export-btn").click()`);
+  await waitFor(`!document.getElementById("export-menu").hidden && document.querySelector("#export-menu .exp-code")`, "export menu");
+  assert.match(await cdp.evalJs(`document.querySelector("#export-menu .exp-code").textContent`), /^<div style=\{\{\n {2}position: "absolute", left: 20, top: 40,\n/);
+  assert.equal(await cdp.evalJs(`document.querySelector('#export-menu [data-exp="download-zip"]').textContent.trim()`), "Download untitled.zip");
+  await cdp.evalJs(`document.querySelector('#export-menu [data-exp-fmt="jsx"]').click()`);
+  await cdp.evalJs(`document.getElementById("export-btn").click()`);
+  assert.equal(await cdp.evalJs(`document.getElementById("export-menu").hidden`), true);
+  await cdp.evalJs(`select(null); document.getElementById("export-btn").click()`);
+  assert.equal(await cdp.evalJs(`Boolean(document.querySelector("#export-menu .exp-code"))`), false, "no selection section");
+  assert.ok(await cdp.evalJs(`document.querySelector('#export-menu [data-exp-fmt="jsx"]').classList.contains("on")`), "format kept");
 });
