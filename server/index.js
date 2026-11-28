@@ -23,6 +23,7 @@ import { CheckpointRepo } from "./checkpoint-store.js";
 import { MAX_ICONS, expandIconSpecs, parseSvgIcon } from "./icons.js";
 import { analyzeDesignLint, exportDesignTokens, importDesignTokens } from "./design-tokens.js";
 import { createComponentEngine, extractComponentOverridesFromSpec, trackNodeOverrides } from "./components.js";
+import { revertPatches } from "./selective-revert.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."); // the repo root (data/, public/, shared/)
 const DATA_DIR = process.env.DATA_DIR || path.join(ROOT, "data");
@@ -61,9 +62,12 @@ let historyCursor = -1;
 let projectCheckpoints = []; // [{ id, name, auto, kind, at, historyId, layerCount, commit }] — snapshots live in git
 let projectRemote = { connected: false }; // open project's git remote, as the browser may see it (no token)
 let projectSessions = []; // [{ id, projectId, projectName, source, agentName, title, artboard, startedAt, updatedAt, editCount, toolCounts, checkpointId, live, reverted }]
-let lastMcpWriteAt = 0;
+// Last write per agent session: each agent's run gets its own "Before agent run" checkpoint, so every agent's
+// activity session can be reverted, not only the first agent's.
+const lastMcpWriteAt = new Map();
+const mcpAgentKey = () => mcpContextStore.getStore()?.agent?.id || "default";
 let lastCheckpointHistoryKey = null;
-let pendingSessionTitle = null;
+const pendingSessionTitles = new Map(); // agent session id -> a title set before that agent's first edit
 
 const mcpContextStore = new AsyncLocalStorage();
 const sseClients = new Set();
@@ -451,9 +455,9 @@ async function openProject(id, source = "api") {
   projectSessions = []; // until loadProjectExtras() reads this project's own sessions
   historyTimeline = [];
   historyCursor = -1;
-  lastMcpWriteAt = 0;
+  lastMcpWriteAt.clear();
   lastCheckpointHistoryKey = null;
-  pendingSessionTitle = null;
+  pendingSessionTitles.clear();
   await loadProjectExtras(id);
   presence.clear();
   agentCursors.clear();
@@ -661,7 +665,8 @@ function createCheckpoint(name, { auto = false, kind = auto ? "auto" : "manual" 
 
 function ensureAgentStartCheckpoint(beforeState) {
   const now = Date.now();
-  const isNewRun = lastMcpWriteAt === 0 || (now - lastMcpWriteAt >= SESSION_GAP_MS);
+  const last = lastMcpWriteAt.get(mcpAgentKey()) || 0;
+  const isNewRun = last === 0 || (now - last >= SESSION_GAP_MS);
   if (!isNewRun) return null;
   const curKey = currentStateKey();
   if (lastCheckpointHistoryKey === curKey && projectCheckpoints.length) {
@@ -817,13 +822,16 @@ function recordSessionActivity({ histSource, tool, artboard, checkpointId, at })
   const nowMs = Date.parse(at);
   const store = mcpContextStore.getStore();
   const agentName = histSource === "mcp" ? (store?.agent?.name || "Claude") : "You";
-  const last = projectSessions[projectSessions.length - 1];
+  const agentId = histSource === "mcp" ? (store?.agent?.id || null) : null;
+  // The most recent session of this same author (you, or this agent session), so two agents working at the same
+  // time each get their own session instead of one merged one that the last of them names.
+  const last = [...projectSessions].reverse().find((x) => x.source === histSource && (x.agentId ?? null) === agentId);
   const canAppend =
     last &&
     !last.reverted &&
-    last.source === histSource &&
     last.projectId === state.id &&
     (nowMs - Date.parse(last.updatedAt)) < SESSION_GAP_MS;
+  const pendingTitle = pendingSessionTitles.get(agentId) || null;
 
   if (canAppend) {
     last.updatedAt = at;
@@ -833,9 +841,9 @@ function recordSessionActivity({ histSource, tool, artboard, checkpointId, at })
     if (histSource === "mcp") {
       last.live = true;
       last.agentName = agentName;
-      if (pendingSessionTitle && !last.title) {
-        last.title = pendingSessionTitle;
-        pendingSessionTitle = null;
+      if (pendingTitle && !last.title) {
+        last.title = pendingTitle;
+        pendingSessionTitles.delete(agentId);
       }
     }
   } else {
@@ -845,7 +853,8 @@ function recordSessionActivity({ histSource, tool, artboard, checkpointId, at })
       projectName: state.name,
       source: histSource,
       agentName,
-      title: histSource === "mcp" ? (pendingSessionTitle || null) : null,
+      ...(agentId ? { agentId } : {}),
+      title: histSource === "mcp" ? pendingTitle : null,
       artboard: artboard || "Page 1",
       startedAt: at,
       updatedAt: at,
@@ -855,7 +864,7 @@ function recordSessionActivity({ histSource, tool, artboard, checkpointId, at })
       live: histSource === "mcp",
       reverted: false,
     });
-    if (histSource === "mcp") pendingSessionTitle = null;
+    if (histSource === "mcp") pendingSessionTitles.delete(agentId);
     if (projectSessions.length > 60) projectSessions.splice(0, projectSessions.length - 60);
   }
   saveSessions();
@@ -987,6 +996,7 @@ function commit(source, patch, meta = null, startCpId = null) {
     target,
     label,
     nodeIds,
+    ...(meta?.entryExtra || {}), // e.g. { kind: "agent-undo", revertOf } for a selective undo
     layerCount: layerCountOf(state),
     at,
   };
@@ -996,7 +1006,7 @@ function commit(source, patch, meta = null, startCpId = null) {
   historyCursor = historyTimeline.length - 1;
   const commentsChanged = syncCommentsWithState(historyCursor + 1);
 
-  if (histSource === "mcp") lastMcpWriteAt = Date.now();
+  if (histSource === "mcp") lastMcpWriteAt.set(mcpAgentKey(), Date.now());
   const artboard = meta?.artboard || artboardNameForNodes(nodeIds, state, before);
   recordSessionActivity({ histSource, tool, artboard, checkpointId: startCpId, at });
 
@@ -1047,24 +1057,105 @@ function stepHistory(source, direction) {
 
 // undo / redo for agents. They report which step moved, and refuse to move a step the user made unless asked:
 // an agent undoing "its last change" must not silently throw away an edit the user made in between.
+// undo / redo for agents, like per-user undo in multiplayer editors (and `git revert`): an agent only ever takes back
+// its own steps, and never anyone else's work. When the agent's step is the latest edit overall it is a plain history
+// step; when someone edited after it, only that step's own changes are reverted, field by field, and whatever others
+// changed since is kept and reported (selective-revert.js). includeUserEdits / includeOtherAgentsEdits still let an
+// agent move someone else's step at the top of the history when the user asks for that.
 function agentHistoryStep(direction, { includeUserEdits = false, includeOtherAgentsEdits = false } = {}) {
-  const idx = direction === "undo" ? historyCursor : historyCursor + 1;
-  const entry = historyTimeline[idx];
-  const key = direction === "undo" ? "undone" : "redone";
-  if (idx < 0 || !entry) return { [key]: false, reason: `Nothing to ${direction}` };
   const me = mcpContextStore.getStore()?.agent?.id || null;
   // Steps recorded before agents were told apart (no agentId) count as this agent's.
-  const by = entry.source !== "mcp" ? "user" : (!entry.agentId || !me || entry.agentId === me ? "agent" : "another agent");
-  const which = direction === "undo" ? "last edit" : "next edit to redo";
-  const doing = direction === "undo" ? "Undoing" : "Redoing";
-  if (by === "user" && !includeUserEdits) {
-    throw new HttpError(409, `The ${which} was made by the user ("${entry.label}", ${entry.at}). ${doing} it would change their work, so nothing was done. Pass includeUserEdits: true only if the user asked for that`);
+  const mine = (e) => e.source === "mcp" && (!e.agentId || !me || e.agentId === me);
+  const key = direction === "undo" ? "undone" : "redone";
+  const top = historyTimeline[direction === "undo" ? historyCursor : historyCursor + 1];
+  if (top && !mine(top) && ((top.source !== "mcp" && includeUserEdits) || (top.source === "mcp" && includeOtherAgentsEdits))) {
+    stepHistory("mcp", direction);
+    return { [key]: true, mode: "history", step: stepInfo(top, mine) };
   }
-  if (by === "another agent" && !includeOtherAgentsEdits) {
-    throw new HttpError(409, `The ${which} was made by another agent session (${entry.agentName}: "${entry.label}", ${entry.at}). ${doing} it would change its work, so nothing was done. Pass includeOtherAgentsEdits: true only if the user asked for that`);
+  return direction === "undo" ? agentUndo(mine) : agentRedo(mine);
+}
+
+const stepInfo = (e, mine) => {
+  const by = e.source !== "mcp" ? "user" : mine(e) ? "agent" : "another agent";
+  return { label: e.label, by, ...(by === "another agent" ? { agent: e.agentName } : {}), at: e.at };
+};
+
+function agentUndo(mine) {
+  let idx = -1;
+  for (let i = historyCursor; i >= 0; i--) {
+    const e = historyTimeline[i];
+    if (mine(e) && !e.revertedBy && e.kind !== "agent-undo") { idx = i; break; }
   }
-  stepHistory("mcp", direction);
-  return { [key]: true, step: { label: entry.label, by, ...(by === "another agent" ? { agent: entry.agentName } : {}), at: entry.at } };
+  if (idx === -1) return { undone: false, reason: "Nothing of yours to undo in the recent history" };
+  const e = historyTimeline[idx];
+  if (idx === historyCursor) {
+    stepHistory("mcp", "undo");
+    return { undone: true, mode: "history", step: stepInfo(e, mine) };
+  }
+  const res = selectiveRevert([e], { source: "mcp", tool: "undo", label: `Undo · ${e.label}`, kind: "agent-undo", mine });
+  e.revertedBy = res.entryId;
+  return { undone: true, mode: "selective", step: stepInfo(e, mine), ...res.report };
+}
+
+function agentRedo(mine) {
+  const next = historyTimeline[historyCursor + 1];
+  if (next && mine(next)) {
+    stepHistory("mcp", "redo");
+    return { redone: true, mode: "history", step: stepInfo(next, mine) };
+  }
+  // The latest selective undo of this agent that wasn't redone yet, unless the agent has edited since.
+  let undoEntry = null;
+  for (let i = historyCursor; i >= 0; i--) {
+    const e = historyTimeline[i];
+    if (!mine(e)) continue;
+    if (e.kind === "agent-undo") { if (!e.redoneBy) { undoEntry = e; break; } continue; }
+    if (e.kind === "agent-redo") continue;
+    break;
+  }
+  if (!undoEntry) return { redone: false, reason: "Nothing of yours to redo" };
+  const target = historyTimeline.find((x) => x.id === undoEntry.revertOf?.[0]);
+  const res = selectiveRevert([undoEntry], { source: "mcp", tool: "redo", label: `Redo · ${target?.label || undoEntry.label}`, kind: "agent-redo", mine });
+  undoEntry.redoneBy = res.entryId;
+  return { redone: true, mode: "selective", step: target ? stepInfo(target, mine) : { label: undoEntry.label }, ...res.report };
+}
+
+// Revert history entries' own changes as one new step. Throws (and records nothing) when nothing could be reverted.
+function selectiveRevert(entries, { source, tool, label, kind, mine = () => true }) {
+  let out;
+  mutate(source, (s) => {
+    out = revertPatches(s, entries.map((e) => e.patch));
+    if (!out.reverted.length) {
+      const err = new HttpError(409, `Nothing was changed: everything ${entries.length === 1 ? `"${entries[0].label}"` : "those steps"} did has been edited since by someone else${describeSkipped(out, entries, mine)}`);
+      err.details = { skipped: annotateSkipped(out.skipped, entries, mine) };
+      throw err;
+    }
+    return out;
+  }, { tool, target: label, label, entryExtra: { kind, revertOf: entries.map((e) => e.id) } });
+  const report = {
+    changed: out.reverted.length,
+    ...(out.skipped.length ? { kept: annotateSkipped(out.skipped, entries, mine) } : {}),
+    ...(out.metaSkipped.length ? { keptShared: out.metaSkipped } : {}),
+  };
+  if (report.kept || report.keptShared) report.note = "Some changes were kept because someone else edited them afterwards; see kept";
+  return { entryId: historyTimeline[historyCursor].id, report };
+}
+
+// Who changed each skipped layer after the reverted steps (for the agent and the dashboard to act on).
+function annotateSkipped(skipped, entries, mine) {
+  const from = Math.min(...entries.map((e) => historyTimeline.indexOf(e)).filter((i) => i >= 0));
+  return skipped.map((sk) => {
+    const by = new Set();
+    for (let i = from + 1; i <= historyCursor; i++) {
+      const e = historyTimeline[i];
+      if (!e || entries.includes(e) || mine(e)) continue;
+      if (Object.hasOwn(e.patch.after.nodes, sk.id)) by.add(e.source === "mcp" ? e.agentName || "another agent" : "you");
+    }
+    return { layer: sk.name, id: sk.id, fields: sk.fields, ...(by.size ? { editedBy: [...by] } : {}) };
+  });
+}
+function describeSkipped(out, entries, mine) {
+  const ann = annotateSkipped(out.skipped, entries, mine);
+  return ann.length ? ` (${ann.slice(0, 3).map((k) => `${k.layer}${k.editedBy ? ` by ${k.editedBy.join(", ")}` : ""}`).join("; ")})` : "";
 }
 
 function jumpHistory(source, targetIndex) {
@@ -1083,8 +1174,10 @@ function undoLastAgentRun(source) {
     if (historyTimeline[i].source === "mcp") { lastMcp = i; break; }
   }
   if (lastMcp === -1) return { ok: false, undone: 0, cursor: historyCursor };
+  // The latest agent's run only: stop where another agent session's steps begin.
+  const runAgent = historyTimeline[lastMcp].agentId ?? null;
   let firstMcp = lastMcp;
-  while (firstMcp > 0 && historyTimeline[firstMcp - 1].source === "mcp") firstMcp -= 1;
+  while (firstMcp > 0 && historyTimeline[firstMcp - 1].source === "mcp" && (historyTimeline[firstMcp - 1].agentId ?? null) === runAgent) firstMcp -= 1;
   const res = jumpHistory(source, firstMcp - 1);
   return { ok: true, undone: res.moved, cursor: res.cursor };
 }
@@ -3018,15 +3111,17 @@ async function removeFont(id) {
 function setSessionTitle(text) {
   const title = cleanName(text, "");
   if (!title) throw new HttpError(400, "Session title cannot be empty");
-  const last = projectSessions[projectSessions.length - 1];
+  // The calling agent's own session: another agent's title must not overwrite it.
+  const agentId = mcpContextStore.getStore()?.agent?.id || null;
+  const last = [...projectSessions].reverse().find((x) => x.source === "mcp" && (x.agentId ?? null) === agentId);
   const now = Date.now();
-  if (last && last.source === "mcp" && !last.reverted && (last.live || now - Date.parse(last.updatedAt) < SESSION_GAP_MS * 2)) {
+  if (last && !last.reverted && (last.live || now - Date.parse(last.updatedAt) < SESSION_GAP_MS * 2)) {
     last.title = title;
     saveSessions();
     sendActivity();
     return { title, sessionId: last.id };
   }
-  pendingSessionTitle = title;
+  pendingSessionTitles.set(agentId, title);
   return { title, pending: true };
 }
 
@@ -3166,7 +3261,18 @@ const mcpContext = {
       const cp = createCheckpoint(name || "Manual checkpoint", { auto: false, kind: "manual" });
       return { id: cp.id, name: cp.name, at: cp.at, layerCount: cp.layerCount };
     },
-    restore: (id) => restoreCheckpointById(id, "mcp"),
+    restore: async (id, { force = false } = {}) => {
+      const cp = projectCheckpoints.find((c) => c.id === id);
+      if (cp && !force) {
+        // Restoring rolls the whole project back: refuse while that would throw away the user's or another agent's
+        // later work, unless the agent was told to.
+        const others = editsByOthersSince({ startedAt: cp.at, source: "mcp", agentId: mcpContextStore.getStore()?.agent?.id || null });
+        if (others.count) {
+          throw new HttpError(409, `Restoring "${cp.name}" would also discard ${others.count} later edit${others.count === 1 ? "" : "s"} by ${others.who.join(", ")}, so nothing was done. To take back only your own changes use undo; pass force: true only if the user asked to restore the whole project`);
+        }
+      }
+      return restoreCheckpointById(id, "mcp");
+    },
   },
   git: { status: gitApi.status, push: gitApi.push, pull: gitApi.pull },
   comments: {
@@ -3244,7 +3350,7 @@ const wrap = (fn) => async (req, res) => {
     if (out !== undefined && !res.headersSent) res.json(out);
   } catch (err) {
     if (!err.status) console.error("[weft]", err);
-    res.status(err.status || 500).json({ error: err.message });
+    res.status(err.status || 500).json({ error: err.message, ...(err.details || {}) });
   }
 };
 
@@ -3358,6 +3464,32 @@ app.post("/api/comments/:id/reply", wrap((req) => replyComment(req.params.id, {
 app.patch("/api/comments/:id", wrap((req) => updateComment(req.params.id, req.body || {})));
 app.delete("/api/comments/:id", wrap((req) => deleteComment(req.params.id)));
 
+// The author test for a session's steps: you, or that one agent session.
+const sessionAuthor = (session) => (e) => e.source === session.source && (session.source !== "mcp" || !session.agentId || e.agentId === session.agentId);
+
+// This session's own steps still in the undo history (oldest first), minus steps already taken back by an undo that
+// wasn't redone, and minus the undo / redo / revert steps themselves.
+function sessionSteps(session) {
+  const start = Date.parse(session.startedAt), end = Date.parse(session.updatedAt) + 1000;
+  const author = sessionAuthor(session);
+  const byId = new Map(historyTimeline.map((e) => [e.id, e]));
+  return historyTimeline.slice(0, historyCursor + 1).filter((e) => {
+    const at = Date.parse(e.at);
+    if (!author(e) || at < start || at > end || e.kind) return false;
+    if (e.revertedBy) { const r = byId.get(e.revertedBy); if (!r || !r.redoneBy) return false; }
+    return true;
+  });
+}
+
+// Edits in the open project's history made after a session started by anyone other than that session's author.
+function editsByOthersSince(session) {
+  const start = Date.parse(session.startedAt);
+  const sameAuthor = sessionAuthor(session);
+  const later = historyTimeline.slice(0, historyCursor + 1).filter((e) => Date.parse(e.at) >= start && !sameAuthor(e));
+  const who = [...new Set(later.map((e) => (e.source === "mcp" ? e.agentName || "another agent" : "you")))];
+  return { count: later.length, who };
+}
+
 // Activity (§5)
 app.get("/api/activity", wrap(async () => ({ sessions: await allActivitySessions() })));
 app.post("/api/activity/:id/revert", wrap(async (req) => {
@@ -3370,17 +3502,50 @@ app.post("/api/activity/:id/revert", wrap(async (req) => {
     if (found) { targetProject = p.id; targetSession = found; break; }
   }
   if (!targetSession) throw new HttpError(404, `Session "${sid}" not found`);
-  if (!targetSession.checkpointId) throw new HttpError(400, "No checkpoint recorded for this session");
   if (state.id !== targetProject) await openProject(targetProject, who(req));
-  const restored = await restoreCheckpointById(targetSession.checkpointId, who(req));
-  const activeSession = projectSessions.find((s) => s.id === sid);
-  if (activeSession) {
+  const markReverted = () => {
+    const activeSession = projectSessions.find((s) => s.id === sid);
+    if (!activeSession) return;
     activeSession.reverted = true;
     activeSession.live = false;
     saveSessions();
     sendActivity();
+  };
+
+  // Default: take back only this session's own changes and keep everything anyone else did since.
+  if (req.body?.mode !== "restore") {
+    const steps = sessionSteps(targetSession);
+    if (steps.length) {
+      const author = sessionAuthor(targetSession);
+      const res = selectiveRevert(steps, {
+        source: who(req), tool: "Revert session", kind: "session-revert", mine: author,
+        label: `Revert session · ${targetSession.title || targetSession.agentName || "session"}`,
+      });
+      for (const e of steps) e.revertedBy = res.entryId;
+      markReverted();
+      const older = historyTimeline[0] && Date.parse(historyTimeline[0].at) > Date.parse(targetSession.startedAt);
+      return { ok: true, mode: "own", ...res.report, ...(older ? { olderStepsNotReverted: true } : {}) };
+    }
+    const others = editsByOthersSince(targetSession);
+    const err = new HttpError(409, "This session's steps are no longer in the undo history (the server restarted, or they are too old), so its own changes can't be picked out. Restore the project to how it was before the session instead?");
+    err.details = { needsRestore: true, othersEdits: others.count, othersWho: others.who };
+    throw err;
   }
-  return { ok: true, restored };
+
+  // Restore: the whole project goes back to the session's start checkpoint. That also discards everything anyone
+  // else did since, so it needs force when there is such work.
+  if (!targetSession.checkpointId) throw new HttpError(400, "No checkpoint recorded for this session");
+  if (!req.body?.force) {
+    const others = editsByOthersSince(targetSession);
+    if (others.count) {
+      const err = new HttpError(409, `Restoring to before this session also discards ${others.count} later edit${others.count === 1 ? "" : "s"} by ${others.who.join(", ")}`);
+      err.details = { othersEdits: others.count, othersWho: others.who };
+      throw err;
+    }
+  }
+  const restored = await restoreCheckpointById(targetSession.checkpointId, who(req));
+  markReverted();
+  return { ok: true, mode: "restore", restored };
 }));
 
 // Pages

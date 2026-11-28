@@ -51,8 +51,9 @@ const GUIDE = `# weft MCP guide
 Each tool call waits for a full model round trip, so the number of calls, not their size, sets how long a design
 takes. Aim for 2–4 calls per screen, not 10–15:
 - write_html: write a complete section (header + hero + cards) or a whole screen in one call. One write_html is
-  one undo step, so a big call is still easy to take back. undo reports the step it took back and refuses to undo
-  an edit the user made in the UI meanwhile (pass includeUserEdits: true only when the user asks for that).
+  one undo step, so a big call is still easy to take back. undo takes back only your own latest step, even after
+  the user or another agent edited: their changes stay, and whatever you couldn't revert without overwriting them is
+  listed under kept. restore_checkpoint rolls back everyone's work, so prefer undo to fix your own mistakes.
 - update_styles / set_text_content / rename_nodes / move_nodes / delete_nodes take lists: collect every change you
   want and send one call, not one per layer.
 - Set up all the root CSS a screen needs in one update_root_css call before writing it.
@@ -670,10 +671,10 @@ export function registerTools(mcpServer, ctx) {
   }, async () => text(ctx.checkpoints.list()));
 
   server.registerTool("restore_checkpoint", {
-    description: "Restore the open project's pages, layers and root CSS to a saved checkpoint as one undoable step.",
-    inputSchema: { id: z.string() },
-    annotations: WRITE,
-  }, async ({ id }) => text(await ctx.checkpoints.restore(id)));
+    description: "Restore the open project's pages, layers and root CSS to a saved checkpoint as one undoable step. This rolls back everyone's work since the checkpoint, so it is refused while the user or another agent has edited since, unless force is true. To take back only your own changes, use undo.",
+    inputSchema: { id: z.string(), force: z.boolean().optional().describe("Restore even though it discards the user's or other agents' later edits; only when the user asked for that") },
+    annotations: { ...WRITE, destructiveHint: true },
+  }, async ({ id, force = false }) => text(await ctx.checkpoints.restore(id, { force })));
 
   // ---------------------------------------------------------------- git remote (connected by the user in the UI)
   server.registerTool("git_status", {
@@ -888,11 +889,11 @@ export function registerTools(mcpServer, ctx) {
   const includeUserEdits = z.boolean().optional().describe("Also undo/redo a step the user made in the UI. Default false: such a step is refused, so the user's work is never discarded by accident");
   const includeOtherAgentsEdits = z.boolean().optional().describe("Also undo/redo a step another agent made. Default false: such a step is refused, so two agents working at once can't undo each other");
   server.registerTool("undo", {
-    description: "Undo the last canvas edit (one tool call is one step) and say which step it was. Refuses when the last step is the user's edit or another agent's, unless includeUserEdits / includeOtherAgentsEdits is true.",
+    description: "Undo your own most recent edit (one tool call is one step), even when the user or another agent edited after it: only your step's changes are taken back, and anything someone else changed since is kept and listed under kept. Never touches anyone else's work unless includeUserEdits / includeOtherAgentsEdits is set and their step is the latest.",
     inputSchema: { includeUserEdits, includeOtherAgentsEdits }, annotations: WRITE,
   }, async (args) => text(ctx.agentStep("undo", args)));
   server.registerTool("redo", {
-    description: "Redo the last undone edit and say which step it was. Refuses a step the user or another agent made, unless includeUserEdits / includeOtherAgentsEdits is true.",
+    description: "Redo your own most recently undone edit, keeping whatever others changed since (listed under kept).",
     inputSchema: { includeUserEdits, includeOtherAgentsEdits }, annotations: WRITE,
   }, async (args) => text(ctx.agentStep("redo", args)));
 }
