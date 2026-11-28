@@ -104,6 +104,7 @@ export default [
         fetch: "readonly",
         getComputedStyle: "readonly",
         getSelection: "readonly",
+        AbortController: "readonly",
         history: "readonly",
         localStorage: "readonly",
         location: "readonly",

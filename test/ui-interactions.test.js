@@ -368,15 +368,17 @@ test("UI interactions: drawing, editing, shortcuts, panels, projects and live sy
     assert.equal(await ui.evalJs("editingId"), null);
   });
 
-  await t.test("double-click a text layer edits it; Escape cancels", async () => {
+  await t.test("double-click a text layer edits it; Escape keeps the typing (as in Figma); Ctrl+Z undoes it", async () => {
     const r = await nodeRect(textId);
     await ui.click(r.cx, r.cy);
     await ui.click(r.cx, r.cy, 2);
     await waitFor(() => ui.evalJs("editingId"), "edit mode via dblclick");
-    await ui.type("Discard me");
+    await ui.type("Kept on Escape");
     await ui.key("Escape");
-    await settle();
-    assert.equal((await nodeBy((n) => n.id === textId)).text, "Hello canvas", "Escape keeps the original text");
+    await waitFor(async () => (await nodeBy((n) => n.id === textId))?.text === "Kept on Escape", "Escape saves the text");
+    assert.equal(await ui.evalJs("editingId"), null);
+    await ui.key("z", 2);
+    await waitFor(async () => (await nodeBy((n) => n.id === textId))?.text === "Hello canvas", "Ctrl+Z restores the old text");
   });
 
   // ---------------------------------------------------------------- select / move / resize

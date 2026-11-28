@@ -95,13 +95,17 @@ export function startEdit(id) {
   const range = document.createRange();
   range.selectNodeContents(el);
   const s = getSelection(); s.removeAllRanges(); s.addRange(range);
+  // Escape and Enter both keep what was typed, as in Figma: dropping the typing on Escape lost work (Ctrl+Z undoes
+  // an edit you didn't want). The listeners last for this edit only, so editing the same layer again doesn't stack them.
+  ed.editListeners?.abort();
+  const listeners = (ed.editListeners = new AbortController());
+  const signal = listeners.signal;
   el.addEventListener("keydown", (k) => {
     k.stopPropagation();
-    if (k.key === "Escape") { k.preventDefault(); finishEdit(false); }
-    else if (k.key === "Enter" && !k.shiftKey) { k.preventDefault(); finishEdit(true); }
-  });
-  el.addEventListener("input", updateOverlay);
-  el.addEventListener("blur", () => finishEdit(true), { once: true });
+    if (k.key === "Escape" || (k.key === "Enter" && !k.shiftKey)) { k.preventDefault(); finishEdit(true); }
+  }, { signal });
+  el.addEventListener("input", updateOverlay, { signal });
+  el.addEventListener("blur", () => finishEdit(true), { signal });
 }
 
 export function finishEdit(commit) {
@@ -109,6 +113,8 @@ export function finishEdit(commit) {
   const id = ed.editingId;
   const el = elOf(id);
   ed.editingId = null;
+  ed.editListeners?.abort();
+  ed.editListeners = null;
   const text = el ? el.innerText.replace(/\n$/, "") : ed.editOriginal;
   if (el) { el.contentEditable = "false"; el.classList.remove("editing"); markStale(el); }
   getSelection().removeAllRanges();
