@@ -66,26 +66,64 @@ function dragEnd() {
   else updateOverlay();
 }
 
-function resizeStart(e) {
-  const id = e.target.dataset.nodeId;
+// Start resizing layer `id` (it must be the selected one); false when it can't be resized right now.
+function beginResize(id, el) {
   const n = ed.S.nodes[id];
-  if (!n || id !== ed.sel || ed.tool !== "select" || ed.spaceDown || ed.editingId) { e.interaction.stop(); return; }
-  const el = e.target;
+  if (!n || !el || id !== ed.sel || ed.tool !== "select" || ed.spaceDown || ed.editingId || ed.multi.length) return false;
   markStale(el); // the resize preview sets inline width/height
   op = { id, el, abs: n.styles.position === "absolute", ...layoutSize(el),
     x: num(n.styles.left, el.offsetLeft), y: num(n.styles.top, el.offsetTop), moved: false };
   ed.busy = true;
+  return true;
 }
-function resizeMove(e) {
+function resizeStart(e) {
+  if (!beginResize(e.target.dataset.nodeId, e.target)) e.interaction.stop();
+}
+// `d`: how the box changed on screen since the last move ({ left, top, width, height }); `edges`: which edges move.
+function applyResize(d, edges) {
   if (!op) return;
-  const d = e.deltaRect, z = ed.view.z;
-  const canLeft = op.abs || !e.edges.left, canTop = op.abs || !e.edges.top;
+  const z = ed.view.z;
+  // A layer in normal flow can't move, so it only grows or shrinks from its right and bottom edges.
+  const canLeft = op.abs || !edges.left, canTop = op.abs || !edges.top;
   if (canLeft) { op.w = Math.max(1, op.w + d.width / z); if (op.abs) op.x += d.left / z; }
   if (canTop) { op.h = Math.max(1, op.h + d.height / z); if (op.abs) op.y += d.top / z; }
   op.moved = true;
   Object.assign(op.el.style, { width: `${snapV(op.w)}px`, height: `${snapV(op.h)}px` });
   if (op.abs) Object.assign(op.el.style, { left: `${snapV(op.x)}px`, top: `${snapV(op.y)}px` });
   updateOverlay();
+}
+function resizeMove(e) {
+  applyResize(e.deltaRect, e.edges);
+}
+
+// The corner squares on the selection box are resize grips too (they sit half outside the layer, so its own edges
+// can't catch them). Dragging one resizes from that corner, with the same preview and single save as an edge.
+function handleDown(e) {
+  const corner = e.currentTarget.className; // nw | ne | sw | se
+  if (e.button !== 0 || !beginResize(ed.sel, elOf(ed.sel))) return;
+  e.preventDefault();
+  e.stopPropagation(); // not a click on whatever is behind the handle
+  const edges = { left: corner.includes("w"), right: corner.includes("e"), top: corner.includes("n"), bottom: corner.includes("s") };
+  const grip = e.currentTarget;
+  grip.setPointerCapture?.(e.pointerId);
+  let lx = e.clientX, ly = e.clientY;
+  const move = (ev) => {
+    const dx = ev.clientX - lx, dy = ev.clientY - ly;
+    lx = ev.clientX; ly = ev.clientY;
+    applyResize({
+      left: edges.left ? dx : 0, top: edges.top ? dy : 0,
+      width: edges.right ? dx : edges.left ? -dx : 0, height: edges.bottom ? dy : edges.top ? -dy : 0,
+    }, edges);
+  };
+  const up = () => {
+    grip.removeEventListener("pointermove", move);
+    grip.removeEventListener("pointerup", up);
+    grip.removeEventListener("pointercancel", up);
+    resizeEnd();
+  };
+  grip.addEventListener("pointermove", move);
+  grip.addEventListener("pointerup", up);
+  grip.addEventListener("pointercancel", up);
 }
 function resizeEnd() {
   if (!op) return;
@@ -98,6 +136,7 @@ function resizeEnd() {
 }
 
 export function setupInteract() {
+  for (const grip of document.querySelectorAll("#sel-box i")) grip.addEventListener("pointerdown", handleDown);
   interact("#world .is-selected")
     .draggable({ listeners: { start: (e) => dragStart(e, e.target.dataset.nodeId), move: dragMove, end: dragEnd } })
     .resizable({ edges: { left: true, right: true, top: true, bottom: true }, margin: 6,
