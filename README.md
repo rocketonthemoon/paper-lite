@@ -5,12 +5,13 @@ A self-hosted HTML/CSS design canvas with a built-in MCP server. AI agents build
 ## Features
 
 - **Real HTML layers.** Artboards are plain DOM elements (`div`, `section`, `button`, `svg`, …) styled by the shared root CSS plus their own camelCase styles, not a proprietary vector format.
+- **Canvas editing.** Draw frames, rectangles and text; drag, resize and nudge layers. Select several by dragging a box over them (from empty canvas for artboards, from an artboard's background for its layers), Shift+click, or Ctrl/Cmd+A, then move, nudge, duplicate or delete them together as one undo step.
 - **One root CSS per project.** Variables, classes, states (`:hover`, `:focus-visible`, …), `@media` and nesting (`&:hover`, `& .title`, `&--primary`) live in one shared stylesheet. Layers use `class="card"` and `var(--color-primary)` and keep only their own overrides. On the canvas, width `@media` queries follow each artboard's width; the ZIP export links every screen to `tokens.css` (fonts and variables) and `components.css` (classes and layer styles), with the same tokens in `tokens.json` (W3C Design Tokens format) for design tools, and adds `icons.svg`, a sprite with every icon in the project (registered icons under their names).
 - **Live collaboration.** Agent edits, live cursors, selections, comments, checkpoints, and labelled undo history sync to the browser over SSE.
 - **Screenshots.** Headless Chrome renders artboards for `get_screenshot` and `get_computed_styles`.
 - **Export.** Export to React JSX, standalone HTML, or a ZIP bundle (comments are excluded from all exports). Exports stay compact: identical styles share one rule, repeated icons are one SVG `<symbol>`, and in JSX repeated parts (a sidebar on every screen) become one component, in `components/` in the ZIP.
 - **Plain files on disk.** Projects and activity sessions are JSON files in `DATA_DIR`; each project's checkpoints are commits in its own git repo (`projects/<id>.git`), one file per layer, so unchanged layers are stored once.
-- **No build step.** The UI is a single vanilla HTML file.
+- **Small build.** The editor UI is Svelte 5 + Vite; `npm start` builds it automatically when the sources change.
 
 ## Quickstart
 

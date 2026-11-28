@@ -49,6 +49,7 @@
   // ---- clicks and hover
   function onRowClick(e, r) {
     if (e.target.closest("[data-twist]")) return weft.toggleExpanded(r.id);
+    if (e.shiftKey || e.ctrlKey || e.metaKey) return weft.toggleSelect(r.id); // add or remove it from the selection
     weft.select(r.id);
   }
   async function onRowDblclick(e, r) {

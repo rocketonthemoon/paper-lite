@@ -24,6 +24,7 @@ export const hex6 = (v) => {
 // (data-action) are handled by the #right click listener below.
 export function rightHeadModel() {
   if (!ed.S) return null;
+  if (ed.multi.length) return { kind: "multi", name: `${ed.multi.length} layers`, agent: false };
   const n = ed.sel && ed.S.nodes[ed.sel];
   if (n) return { kind: n.parentId === ed.S.rootId ? "artboard" : "layer", name: n.name, agent: ed.agentNodes.some((a) => a.id === n.id) };
   const root = ed.S.nodes[ed.S.rootId];
@@ -83,6 +84,11 @@ export function renderInspector(force = false) {
 // What the inspector components show (see ui/src/components/inspector/Inspector.svelte).
 export function inspectorModel() {
   if (!ed.S) return null;
+  if (ed.multi.length) {
+    // Several layers: their names and what can be done to all of them (the fields belong to one layer at a time).
+    const nodes = ed.multi.map((id) => ed.S.nodes[id]);
+    return { multi: { count: nodes.length, names: nodes.map((n) => n.name), movable: nodes.filter((n) => n.styles.position === "absolute").length } };
+  }
   const n = ed.sel && ed.S.nodes[ed.sel];
   return {
     node: n || null,

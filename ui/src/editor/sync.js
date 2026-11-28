@@ -5,7 +5,7 @@ import { answerMeasure } from "./measure.js";
 import { $, GENERIC_FONTS, SVG_TAGS, TAGS, TEXT_TAGS, VOID_TAGS, ago, api, clock, commentsPanelEl, elOf, expanded, inspector, num, plural, px, rightHead, toast, viewKey, world } from "./core.js";
 import { applyView, baseStylesOf, kebabCss, layerRows, render, renderLayers, resolveVars, rootOf, rulesUsing, setViewportOverride, updateOverlay } from "./render.js";
 import { classableStyles, copyText, ctxAction, downloadZip, hex6, inspectorAction, inspectorChange, inspectorFocusout, inspectorInput, inspectorKeydown, inspectorModel, renderInspector, renderRightHead, rightHeadModel } from "./inspector.js";
-import { createNode, select, shareSelection } from "./selection.js";
+import { createNode, select, shareSelection, toggleSelected } from "./selection.js";
 import { fitTo, worldBounds } from "./view.js";
 import { labelPointerDown } from "./pointer.js";
 import { canNestIn, dropLayer, hoverLayer, renameLayer, renameRow, toggleExpanded } from "./layers.js";
@@ -189,6 +189,7 @@ export function setup() {
     // Layers tree (LayersPanel.svelte)
     layerRows: () => layerRows(),
     select: (id) => select(id),
+    toggleSelect: (id) => toggleSelected(id),
     toggleExpanded: (id) => toggleExpanded(id),
     hoverLayer: (id) => hoverLayer(id),
     renameLayer: (id, name) => renameLayer(id, name),

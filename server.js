@@ -2992,6 +2992,25 @@ app.post("/api/nodes", wrap((req) => createNode(req.body || {}, who(req))));
 app.patch("/api/nodes/:id", wrap((req) => updateNode(req.params.id, req.body || {}, who(req))));
 app.delete("/api/nodes/:id", wrap((req) => deleteNode(req.params.id, who(req))));
 app.post("/api/nodes/:id/duplicate", wrap((req) => duplicateNode(req.params.id, who(req))));
+// Several edits from the editor as one undo step (a multi-selection moved, nudged, duplicated or deleted together).
+// ops: [{ op: "update", id, patch } | { op: "delete", id } | { op: "duplicate", id }]. All or nothing; a delete
+// of a layer already removed with its parent earlier in the list is skipped.
+app.post("/api/nodes/batch", wrap((req) => {
+  const ops = Array.isArray(req.body?.ops) ? req.body.ops : [];
+  if (!ops.length || ops.length > 500) throw new HttpError(400, "ops: a list of 1–500 operations");
+  const source = who(req);
+  const ids = ops.map((o) => String(o?.id ?? ""));
+  const kinds = new Set(ops.map((o) => o?.op));
+  const label = kinds.size === 1 ? { update: "Edit", delete: "Delete", duplicate: "Duplicate" }[[...kinds][0]] || "Edit" : "Edit";
+  const results = batch(source, () => ops.map((o, i) => {
+    const id = ids[i];
+    if (o?.op === "update") return updateNode(id, o.patch || {}, source);
+    if (o?.op === "delete") return state.nodes[id] ? deleteNode(id, source) : { deleted: [] };
+    if (o?.op === "duplicate") return duplicateNode(id, source);
+    throw new HttpError(400, `Unknown op "${o?.op}" (use update, delete or duplicate)`);
+  }), { tool: label, target: ops.length === 1 ? state.nodes[ids[0]]?.name || "1 layer" : `${ops.length} layers`, nodeIds: ids.filter((id) => state.nodes[id]) });
+  return { results };
+}));
 app.post("/api/undo", wrap((req) => ({ ok: stepHistory(who(req), "undo") })));
 app.post("/api/redo", wrap((req) => ({ ok: stepHistory(who(req), "redo") })));
 app.post("/api/selection", wrap((req) => {

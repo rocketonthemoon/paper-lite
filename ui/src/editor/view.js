@@ -1,6 +1,6 @@
 // View: pan and zoom (wheel, zoom menu, fit to selection or page), and the Hand tool / Space panning.
 import { ed } from "./state.js";
-import { elOf, stage, toast, world } from "./core.js";
+import { elOf, selectedIds, stage, toast, world } from "./core.js";
 import { applyView } from "./render.js";
 import { setFollowAgent } from "./comments.js";
 
@@ -44,7 +44,10 @@ export function zoomCmd(mode) {
   else if (mode === "out") zoomAt(0.8, cx, cy);
   else if (mode === "100") zoomAt(1 / ed.view.z, cx, cy);
   else if (mode === "fit") fitTo(worldBounds([...world.children]), 1);
-  else if (mode === "selection") fitTo(ed.sel && elOf(ed.sel) ? worldBounds([elOf(ed.sel)]) : worldBounds([...world.children]), 4);
+  else if (mode === "selection") {
+    const els = selectedIds().map(elOf).filter(Boolean);
+    fitTo(worldBounds(els.length ? els : [...world.children]), 4);
+  }
   toast({ in: "Zoom in", out: "Zoom out", 100: "Zoom to 100%", fit: "Zoom to fit", selection: "Zoom to selection" }[mode]);
 }
 

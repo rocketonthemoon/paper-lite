@@ -1129,6 +1129,92 @@ test("UI interactions: drawing, editing, shortcuts, panels, projects and live sy
     await ui.evalJs(`document.querySelector('#comments-panel [data-restore-orphan]').click()`);
     await waitFor(() => ui.evalJs(`!document.querySelector("#comments-panel .cmt-row.orphaned")`), "Restore recovers deleted layer & clears orphan state");
   });
+  await t.test("multi-select: marquee, Shift+click, move together, nudge, duplicate, delete, Ctrl+A", async () => {
+    const ab = await mcp(B, "create_artboard", { name: "Multi", width: 600, height: 400 });
+    const made = await mcp(B, "write_html", { parentId: ab.id, html: [
+      `<div data-name="Box A" style="position:absolute;left:200px;top:60px;width:80px;height:60px;background:#36f"></div>`,
+      `<div data-name="Box B" style="position:absolute;left:320px;top:60px;width:80px;height:60px;background:#f60"></div>`,
+      `<div data-name="Box C" style="position:absolute;left:200px;top:260px;width:80px;height:60px;background:#0a0"></div>`,
+    ].join("") });
+    const [A, Bx, C] = made.created.map((c) => c.id);
+    const multi = () => ui.evalJs(`JSON.stringify(window.weft ? (${"window.__multi = document.querySelectorAll('#world .is-selected').length"}, [...document.querySelectorAll('#world .is-selected')].map((e) => e.dataset.nodeId).sort()) : [])`).then(JSON.parse);
+    const styles = async (id) => (await nodeBy((n) => n.id === id)).styles;
+    await waitFor(() => ui.evalJs(`Boolean(document.querySelector('#world [data-node-id="${C}"]'))`), "boxes on the canvas");
+    await pick(ab.id);
+    await ui.key("2", 8); // Shift+2: zoom to the artboard
+    await settle();
+    await ui.key("Escape");
+    await waitFor(async () => (await uiSel()) === null, "nothing selected");
+
+    // Marquee from the artboard's background over A and B (not C) selects those two.
+    let a = await nodeRect(A), b = await nodeRect(Bx);
+    const board = await nodeRect(ab.id);
+    await ui.drag(board.x + 8, board.y + 8, b.x + b.w + 10, b.y + b.h + 10);
+    await waitFor(async () => JSON.stringify(await multi()) === JSON.stringify([A, Bx].sort()), "A and B selected by the marquee");
+    assert.equal(await ui.evalJs(`document.getElementById("sel-box").classList.contains("multi")`), true, "one box around both, without handles");
+    assert.equal(await ui.evalJs(`[...document.querySelectorAll("#multi-boxes .multi-box")].filter((e) => e.style.display !== "none").length`), 2);
+    assert.match(await ui.evalJs(`document.querySelector("#inspector .sec-h")?.textContent || ""`), /2 layers selected/);
+    assert.equal(await ui.evalJs(`document.querySelector("#right-head .right-title").textContent`), "2 layers");
+    assert.equal(await ui.evalJs(`document.querySelector('#right-head [data-action="preview"]')`), null, "no Preview for several layers");
+    assert.equal(await ui.evalJs(`getComputedStyle(document.getElementById("ctx-bar")).display`), "none");
+
+    // Dragging one of them moves both, as one undo step.
+    const before = (await (await fetch(`${B}/api/history`)).json()).entries.length;
+    a = await nodeRect(A);
+    const z = await ui.evalJs("view.z");
+    await ui.drag(a.cx, a.cy, a.cx + 40 * z, a.cy + 20 * z);
+    await waitFor(async () => (await styles(A)).left === "240px" && (await styles(Bx)).left === "360px", "both moved");
+    assert.equal((await styles(A)).top, "80px");
+    assert.equal((await styles(Bx)).top, "80px");
+    assert.equal((await styles(C)).left, "200px", "C stayed");
+    const hist = (await (await fetch(`${B}/api/history`)).json()).entries;
+    assert.equal(hist.length, before + 1, "one history entry for the move");
+    assert.match(JSON.stringify(hist.at(-1)), /2 layers/);
+
+    // Shift+click adds C, then takes B out.
+    const shiftClick = async (r) => { await ui.move(r.cx, r.cy); await ui.mouse("mousePressed", r.cx, r.cy, { modifiers: 8 }); await ui.mouse("mouseReleased", r.cx, r.cy, { modifiers: 8 }); };
+    await shiftClick(await nodeRect(C));
+    await waitFor(async () => (await multi()).length === 3, "C added");
+    await shiftClick(await nodeRect(Bx));
+    await waitFor(async () => JSON.stringify(await multi()) === JSON.stringify([A, C].sort()), "B taken out");
+
+    // Arrow keys nudge everything selected.
+    await ui.key("ArrowRight");
+    await waitFor(async () => (await styles(A)).left === "241px" && (await styles(C)).left === "201px", "nudged together");
+    assert.equal((await styles(Bx)).left, "360px");
+
+    // Ctrl+D duplicates both and selects the copies; Delete removes them; one undo brings both back.
+    await ui.key("d", 2);
+    await waitFor(async () => { const m = await multi(); return m.length === 2 && !m.includes(A) && !m.includes(C); }, "copies selected");
+    const copies = await multi();
+    await ui.key("Delete");
+    await waitFor(async () => !(await nodeBy((n) => copies.includes(n.id))), "copies deleted");
+    assert.equal(await uiSel(), null);
+    await ui.key("z", 2);
+    await waitFor(async () => (await nodes()).filter((n) => copies.includes(n.id)).length === 2, "one undo restores both copies");
+
+    // Ctrl+A selects the layers at the same level; Escape clears.
+    await pick(A);
+    await ui.key("a", 2);
+    await waitFor(async () => (await multi()).length === (await nodes()).filter((n) => n.parentId === ab.id).length, "all siblings selected");
+    await ui.key("Escape");
+    await waitFor(async () => (await multi()).length === 0, "cleared");
+
+    // Shift+click in the Layers panel toggles a layer into the selection.
+    await pick(A);
+    await ui.evalJs(`document.querySelector('#layers .row[data-id="${C}"]').dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: true }))`);
+    await waitFor(async () => JSON.stringify(await multi()) === JSON.stringify([A, C].sort()), "row Shift+click adds C");
+    assert.equal(await ui.evalJs(`document.querySelectorAll("#layers .row.sel").length`), 2);
+
+    // From empty canvas the marquee selects artboards.
+    await ui.key("Escape");
+    const ab2 = await nodeRect(ab.id);
+    await ui.drag(ab2.x - 30, ab2.y + ab2.h + 30, ab2.x + 40, ab2.y + ab2.h - 40);
+    await waitFor(async () => (await multi()).includes(ab.id) || (await uiSel()) === ab.id, "artboard selected by a marquee from empty canvas");
+    await ui.key("Escape");
+    await mcp(B, "delete_nodes", { nodeIds: [ab.id] });
+  });
+
   await t.test("no runtime errors in the UI and none logged by the server", () => {
     assert.deepEqual(ui.errors, []);
     assert.doesNotMatch(srv.logs(), /TypeError|ReferenceError|\[weft\] (?!MCP)/);
