@@ -69,9 +69,13 @@ export async function loadThumb(thumbEl, p) {
   fitThumb(thumbEl, data);
 }
 
+// The blank "Untitled" project the server makes so the editor always has something open isn't listed until it's
+// edited: on a fresh install the dashboard shows only "New project", not a project the person never made.
+const userProjects = () => ed.projects.filter((p) => !p.placeholder);
+
 function sortedProjects() {
   const q = dashQuery.trim().toLowerCase();
-  const list = ed.projects.filter((p) => !q || p.name.toLowerCase().includes(q));
+  const list = userProjects().filter((p) => !q || p.name.toLowerCase().includes(q));
   if (dashSort === "name") list.sort((a, b) => a.name.localeCompare(b.name));
   else if (dashSort === "layers") list.sort((a, b) => (b.layers || 0) - (a.layers || 0) || String(b.updatedAt).localeCompare(String(a.updatedAt)));
   else list.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
@@ -86,7 +90,7 @@ export function dashModel() {
     list: sortedProjects(),
     view: dashView,
     query: dashQuery.trim(),
-    recent: [...ed.projects].sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt))).slice(0, 4),
+    recent: userProjects().sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt))).slice(0, 4),
     sessions: ed.activitySessions,
   };
 }
@@ -101,14 +105,16 @@ export function clearDashSearch() {
 
 export function renderDashboard() {
   if (dashEl.hidden) return;
-  $("#dash-count").textContent = String(ed.projects.length);
+  const projects = userProjects();
+  $("#dash-count").textContent = String(projects.length);
+  $("#dash-recent-h").hidden = !projects.length;
   $("#dash-back-label").textContent = "Back to canvas";
-  const totalLayers = ed.projects.reduce((a, p) => a + (p.layers || 0), 0);
+  const totalLayers = projects.reduce((a, p) => a + (p.layers || 0), 0);
   const list = sortedProjects();
   $("#dash-heading").textContent = "All projects";
   $("#dash-summary").textContent = dashQuery.trim()
-    ? `${plural(list.length, "matching project")} · ${ed.projects.length} total`
-    : `${plural(ed.projects.length, "project")} · ${totalLayers.toLocaleString()} layers`;
+    ? `${plural(list.length, "matching project")} · ${projects.length} total`
+    : projects.length ? `${plural(projects.length, "project")} · ${totalLayers.toLocaleString()} layers` : "No projects yet";
   const mcpUrlEl = $("#dash-mcp-url");
   if (mcpUrlEl) mcpUrlEl.textContent = `${location.origin}/mcp`;
   window.weft.events.dispatchEvent(new Event("dashboard"));

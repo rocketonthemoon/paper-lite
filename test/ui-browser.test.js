@@ -1154,9 +1154,14 @@ test("browser: toast and dashboard dialog / card menu (Svelte)", { timeout: 120_
     for (let i = 0; i < 100; i++) { if (await cdp.evalJs(expr)) return; await sleep(50); }
     assert.fail(`timed out waiting for ${label}`);
   };
-  await cdp.send("Page.navigate", { url: `${srv.baseUrl}/#dashboard` });
+  // A fresh install opens on the dashboard by itself, and the blank startup project isn't listed: only "New project".
+  await cdp.send("Page.navigate", { url: srv.baseUrl });
   // Wait for the page to finish loading, so no toast from startup can replace the one this test shows.
-  await waitFor(`document.readyState === "complete" && document.querySelector("#live.live") && document.querySelector("#dash-content [data-dash-menu]")`, "dashboard");
+  await waitFor(`document.readyState === "complete" && document.querySelector("#live.live") && !document.getElementById("dashboard").hidden && location.hash === "#dashboard"`, "dashboard on first run");
+  await waitFor(`document.getElementById("dash-summary").textContent === "No projects yet"`, "empty dashboard");
+  assert.equal(await cdp.evalJs(`document.querySelectorAll("#dash-content [data-dash-menu]").length`), 0);
+  assert.ok(await cdp.evalJs(`Boolean(document.getElementById("dash-grid-new")) && !document.getElementById("dash-clear")`));
+  assert.equal(await cdp.evalJs(`document.getElementById("dash-recent-h").hidden`), true, "no empty Recent heading");
 
   // Toast: text is escaped, the action runs its callback and hides the toast.
   await cdp.evalJs(`toast("<b>Saved</b>", { agent: true, action: "Undo", onAction: () => { window.__acted = true; } })`);
@@ -1167,26 +1172,30 @@ test("browser: toast and dashboard dialog / card menu (Svelte)", { timeout: 120_
   await cdp.evalJs(`toast("Plain")`);
   assert.equal(await cdp.evalJs(`document.querySelector("#toast .toast-act")`), null, "no action button");
 
+  // New project dialog: prefilled; an empty name is refused; Enter with a name creates the project.
+  await cdp.evalJs(`document.getElementById("dash-new").click()`);
+  assert.equal(await cdp.evalJs(`document.getElementById("dash-modal-input").value`), "Untitled");
+  await cdp.evalJs(`document.getElementById("dash-modal-input").value = "  "; document.getElementById("dash-modal-ok").click()`);
+  assert.equal(await cdp.evalJs(`document.getElementById("dash-modal").hidden`), false, "empty name keeps the dialog open");
+  await cdp.evalJs(`(() => { const i = document.getElementById("dash-modal-input"); i.value = "Made here"; i.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); })()`);
+  await waitFor(`document.getElementById("project-name").textContent === "Made here" && document.getElementById("dashboard").hidden`, "project created and opened");
+  // The untouched startup "Untitled" project was a placeholder: the new project replaced it.
+  await cdp.evalJs(`openDashboard(true)`);
+  await waitFor(`document.querySelectorAll("#dash-content [data-dash-menu]").length === 1 && document.querySelector("#dash-content .dash-card")?.textContent.includes("Made here")`, "placeholder replaced");
+
   // Card menu: the only project can't be deleted.
   await cdp.evalJs(`document.querySelector("#dash-content [data-dash-menu]").click()`);
   assert.equal(await cdp.evalJs(`document.querySelector('#dash-menu [data-dact="delete"]').disabled`), true);
   // Rename dialog: prefilled and selected; Escape closes. A new dialog starts from its own value, not leftover typing.
   await cdp.evalJs(`document.querySelector('#dash-menu [data-dact="rename"]').click()`);
   assert.equal(await cdp.evalJs(`document.activeElement.id`), "dash-modal-input");
-  assert.equal(await cdp.evalJs(`document.getElementById("dash-modal-input").value`), "Untitled");
+  assert.equal(await cdp.evalJs(`document.getElementById("dash-modal-input").value`), "Made here");
   await cdp.evalJs(`document.getElementById("dash-modal-input").value = "typed"`);
   await cdp.evalJs(`document.getElementById("dash-modal-input").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))`);
   assert.equal(await cdp.evalJs(`document.getElementById("dash-modal").hidden && !document.querySelector(".dash-dialog")`), true);
   await cdp.evalJs(`document.getElementById("dash-new").click()`);
   assert.equal(await cdp.evalJs(`document.getElementById("dash-modal-input").value`), "Untitled");
-  // An empty name is refused; Enter with a name creates the project.
-  await cdp.evalJs(`document.getElementById("dash-modal-input").value = "  "; document.getElementById("dash-modal-ok").click()`);
-  assert.equal(await cdp.evalJs(`document.getElementById("dash-modal").hidden`), false, "empty name keeps the dialog open");
-  await cdp.evalJs(`(() => { const i = document.getElementById("dash-modal-input"); i.value = "Made here"; i.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); })()`);
-  await waitFor(`document.getElementById("project-name").textContent === "Made here"`, "project created");
-  // The untouched startup "Untitled" project was a placeholder: the new project replaced it.
-  await cdp.evalJs(`openDashboard(true)`);
-  await waitFor(`document.querySelectorAll("#dash-content [data-dash-menu]").length === 1 && document.querySelector("#dash-content .dash-card")?.textContent.includes("Made here")`, "placeholder replaced");
+  await cdp.evalJs(`document.getElementById("dash-modal-input").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))`);
   await fetch(`${srv.baseUrl}/api/projects`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "Second" }) });
   // With two projects, delete is allowed and confirms without an input.
   await cdp.evalJs(`openDashboard(true)`);

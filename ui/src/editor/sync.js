@@ -85,8 +85,15 @@ export function connect() {
     hist = JSON.parse(ev.data);
     renderHistory();
   });
+  let firstProjects = true;
   es.addEventListener("projects", (ev) => {
     ed.projects = JSON.parse(ev.data).projects || [];
+    // A fresh install (only the blank startup project, never edited) opens on the dashboard, like Figma's file
+    // browser, instead of an empty canvas. Once per page load, and not when the URL asks for something.
+    if (firstProjects) {
+      firstProjects = false;
+      if (!location.hash && dashEl.hidden && ed.projects.length === 1 && ed.projects[0].placeholder) openDashboard(true);
+    }
     window.weft.events.dispatchEvent(new Event("projects"));
     if (!dashEl.hidden) renderDashboard();
   });

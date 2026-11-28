@@ -275,6 +275,12 @@ test("UI interactions: drawing, editing, shortcuts, panels, projects and live sy
 
   // ---------------------------------------------------------------- drawing tools
   let board, rectId, textId;
+  await t.test("a fresh install opens on the dashboard; Escape goes to the blank canvas", async () => {
+    await waitFor(() => ui.evalJs(`!document.getElementById("dashboard").hidden && location.hash === "#dashboard"`), "dashboard on first run");
+    await ui.key("Escape");
+    await waitFor(() => ui.evalJs(`document.getElementById("dashboard").hidden`), "back on the canvas");
+  });
+
   await t.test("F + drag on empty canvas draws an artboard", async () => {
     await ui.key("f");
     assert.equal(await ui.evalJs("tool"), "frame");
