@@ -13,7 +13,11 @@ WORKDIR /app
 # without pulling full desktop Chromium, GTK, GStreamer, or LLVM/Mesa bloat.
 # `apt-get upgrade` pulls Debian security fixes the base image doesn't have yet (e.g. libpam, CVE-2025-6020),
 # so the image scan doesn't depend on when node:22-slim was last rebuilt.
-RUN apt-get update && apt-get upgrade -y --no-install-recommends \
+# SECURITY_REFRESH: give it a new value (CI passes the run id) so a cached layer can't skip the upgrade and miss
+# fixes published since (e.g. libzstd1, CVE-2026-124851). Local builds without it behave as before.
+ARG SECURITY_REFRESH=""
+RUN echo "security refresh: ${SECURITY_REFRESH:-none}" \
+    && apt-get update && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends \
       ca-certificates curl unzip \
       libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \

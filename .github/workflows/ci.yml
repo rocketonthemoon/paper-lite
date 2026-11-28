@@ -64,6 +64,9 @@ jobs:
           context: .
           load: true
           tags: weft:ci
+          # A new value every run rebuilds the apt upgrade layer, so the image scan sees current Debian security fixes.
+          build-args: |
+            SECURITY_REFRESH=${{ github.run_id }}-${{ github.run_attempt }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
