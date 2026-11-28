@@ -1072,7 +1072,23 @@ function agentHistoryStep(direction, { includeUserEdits = false, includeOtherAge
     stepHistory("mcp", direction);
     return { [key]: true, mode: "history", step: stepInfo(top, mine) };
   }
-  return direction === "undo" ? agentUndo(mine) : agentRedo(mine);
+  const res = direction === "undo" ? agentUndo(mine) : agentRedo(mine);
+  pointCursorAt(res, direction);
+  return res;
+}
+
+// After an agent's undo / redo, its cursor shows that, on the layers the step touched, instead of still showing the
+// edit before it. When none of those layers exist any more (an undone creation), the cursor goes away.
+function pointCursorAt(res, direction) {
+  if (!res?.[direction === "undo" ? "undone" : "redone"]) return;
+  const entry = historyTimeline.find((e) => e.label === res.step?.label && e.at === res.step?.at);
+  const ids = (entry?.nodeIds || []).filter((id) => state.nodes[id] && !isPage(id));
+  if (ids.length) {
+    touch(ids, direction, entry.target);
+  } else {
+    const agentId = mcpContextStore.getStore()?.agent?.id;
+    if (agentId && agentCursors.delete(agentId)) emitPresence(false);
+  }
 }
 
 const stepInfo = (e, mine) => {

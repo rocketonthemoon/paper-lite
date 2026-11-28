@@ -379,6 +379,26 @@ test("MCP edge cases: instances in duplicated containers, artboard sizes and pla
     await call("delete_nodes", { nodeIds: [inst.id] });
   });
 
+  await t.test("after an agent's undo its cursor shows undo, or disappears when its layers are gone", async () => {
+    const as = (name, args) => mcpCall(srv.baseUrl, name, args, { "x-weft-client": "cursor-agent" });
+    const cursorOf = async (pred) => {
+      const ctl = new AbortController();
+      const reader = (await fetch(`${srv.baseUrl}/events`, { signal: ctl.signal })).body.getReader();
+      let buf = "";
+      while (!/event: presence\ndata: .*\n/.test(buf)) buf += new TextDecoder().decode((await reader.read()).value);
+      ctl.abort();
+      return JSON.parse(/event: presence\ndata: (.*)\n/.exec(buf)[1]).agents.find(pred);
+    };
+    const n = await as("create_node", { parentId: a.id, name: "Cursor target" });
+    await as("update_styles", { updates: [{ nodeIds: [n.id], styles: { color: "red" } }] });
+    await as("undo");
+    const c = await cursorOf((x) => x.nodeIds.includes(n.id));
+    assert.equal(c?.tool, "undo");
+    await as("undo"); // undoes the creation: the layer is gone
+    assert.equal(await cursorOf((x) => x.nodeIds.includes(n.id)), undefined);
+    assert.equal(await cursorOf((x) => x.tool === "undo" && x.nodeIds.length === 0), undefined);
+  });
+
   await t.test("update_root_css warns about var() loops", async () => {
     const res = await call("update_root_css", { vars: { "--x": "var(--y)", "--y": "var(--x)", "--fine": "var(--x)" } });
     assert.ok(res.warnings.some((w) => w.includes("--x → --y → --x")), JSON.stringify(res.warnings));
