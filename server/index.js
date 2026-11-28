@@ -1652,6 +1652,22 @@ function updateNode(id, patch, source = "api", meta = null) {
       oldParent.children = oldParent.children.filter((c) => c !== id);
       const wasArtboard = isPage(n.parentId);
       n.parentId = patch.parentId ?? n.parentId;
+      // Moved out of its component instance: it's no longer part of it, so detach it (and what it holds from that
+      // instance). Otherwise the next update_component would treat it as a stray part of the instance and remove it.
+      if (n.componentRootId && n.componentRootId !== id) {
+        let inside = false;
+        for (let p = s.nodes[n.parentId]; p; p = s.nodes[p.parentId]) if (p.id === n.componentRootId) { inside = true; break; }
+        if (!inside) {
+          const root = n.componentRootId;
+          const detach = (nid) => {
+            const x = s.nodes[nid];
+            if (!x || x.componentRootId !== root) return;
+            delete x.componentId; delete x.componentKey; delete x.componentRootId; delete x.componentOverrides;
+            x.children.forEach(detach);
+          };
+          detach(id);
+        }
+      }
       // Anything moved onto a page becomes an artboard and needs a world position: the next free spot (not 0,0, where
       // it would sit on top of the first artboard), unless this same patch places it.
       const placed = patch.styles && (patch.styles.left !== undefined || patch.styles.top !== undefined);

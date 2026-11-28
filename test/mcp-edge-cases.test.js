@@ -339,6 +339,32 @@ test("MCP edge cases: instances in duplicated containers, artboard sizes and pla
   });
 
 
+  await t.test("components: a layer moved out of an instance detaches; layers inside removed parts move up, not orphaned", async () => {
+    const consistent = (st) => Object.entries(st.nodes).every(([id, n]) => (st.pages.includes(id) || (st.nodes[n.parentId]?.children.includes(id))) && n.children.every((c) => st.nodes[c]?.parentId === id));
+    await call("create_component", { name: "moveout", html: `<div data-name="M"><p data-slot="label">L</p><span data-slot="tag">T</span></div>` });
+    const one = await call("instantiate_component", { component: "moveout", parentId: a.id });
+    const two = await call("instantiate_component", { component: "moveout", parentId: a.id });
+    let st = await state();
+    const label = st.nodes[one.id].children[0];
+    await call("move_nodes", { nodeIds: [label], parentId: two.id });
+    st = await state();
+    assert.equal(st.nodes[label].componentRootId, undefined, "moved out of its instance, it is a plain layer");
+    await call("update_component", { component: "moveout", slot: "root", patch: { styles: { gap: "4px" } } });
+    st = await state();
+    assert.ok(st.nodes[label] && st.nodes[two.id].children.includes(label), "an update keeps it where it was moved");
+    assert.ok(consistent(st));
+
+    // A layer someone put inside a part the component no longer has moves up into the instance.
+    const tagId = st.nodes[two.id].children.find((c) => st.nodes[c].componentKey === "tag");
+    const note = await call("create_node", { parentId: tagId, name: "Note" });
+    await call("update_component", { component: "moveout", html: `<div data-name="M"><p data-slot="label">L</p></div>` });
+    st = await state();
+    assert.ok(!st.nodes[tagId], "the removed part is gone");
+    assert.equal(st.nodes[note.id]?.parentId, two.id, "the layer inside it moved up into the instance");
+    assert.ok(consistent(st));
+    await call("delete_nodes", { nodeIds: [one.id, two.id, label].filter((id) => st.nodes[id]) });
+  });
+
   await t.test("update_root_css warns about var() loops", async () => {
     const res = await call("update_root_css", { vars: { "--x": "var(--y)", "--y": "var(--x)", "--fine": "var(--x)" } });
     assert.ok(res.warnings.some((w) => w.includes("--x → --y → --x")), JSON.stringify(res.warnings));
