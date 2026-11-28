@@ -395,6 +395,30 @@ test("UI interactions: drawing, editing, shortcuts, panels, projects and live sy
     assert.equal((await nodeBy((n) => n.id === rectId)).styles.height, "100px");
   });
 
+  await t.test("the selection's corner handles resize, pressed outside the layer too", async () => {
+    // The squares sit half outside the layer: pressing their outer half used to hit whatever was behind.
+    let r = await nodeRect(rectId);
+    const start = await nodeBy((n) => n.id === rectId);
+    const w0 = parseFloat(start.styles.width), h0 = parseFloat(start.styles.height);
+    await ui.drag(r.x + r.w + 4, r.y + r.h + 4, r.x + r.w + 24, r.y + r.h + 14);
+    await waitFor(async () => (await nodeBy((n) => n.id === rectId)).styles.width === `${w0 + 20}px`, "bottom-right handle widened");
+    assert.equal((await nodeBy((n) => n.id === rectId)).styles.height, `${h0 + 10}px`);
+    // Top-left: the box grows up and left, so its position moves with it.
+    r = await nodeRect(rectId);
+    const before = await nodeBy((n) => n.id === rectId);
+    await ui.drag(r.x - 4, r.y - 4, r.x - 14, r.y - 24);
+    await waitFor(async () => (await nodeBy((n) => n.id === rectId)).styles.width === `${w0 + 30}px`, "top-left handle widened");
+    const after = await nodeBy((n) => n.id === rectId);
+    assert.equal(after.styles.height, `${h0 + 30}px`);
+    assert.equal(after.styles.left, `${parseFloat(before.styles.left) - 10}px`);
+    assert.equal(after.styles.top, `${parseFloat(before.styles.top) - 20}px`);
+    assert.equal(await uiSel(), rectId, "still the same layer selected (the press didn't select what was behind)");
+    // Put it back for the tests that follow.
+    const { left, top, width, height } = start.styles;
+    await fetch(`${B}/api/nodes/${rectId}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ styles: { left, top, width, height } }) });
+    await waitFor(async () => (await nodeBy((n) => n.id === rectId)).styles.left === left, "restored");
+  });
+
   await t.test("arrow keys nudge (Shift = 10px); snap rounds moves to 8px", async () => {
     await ui.key("ArrowRight");
     await waitFor(async () => (await nodeBy((n) => n.id === rectId)).styles.left === "71px", "nudge 1px");
