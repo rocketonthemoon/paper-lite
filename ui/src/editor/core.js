@@ -65,7 +65,8 @@ export function toast(msg, { agent = false, action = null, onAction = null, ms =
   toast.timer = setTimeout(() => t.classList.remove("show"), action ? Math.max(ms, 5000) : ms);
 }
 
-export async function api(method, url, body) {
+// `onError(status, data)`: handle an error response yourself (return true) instead of the default toast.
+export async function api(method, url, body, { onError } = {}) {
   try {
     const res = await fetch(url, {
       method,
@@ -74,6 +75,7 @@ export async function api(method, url, body) {
     });
     const ct = res.headers.get("content-type") || "";
     const data = ct.includes("json") ? await res.json() : await res.text();
+    if (!res.ok && onError?.(res.status, data)) return null;
     if (!res.ok) throw new Error(data.error || res.statusText);
     return data;
   } catch (err) {

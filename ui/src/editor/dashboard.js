@@ -174,8 +174,24 @@ export async function dashMenuAction(act) {
 
 // "Revert session" in the activity feed (DashActivity.svelte).
 export async function revertSession(id) {
-  const res = await api("POST", `/api/activity/${encodeURIComponent(id)}/revert`);
-  if (res?.ok) toast("Reverted session to checkpoint");
+  const url = `/api/activity/${encodeURIComponent(id)}/revert`;
+  const done = (res) => { if (res?.ok) toast("Reverted session to checkpoint"); };
+  // The server refuses when the revert would also throw away later edits by you or another agent; ask first.
+  const res = await api("POST", url, {}, {
+    onError: (status, data) => {
+      if (status !== 409 || !data?.othersEdits) return false;
+      openDashModal({
+        title: "Revert this session?",
+        message: `${data.error}. ${data.othersEdits === 1 ? "It was" : "They were"} made after this session started, so restoring its checkpoint loses ${data.othersEdits === 1 ? "it" : "them"} too.`,
+        okText: "Revert anyway",
+        danger: true,
+        input: false,
+        onOk: async () => done(await api("POST", url, { force: true })),
+      });
+      return true;
+    },
+  });
+  done(res);
 }
 
 // Listeners and initial state; ./index.js runs each module's setup() once, in startup order.

@@ -278,6 +278,34 @@ test("MCP edge cases: instances in duplicated containers, artboard sizes and pla
     }
   });
 
+  await t.test("activity: one session per agent with its own title and checkpoint; reverting asks before discarding others' work", async () => {
+    const as = (client) => (name, args) => mcpCall(srv.baseUrl, name, args, { "x-weft-client": client });
+    const A = as("act-a"), B = as("act-b");
+    await A("set_session_title", { text: "A: header pass" });
+    const na = await A("create_node", { parentId: a.id, name: "Header (A)" });
+    await B("set_session_title", { text: "B: footer pass" });
+    const nb = await B("create_node", { parentId: a.id, name: "Footer (B)" });
+    await A("update_styles", { updates: [{ nodeIds: [na.id], styles: { color: "red" } }] });
+    const { sessions } = await (await fetch(`${srv.baseUrl}/api/activity`)).json();
+    const sa = sessions.find((x) => x.title === "A: header pass");
+    const sb = sessions.find((x) => x.title === "B: footer pass");
+    assert.ok(sa && sb && sa.id !== sb.id, "two sessions, each keeping its own title");
+    assert.equal(sa.editCount, 2);
+    assert.equal(sb.editCount, 1);
+    assert.ok(sa.checkpointId && sb.checkpointId, "each agent's run has a checkpoint to revert to");
+
+    const post = (body) => fetch(`${srv.baseUrl}/api/activity/${sa.id}/revert`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const refused = await post({});
+    assert.equal(refused.status, 409);
+    const info = await refused.json();
+    assert.equal(info.othersEdits, 1);
+    assert.match(info.error, /discards 1 later edit by/);
+    assert.ok((await state()).nodes[nb.id], "nothing was reverted");
+    assert.equal((await post({ force: true })).status, 200);
+    const s = await state();
+    assert.ok(!s.nodes[na.id] && !s.nodes[nb.id], "a confirmed revert restores the session's start");
+  });
+
   await t.test("update_root_css warns about var() loops", async () => {
     const res = await call("update_root_css", { vars: { "--x": "var(--y)", "--y": "var(--x)", "--fine": "var(--x)" } });
     assert.ok(res.warnings.some((w) => w.includes("--x → --y → --x")), JSON.stringify(res.warnings));

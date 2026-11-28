@@ -61,9 +61,12 @@ let historyCursor = -1;
 let projectCheckpoints = []; // [{ id, name, auto, kind, at, historyId, layerCount, commit }] — snapshots live in git
 let projectRemote = { connected: false }; // open project's git remote, as the browser may see it (no token)
 let projectSessions = []; // [{ id, projectId, projectName, source, agentName, title, artboard, startedAt, updatedAt, editCount, toolCounts, checkpointId, live, reverted }]
-let lastMcpWriteAt = 0;
+// Last write per agent session: each agent's run gets its own "Before agent run" checkpoint, so every agent's
+// activity session can be reverted, not only the first agent's.
+const lastMcpWriteAt = new Map();
+const mcpAgentKey = () => mcpContextStore.getStore()?.agent?.id || "default";
 let lastCheckpointHistoryKey = null;
-let pendingSessionTitle = null;
+const pendingSessionTitles = new Map(); // agent session id -> a title set before that agent's first edit
 
 const mcpContextStore = new AsyncLocalStorage();
 const sseClients = new Set();
@@ -451,9 +454,9 @@ async function openProject(id, source = "api") {
   projectSessions = []; // until loadProjectExtras() reads this project's own sessions
   historyTimeline = [];
   historyCursor = -1;
-  lastMcpWriteAt = 0;
+  lastMcpWriteAt.clear();
   lastCheckpointHistoryKey = null;
-  pendingSessionTitle = null;
+  pendingSessionTitles.clear();
   await loadProjectExtras(id);
   presence.clear();
   agentCursors.clear();
@@ -661,7 +664,8 @@ function createCheckpoint(name, { auto = false, kind = auto ? "auto" : "manual" 
 
 function ensureAgentStartCheckpoint(beforeState) {
   const now = Date.now();
-  const isNewRun = lastMcpWriteAt === 0 || (now - lastMcpWriteAt >= SESSION_GAP_MS);
+  const last = lastMcpWriteAt.get(mcpAgentKey()) || 0;
+  const isNewRun = last === 0 || (now - last >= SESSION_GAP_MS);
   if (!isNewRun) return null;
   const curKey = currentStateKey();
   if (lastCheckpointHistoryKey === curKey && projectCheckpoints.length) {
@@ -817,13 +821,16 @@ function recordSessionActivity({ histSource, tool, artboard, checkpointId, at })
   const nowMs = Date.parse(at);
   const store = mcpContextStore.getStore();
   const agentName = histSource === "mcp" ? (store?.agent?.name || "Claude") : "You";
-  const last = projectSessions[projectSessions.length - 1];
+  const agentId = histSource === "mcp" ? (store?.agent?.id || null) : null;
+  // The most recent session of this same author (you, or this agent session), so two agents working at the same
+  // time each get their own session instead of one merged one that the last of them names.
+  const last = [...projectSessions].reverse().find((x) => x.source === histSource && (x.agentId ?? null) === agentId);
   const canAppend =
     last &&
     !last.reverted &&
-    last.source === histSource &&
     last.projectId === state.id &&
     (nowMs - Date.parse(last.updatedAt)) < SESSION_GAP_MS;
+  const pendingTitle = pendingSessionTitles.get(agentId) || null;
 
   if (canAppend) {
     last.updatedAt = at;
@@ -833,9 +840,9 @@ function recordSessionActivity({ histSource, tool, artboard, checkpointId, at })
     if (histSource === "mcp") {
       last.live = true;
       last.agentName = agentName;
-      if (pendingSessionTitle && !last.title) {
-        last.title = pendingSessionTitle;
-        pendingSessionTitle = null;
+      if (pendingTitle && !last.title) {
+        last.title = pendingTitle;
+        pendingSessionTitles.delete(agentId);
       }
     }
   } else {
@@ -845,7 +852,8 @@ function recordSessionActivity({ histSource, tool, artboard, checkpointId, at })
       projectName: state.name,
       source: histSource,
       agentName,
-      title: histSource === "mcp" ? (pendingSessionTitle || null) : null,
+      ...(agentId ? { agentId } : {}),
+      title: histSource === "mcp" ? pendingTitle : null,
       artboard: artboard || "Page 1",
       startedAt: at,
       updatedAt: at,
@@ -855,7 +863,7 @@ function recordSessionActivity({ histSource, tool, artboard, checkpointId, at })
       live: histSource === "mcp",
       reverted: false,
     });
-    if (histSource === "mcp") pendingSessionTitle = null;
+    if (histSource === "mcp") pendingSessionTitles.delete(agentId);
     if (projectSessions.length > 60) projectSessions.splice(0, projectSessions.length - 60);
   }
   saveSessions();
@@ -996,7 +1004,7 @@ function commit(source, patch, meta = null, startCpId = null) {
   historyCursor = historyTimeline.length - 1;
   const commentsChanged = syncCommentsWithState(historyCursor + 1);
 
-  if (histSource === "mcp") lastMcpWriteAt = Date.now();
+  if (histSource === "mcp") lastMcpWriteAt.set(mcpAgentKey(), Date.now());
   const artboard = meta?.artboard || artboardNameForNodes(nodeIds, state, before);
   recordSessionActivity({ histSource, tool, artboard, checkpointId: startCpId, at });
 
@@ -1083,8 +1091,10 @@ function undoLastAgentRun(source) {
     if (historyTimeline[i].source === "mcp") { lastMcp = i; break; }
   }
   if (lastMcp === -1) return { ok: false, undone: 0, cursor: historyCursor };
+  // The latest agent's run only: stop where another agent session's steps begin.
+  const runAgent = historyTimeline[lastMcp].agentId ?? null;
   let firstMcp = lastMcp;
-  while (firstMcp > 0 && historyTimeline[firstMcp - 1].source === "mcp") firstMcp -= 1;
+  while (firstMcp > 0 && historyTimeline[firstMcp - 1].source === "mcp" && (historyTimeline[firstMcp - 1].agentId ?? null) === runAgent) firstMcp -= 1;
   const res = jumpHistory(source, firstMcp - 1);
   return { ok: true, undone: res.moved, cursor: res.cursor };
 }
@@ -3018,15 +3028,17 @@ async function removeFont(id) {
 function setSessionTitle(text) {
   const title = cleanName(text, "");
   if (!title) throw new HttpError(400, "Session title cannot be empty");
-  const last = projectSessions[projectSessions.length - 1];
+  // The calling agent's own session: another agent's title must not overwrite it.
+  const agentId = mcpContextStore.getStore()?.agent?.id || null;
+  const last = [...projectSessions].reverse().find((x) => x.source === "mcp" && (x.agentId ?? null) === agentId);
   const now = Date.now();
-  if (last && last.source === "mcp" && !last.reverted && (last.live || now - Date.parse(last.updatedAt) < SESSION_GAP_MS * 2)) {
+  if (last && !last.reverted && (last.live || now - Date.parse(last.updatedAt) < SESSION_GAP_MS * 2)) {
     last.title = title;
     saveSessions();
     sendActivity();
     return { title, sessionId: last.id };
   }
-  pendingSessionTitle = title;
+  pendingSessionTitles.set(agentId, title);
   return { title, pending: true };
 }
 
@@ -3244,7 +3256,7 @@ const wrap = (fn) => async (req, res) => {
     if (out !== undefined && !res.headersSent) res.json(out);
   } catch (err) {
     if (!err.status) console.error("[weft]", err);
-    res.status(err.status || 500).json({ error: err.message });
+    res.status(err.status || 500).json({ error: err.message, ...(err.details || {}) });
   }
 };
 
@@ -3358,6 +3370,15 @@ app.post("/api/comments/:id/reply", wrap((req) => replyComment(req.params.id, {
 app.patch("/api/comments/:id", wrap((req) => updateComment(req.params.id, req.body || {})));
 app.delete("/api/comments/:id", wrap((req) => deleteComment(req.params.id)));
 
+// Edits in the open project's history made after a session started by anyone other than that session's author.
+function editsByOthersSince(session) {
+  const start = Date.parse(session.startedAt);
+  const sameAuthor = (e) => e.source === session.source && (session.source !== "mcp" || !session.agentId || e.agentId === session.agentId);
+  const later = historyTimeline.slice(0, historyCursor + 1).filter((e) => Date.parse(e.at) >= start && !sameAuthor(e));
+  const who = [...new Set(later.map((e) => (e.source === "mcp" ? e.agentName || "another agent" : "you")))];
+  return { count: later.length, who };
+}
+
 // Activity (§5)
 app.get("/api/activity", wrap(async () => ({ sessions: await allActivitySessions() })));
 app.post("/api/activity/:id/revert", wrap(async (req) => {
@@ -3372,6 +3393,16 @@ app.post("/api/activity/:id/revert", wrap(async (req) => {
   if (!targetSession) throw new HttpError(404, `Session "${sid}" not found`);
   if (!targetSession.checkpointId) throw new HttpError(400, "No checkpoint recorded for this session");
   if (state.id !== targetProject) await openProject(targetProject, who(req));
+  // Reverting restores the checkpoint from the session's start, which also discards everything anyone else did
+  // since. Say so, and only go ahead when the caller confirms (force).
+  if (!req.body?.force) {
+    const others = editsByOthersSince(targetSession);
+    if (others.count) {
+      const err = new HttpError(409, `Reverting this session also discards ${others.count} later edit${others.count === 1 ? "" : "s"} by ${others.who.join(", ")}`);
+      err.details = { othersEdits: others.count, othersWho: others.who };
+      throw err;
+    }
+  }
   const restored = await restoreCheckpointById(targetSession.checkpointId, who(req));
   const activeSession = projectSessions.find((s) => s.id === sid);
   if (activeSession) {
