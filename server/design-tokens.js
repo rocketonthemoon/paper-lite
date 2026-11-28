@@ -1,5 +1,21 @@
 // W3C Design Tokens (DTCG) export/import and expanded Design System Linter helpers.
 import { HttpError, VAR_NAME_RE, varsIn } from "./model.js";
+import { CSS_PROPERTIES } from "../shared/css-properties.js";
+
+// Closest real CSS property to a misspelt one ("colour" → "color"), or null.
+function closestProperty(key) {
+  const k = key.toLowerCase();
+  let best = null, bestD = 3;
+  for (const name of CSS_PROPERTIES) {
+    const n = name.toLowerCase();
+    if (Math.abs(n.length - k.length) >= bestD) continue;
+    const d = Array.from({ length: k.length + 1 }, (_, i) => [i, ...Array(n.length).fill(0)]);
+    for (let j = 1; j <= n.length; j++) d[0][j] = j;
+    for (let i = 1; i <= k.length; i++) for (let j = 1; j <= n.length; j++) d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (k[i - 1] === n[j - 1] ? 0 : 1));
+    if (d[k.length][n.length] < bestD) { bestD = d[k.length][n.length]; best = name; }
+  }
+  return best;
+}
 
 const COLOR_VAR_RE = /^--(color|bg|fg|surface|text|border|brand|accent|muted|danger|success|warning|info|ink|fill|stroke)(-|$)/i;
 const SPACE_VAR_RE = /^--(space|spacing|gap|pad|padding|margin|inset)(-|$)/i;
@@ -317,9 +333,17 @@ export function analyzeDesignLint(nodeIds, doc, { lint = true, limit = 20, props
     return out.length ? out : null;
   };
 
-  const hints = new Set();
+  // Hint text → the layers it applies to. Every hint names its layer(s) as "Name (id)", so an agent can act on it even
+  // when several layers share a name; the same advice for many layers is merged into one line.
+  const hints = new Map();
+  let n;
+  const add = (msg) => {
+    const who = `${n.name} (${n.id})`;
+    const list = hints.get(msg);
+    if (list) { if (!list.includes(who)) list.push(who); } else hints.set(msg, [who]);
+  };
   for (const id of nodeIds) {
-    const n = doc.nodes[id];
+    n = doc.nodes[id];
     if (!n) continue;
     for (const [k, rawVal] of Object.entries(n.styles || {})) {
       if (only && !only.has(k)) continue;
@@ -328,9 +352,16 @@ export function analyzeDesignLint(nodeIds, doc, { lint = true, limit = 20, props
       if (doc.pages.includes(n.parentId) && k === "backgroundColor" && String(rawVal).toLowerCase() === "#ffffff") continue;
       const v = String(rawVal);
 
+      // 0. Not a CSS property at all: the browser ignores it, so the style silently does nothing.
+      if (!CSS_PROPERTIES.has(k)) {
+        const near = closestProperty(k);
+        add(`${k} isn't a CSS property, so it has no effect${near ? ` (did you mean ${near}?)` : ""}`);
+        continue;
+      }
+
       // 1. Unknown var(--...) references
       for (const ref of varsIn(v)) {
-        if (!(ref in vars)) hints.add(`${n.name}: var(${ref}) isn't defined in the root CSS (add it with update_root_css)`);
+        if (!(ref in vars)) add(`var(${ref}) isn't defined in the root CSS (add it with update_root_css)`);
       }
 
       if (!lint) continue;
@@ -338,7 +369,7 @@ export function analyzeDesignLint(nodeIds, doc, { lint = true, limit = 20, props
       // 2. Exact match to a root variable
       const known = inCategory(byValue.get(v.toLowerCase()), k, v);
       if (known) {
-        hints.add(`${k}: ${v} is the root variable ${known.join(" / ")}; use ${known.map((x) => `var(${x})`).join(" or ")} so it stays shared`);
+        add(`${k}: ${v} is the root variable ${known.join(" / ")}; use ${known.map((x) => `var(${x})`).join(" or ")} so it stays shared`);
         continue;
       }
       if (v.includes("var(") || ZERO_OR_KEYWORD_RE.test(v.trim())) continue;
@@ -347,13 +378,13 @@ export function analyzeDesignLint(nodeIds, doc, { lint = true, limit = 20, props
       const nc = normalizeCssColor(v);
       const colorMatches = nc ? inCategory(byNormColor.get(nc), k, v) : null;
       if (colorMatches) {
-        hints.add(`${k}: ${v} matches the root variable ${colorMatches.join(" / ")}; use ${colorMatches.map((x) => `var(${x})`).join(" or ")} so it stays shared`);
+        add(`${k}: ${v} matches the root variable ${colorMatches.join(" / ")}; use ${colorMatches.map((x) => `var(${x})`).join(" or ")} so it stays shared`);
         continue;
       }
       const np = normalizeDimensionPx(v);
       const pxMatches = np ? inCategory(byNormPx.get(np), k, v) : null;
       if (pxMatches) {
-        hints.add(`${k}: ${v} matches the root variable ${pxMatches.join(" / ")}; use ${pxMatches.map((x) => `var(${x})`).join(" or ")} so it stays shared`);
+        add(`${k}: ${v} matches the root variable ${pxMatches.join(" / ")}; use ${pxMatches.map((x) => `var(${x})`).join(" or ")} so it stays shared`);
         continue;
       }
 
@@ -369,7 +400,7 @@ export function analyzeDesignLint(nodeIds, doc, { lint = true, limit = 20, props
           if (m) hits.push(`${p} → var(${m[0]})`);
         }
         if (hits.length) {
-          hints.add(`${n.name}: ${k}: ${v} repeats root variable values (${hits.join(", ")})`);
+          add(`${k}: ${v} repeats root variable values (${hits.join(", ")})`);
           continue;
         }
       }
@@ -380,11 +411,13 @@ export function analyzeDesignLint(nodeIds, doc, { lint = true, limit = 20, props
         if (cat === "spacing" || cat === "radius" || cat === "fontSize" || cat === "fontFamily" || (cat === "color" && COLOR_VAL_RE.test(v.trim()))) {
           const sample = byCategory[cat].slice(0, 4).join(", ");
           const more = byCategory[cat].length > 4 ? ", …" : "";
-          hints.add(`${n.name}: ${k}: ${v} doesn't use a ${CATEGORY_LABEL[cat]} token (defined: ${sample}${more})`);
+          add(`${k}: ${v} doesn't use a ${CATEGORY_LABEL[cat]} token (defined: ${sample}${more})`);
         }
       }
     }
     if (hints.size >= limit) break;
   }
-  return [...hints].slice(0, limit);
+  return [...hints].slice(0, limit).map(([msg, who]) => (who.length === 1
+    ? `${who[0]}: ${msg}`
+    : `${msg} — on ${who.length} layers: ${who.slice(0, 3).join(", ")}${who.length > 3 ? `, +${who.length - 3} more` : ""}`));
 }

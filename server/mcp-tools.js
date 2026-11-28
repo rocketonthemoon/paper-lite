@@ -102,7 +102,11 @@ takes. Aim for 2–4 calls per screen, not 10–15:
 `;
 
 const trunc = (s, n = 60) => (s && s.length > n ? `${s.slice(0, n - 1)}…` : s || undefined);
-const text = (value) => ({ content: [{ type: "text", text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }] });
+// Compact JSON: indentation costs agents ~40% more tokens for the same data.
+const text = (value) => ({ content: [{ type: "text", text: typeof value === "string" ? value : JSON.stringify(value) }] });
+// Long id lists in write results: the first few are enough to act on; the count says how many there were.
+const MAX_LISTED = 50;
+const capList = (list, key) => (list.length > MAX_LISTED ? { [key]: list.slice(0, MAX_LISTED), [`${key}Total`]: list.length } : { [key]: list });
 const READ = { readOnlyHint: true, openWorldHint: false };
 const WRITE = { readOnlyHint: false, destructiveHint: false, openWorldHint: false };
 // Unknown arguments are refused instead of silently dropped: a typo such as `style` for `styles` would otherwise
@@ -178,7 +182,10 @@ export function registerTools(mcpServer, ctx) {
       rootCss: (({ vars, definedClasses }) => ({ vars: Object.keys(vars), classes: definedClasses }))(ctx.rootCss.get()),
       selection: ctx.selection().ids,
       openComments: ctx.comments.openCount(),
-      agentWorkingOn: ctx.presence().map((p) => p.id),
+      ...(() => {
+        const ids = ctx.presence().map((p) => p.id);
+        return ids.length > 20 ? { agentWorkingOn: ids.slice(0, 20), agentWorkingOnTotal: ids.length } : { agentWorkingOn: ids };
+      })(),
       screenshots: ctx.renderer.available ? "available" : "unavailable (no Chrome/Chromium found; set CHROME_PATH)",
     });
   });
@@ -202,10 +209,15 @@ export function registerTools(mcpServer, ctx) {
   }, async ({ nodeId, depth = 3 }) => text(ctx.outline(nodeId || S().rootId, depth)));
 
   server.registerTool("get_children", {
-    description: "Direct children of a layer (id, name, tag, text, size, child count).",
-    inputSchema: { nodeId: z.string() },
+    description: "Direct children of a layer (id, name, tag, text, size, child count). Returns a list; when there are more than `limit` (default 100) it returns { children, total, nextOffset } — call again with offset: nextOffset for the rest.",
+    inputSchema: { nodeId: z.string(), offset: z.number().int().min(0).optional(), limit: z.number().int().min(1).max(500).optional() },
     annotations: READ,
-  }, async ({ nodeId }) => text(ctx.getNode(nodeId).children.map(summary)));
+  }, async ({ nodeId, offset = 0, limit = 100 }) => {
+    const all = ctx.getNode(nodeId).children;
+    const page = all.slice(offset, offset + limit).map(summary);
+    if (offset === 0 && all.length <= limit) return text(page);
+    return text({ children: page, total: all.length, offset, ...(offset + limit < all.length ? { nextOffset: offset + limit } : {}) });
+  });
 
   server.registerTool("get_node_info", {
     description: "Everything about one layer: name, tag, text, shared classes, its own camelCase styles, attributes, parent, artboard, ancestor path and child summaries.",
@@ -220,26 +232,35 @@ export function registerTools(mcpServer, ctx) {
       id: n.id, name: n.name, tag: n.tag, text: n.text || undefined, classes: n.classes?.length ? n.classes : undefined, styles: n.styles, attrs: Object.keys(n.attrs || {}).length ? n.attrs : undefined,
       parentId: n.parentId, pageId: ctx.pageOf(n.id), artboardId: ctx.isPage(n.id) ? undefined : ctx.artboardOf(n.id),
       ...(n.componentId ? { component: { id: n.componentId, key: n.componentKey, rootId: n.componentRootId, overrides: n.componentOverrides } } : {}),
-      path: path.join(" / "), children: n.children.map(summary),
+      path: path.join(" / "),
+      children: n.children.slice(0, 50).map(summary),
+      ...(n.children.length > 50 ? { childrenTotal: n.children.length, more: `get_children({ nodeId: "${n.id}", offset: 50 }) for the rest` } : {}),
     });
   });
 
   server.registerTool("find_nodes", {
-    description: "Search layers in the open project (all pages) by name or text (case-insensitive), optionally filtered by tag and artboard.",
+    description: "Search layers in the open project (all pages, in document order) by name or text (case-insensitive), optionally filtered by tag and artboard. Returns a list; when more than `limit` (default 30) match it returns { nodes, more: true } — narrow the query or raise limit.",
     inputSchema: { query: z.string().optional(), tag: z.string().optional(), artboardId: z.string().optional(), limit: z.number().int().min(1).max(200).optional() },
     annotations: READ,
   }, async ({ query = "", tag, artboardId, limit = 30 }) => {
     const q = query.toLowerCase();
+    const s = S();
     const out = [];
-    for (const n of Object.values(S().nodes)) {
-      if (ctx.isPage(n.id)) continue;
+    let more = false;
+    // Document order (pages, then each tree depth-first), so results read top to bottom like the layers panel.
+    const order = [];
+    const walk = (id) => { order.push(id); for (const c of s.nodes[id]?.children || []) walk(c); };
+    for (const pid of s.pages) walk(pid);
+    for (const id of order) {
+      const n = s.nodes[id];
+      if (!n || ctx.isPage(n.id)) continue;
       if (tag && n.tag !== tag) continue;
       if (q && !n.name.toLowerCase().includes(q) && !n.text.toLowerCase().includes(q) && n.id !== query) continue;
       if (artboardId && ctx.artboardOf(n.id) !== artboardId) continue;
-      out.push({ ...summary(n.id), artboard: S().nodes[ctx.artboardOf(n.id)]?.name, page: S().nodes[ctx.pageOf(n.id)]?.name });
-      if (out.length >= limit) break;
+      if (out.length >= limit) { more = true; break; }
+      out.push({ ...summary(n.id), artboard: s.nodes[ctx.artboardOf(n.id)]?.name, page: s.nodes[ctx.pageOf(n.id)]?.name });
     }
-    return text(out);
+    return text(more ? { nodes: out, more: true } : out);
   });
 
   server.registerTool("get_computed_styles", {
@@ -298,6 +319,7 @@ export function registerTools(mcpServer, ctx) {
           { type: "text", text: `${S().nodes[id].name} (${id})${vpLabel} · ${shot.width}×${shot.height}px at scale ${shot.scale}` },
         );
         if (shot.diagnostics) {
+          ctx.explainAudit(shot.diagnostics);
           content.push({ type: "text", text: JSON.stringify({ diagnostics: shot.diagnostics }, null, 2) });
         }
       }
@@ -392,7 +414,7 @@ export function registerTools(mcpServer, ctx) {
   }, async ({ html, parentId, targetNodeId, mode = "insert-children", index, lint = true }) => {
     const res = ctx.writeHtml({ html, parentId, targetNodeId, mode, index, lint });
     ctx.touch(res.created.map((c) => c.id), "write_html", res.created[0]?.name || "");
-    return text(res);
+    return text({ ...res, ...capList(res.created, "created") });
   });
 
   server.registerTool("create_artboard", {
@@ -420,7 +442,12 @@ export function registerTools(mcpServer, ctx) {
       styles: styleSchema.optional(), attrs: z.record(z.string(), z.string()).optional(), index: z.number().int().optional(),
     },
     annotations: WRITE,
-  }, async (args) => { const n = ctx.createNode(args, "mcp"); ctx.touch([n.id], "create_node", n.name); return text(summary(n.id)); });
+  }, async (args) => {
+    const n = ctx.createNode(args, "mcp");
+    ctx.touch([n.id], "create_node", n.name);
+    const hints = args.styles ? ctx.rootCss.hints([n.id], { props: Object.keys(args.styles) }) : [];
+    return text(hints.length ? { ...summary(n.id), hints } : summary(n.id));
+  });
 
   server.registerTool("update_styles", {
     description: "Batch style changes in one undo step: [{ nodeIds: [...], styles: { camelCase: value | null } }]. Put every style change you have in one call.",
@@ -505,7 +532,8 @@ export function registerTools(mcpServer, ctx) {
     const res = ctx.updateNodesMatching(args, "mcp");
     if (res.nodeIds.length) ctx.touch(res.nodeIds, "update_nodes_matching", `${res.updated} layers`);
     const hints = args.styles && res.nodeIds.length ? ctx.rootCss.hints(res.nodeIds, { props: Object.keys(args.styles) }) : [];
-    return text(hints.length ? { ...res, hints } : res);
+    const out = { ...res, ...capList(res.nodeIds, "nodeIds") };
+    return text(hints.length ? { ...out, hints } : out);
   });
 
   server.registerTool("set_text_content", {

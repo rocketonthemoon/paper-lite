@@ -5,7 +5,7 @@
 // HTML/JSX exports and single-step undo all work automatically.
 import {
   HttpError, COMPONENT_NAME_RE, SLOT_NAME_RE, SVG_TAGS, VOID_TAGS,
-  cleanClassList, cleanName, cleanText, cleanTag, definedRootClasses, lenientMerge, mergeAttrs, mergeStyles,
+  cleanClassList, cleanName, cleanText, didYouMean, cleanTag, definedRootClasses, lenientMerge, mergeAttrs, mergeStyles,
   newId, normalizeComponentTree,
 } from "./model.js";
 import { htmlToSpecs } from "./html-import.js";
@@ -465,7 +465,7 @@ export function createComponentEngine({
   function instantiateComponent({ component, parentId, index, name, overrides }, source = "mcp") {
     const s0 = getState();
     const comp = s0.components?.[component];
-    if (!comp) throw new HttpError(404, `Component "${component}" not found`);
+    if (!comp) throw new HttpError(404, `Component "${component}" not found${didYouMean("component", component, Object.values(getState().components || {}))}`);
     const parent = getNode((typeof parentId === "string" ? parentId.trim() : "") || s0.rootId);
     assertCanNest(parent, comp.tree.tag);
     const warnings = [];
@@ -496,7 +496,7 @@ export function createComponentEngine({
 
   function updateComponent({ component, html, slot = "root", patch, appendHtml, removeSlot }, source = "mcp") {
     const prevComp = getState().components?.[component];
-    if (!prevComp) throw new HttpError(404, `Component "${component}" not found`);
+    if (!prevComp) throw new HttpError(404, `Component "${component}" not found${didYouMean("component", component, Object.values(getState().components || {}))}`);
     if (html === undefined && !patch && !appendHtml?.html && !removeSlot) throw new HttpError(400, "Nothing to update: pass html, patch, appendHtml or removeSlot");
     const warnings = [];
     let nextTree;
@@ -576,7 +576,7 @@ export function createComponentEngine({
 
   function deleteComponent({ component, detach = true }, source = "mcp") {
     const comp = getState().components?.[component];
-    if (!comp) throw new HttpError(404, `Component "${component}" not found`);
+    if (!comp) throw new HttpError(404, `Component "${component}" not found${didYouMean("component", component, Object.values(getState().components || {}))}`);
     let detachedInstances = 0;
     mutate(source, (s) => {
       delete s.components[comp.id];
