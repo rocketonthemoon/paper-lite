@@ -982,6 +982,7 @@ function commit(source, patch, meta = null, startCpId = null) {
     id: newId(),
     patch,
     source: histSource,
+    ...(histSource === "mcp" ? { agentId: mcpContextStore.getStore()?.agent?.id || null, agentName: mcpContextStore.getStore()?.agent?.name || "Claude" } : {}),
     tool,
     target,
     label,
@@ -1046,17 +1047,24 @@ function stepHistory(source, direction) {
 
 // undo / redo for agents. They report which step moved, and refuse to move a step the user made unless asked:
 // an agent undoing "its last change" must not silently throw away an edit the user made in between.
-function agentHistoryStep(direction, { includeUserEdits = false } = {}) {
+function agentHistoryStep(direction, { includeUserEdits = false, includeOtherAgentsEdits = false } = {}) {
   const idx = direction === "undo" ? historyCursor : historyCursor + 1;
   const entry = historyTimeline[idx];
   const key = direction === "undo" ? "undone" : "redone";
   if (idx < 0 || !entry) return { [key]: false, reason: `Nothing to ${direction}` };
-  const by = entry.source === "mcp" ? "agent" : "user";
+  const me = mcpContextStore.getStore()?.agent?.id || null;
+  // Steps recorded before agents were told apart (no agentId) count as this agent's.
+  const by = entry.source !== "mcp" ? "user" : (!entry.agentId || !me || entry.agentId === me ? "agent" : "another agent");
+  const which = direction === "undo" ? "last edit" : "next edit to redo";
+  const doing = direction === "undo" ? "Undoing" : "Redoing";
   if (by === "user" && !includeUserEdits) {
-    throw new HttpError(409, `The ${direction === "undo" ? "last edit" : "next edit to redo"} was made by the user ("${entry.label}", ${entry.at}). ${direction === "undo" ? "Undoing" : "Redoing"} it would change their work, so nothing was done. Pass includeUserEdits: true only if the user asked for that`);
+    throw new HttpError(409, `The ${which} was made by the user ("${entry.label}", ${entry.at}). ${doing} it would change their work, so nothing was done. Pass includeUserEdits: true only if the user asked for that`);
+  }
+  if (by === "another agent" && !includeOtherAgentsEdits) {
+    throw new HttpError(409, `The ${which} was made by another agent session (${entry.agentName}: "${entry.label}", ${entry.at}). ${doing} it would change its work, so nothing was done. Pass includeOtherAgentsEdits: true only if the user asked for that`);
   }
   stepHistory("mcp", direction);
-  return { [key]: true, step: { label: entry.label, by, at: entry.at } };
+  return { [key]: true, step: { label: entry.label, by, ...(by === "another agent" ? { agent: entry.agentName } : {}), at: entry.at } };
 }
 
 function jumpHistory(source, targetIndex) {
@@ -1187,8 +1195,12 @@ function agentFromRequest(req, initClientName = null) {
       color: AGENT_COLORS[idx % AGENT_COLORS.length],
     };
     agentSessions.set(key, sess);
-  } else if (initClientName) {
-    sess.name = friendlyAgentName(initClientName);
+    // Every new MCP session adds one; keep the most recent few hundred so a long-running server doesn't grow forever.
+    if (agentSessions.size > 500) agentSessions.delete(agentSessions.keys().next().value);
+  } else {
+    agentSessions.delete(key); // most recently used last, so eviction drops idle sessions first
+    agentSessions.set(key, sess);
+    if (initClientName) sess.name = friendlyAgentName(initClientName);
   }
   return sess;
 }
@@ -1246,9 +1258,10 @@ function setAgentCursor({ nodeIds, tool, detail, mode = "edit" }) {
 function touch(nodeIds, toolName = null, detail = null) {
   const store = mcpContextStore.getStore();
   const label = store?.agent?.name || "Agent";
+  const agentId = store?.agent?.id || null;
   const wasEmpty = presenceList().length === 0;
   const now = Date.now();
-  for (const id of nodeIds) if (state.nodes[id] && !isPage(id)) presence.set(id, { label, at: now });
+  for (const id of nodeIds) if (state.nodes[id] && !isPage(id)) presence.set(id, { label, agentId, at: now });
   setAgentCursor({ nodeIds, tool: toolName || store?.tool, detail: detail || store?.detail, mode: "edit" });
   const nowNonEmpty = presenceList().length > 0;
   emitPresence(wasEmpty !== nowNonEmpty);
@@ -1263,12 +1276,14 @@ function look(nodeIds, toolName = null, detail = null) {
 function finishWorking(nodeIds) {
   const wasNonEmpty = presenceList().length > 0;
   const store = mcpContextStore.getStore();
+  // Only this agent's outlines: another agent still working must keep showing what it's on.
+  const mine = (id) => !store?.agent?.id || presence.get(id)?.agentId === store.agent.id;
   if (!nodeIds?.length) {
-    presence.clear();
+    for (const id of [...presence.keys()]) if (mine(id)) presence.delete(id);
     if (store?.agent?.id) agentCursors.delete(store.agent.id);
     else agentCursors.clear();
   } else {
-    nodeIds.forEach((id) => presence.delete(id));
+    nodeIds.forEach((id) => { if (mine(id)) presence.delete(id); });
     if (store?.agent?.id) agentCursors.delete(store.agent.id);
   }
   const nowEmpty = presenceList().length === 0;

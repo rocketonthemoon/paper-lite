@@ -217,6 +217,29 @@ test("MCP edge cases: instances in duplicated containers, artboard sizes and pla
     assert.equal(reopened.status, "replied");
   });
 
+  await t.test("two agents at once: neither undoes nor clears the other's work by default", async () => {
+    const as = (client) => (name, args) => mcpCall(srv.baseUrl, name, args, { "x-weft-client": client });
+    const A = as("agent-a"), B = as("agent-b");
+    const mineA = await A("create_node", { parentId: a.id, name: "From A" });
+    const mineB = await B("create_node", { parentId: a.id, name: "From B" });
+    await assert.rejects(A("undo"), /another agent session/);
+    assert.ok((await state()).nodes[mineB.id], "B's layer is still there");
+    assert.equal((await B("undo")).step.by, "agent", "B can undo its own step");
+    assert.equal((await B("redo")).redone, true);
+    const forced = await A("undo", { includeOtherAgentsEdits: true });
+    assert.equal(forced.step.by, "another agent");
+    await A("redo", { includeOtherAgentsEdits: true });
+
+    await A("update_styles", { updates: [{ nodeIds: [mineA.id], styles: { color: "red" } }] });
+    await B("update_styles", { updates: [{ nodeIds: [mineB.id], styles: { color: "blue" } }] });
+    await B("finish_working_on_nodes", {});
+    const working = (await A("get_basic_info")).agentWorkingOn;
+    assert.ok(working.includes(mineA.id), "A's outline survives B finishing");
+    assert.ok(!working.includes(mineB.id), "B's outline is gone");
+    await A("finish_working_on_nodes", {});
+    await A("delete_nodes", { nodeIds: [mineA.id, mineB.id] });
+  });
+
   await t.test("update_root_css warns about var() loops", async () => {
     const res = await call("update_root_css", { vars: { "--x": "var(--y)", "--y": "var(--x)", "--fine": "var(--x)" } });
     assert.ok(res.warnings.some((w) => w.includes("--x → --y → --x")), JSON.stringify(res.warnings));

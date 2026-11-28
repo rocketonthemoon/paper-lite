@@ -886,12 +886,13 @@ export function registerTools(mcpServer, ctx) {
   }, async (args) => text(ctx.components.remove(args, "mcp")));
 
   const includeUserEdits = z.boolean().optional().describe("Also undo/redo a step the user made in the UI. Default false: such a step is refused, so the user's work is never discarded by accident");
+  const includeOtherAgentsEdits = z.boolean().optional().describe("Also undo/redo a step another agent made. Default false: such a step is refused, so two agents working at once can't undo each other");
   server.registerTool("undo", {
-    description: "Undo the last canvas edit (one tool call is one step) and say which step it was. Refuses when the last step is the user's own edit, unless includeUserEdits is true.",
-    inputSchema: { includeUserEdits }, annotations: WRITE,
+    description: "Undo the last canvas edit (one tool call is one step) and say which step it was. Refuses when the last step is the user's edit or another agent's, unless includeUserEdits / includeOtherAgentsEdits is true.",
+    inputSchema: { includeUserEdits, includeOtherAgentsEdits }, annotations: WRITE,
   }, async (args) => text(ctx.agentStep("undo", args)));
   server.registerTool("redo", {
-    description: "Redo the last undone edit and say which step it was. Refuses a step the user made, unless includeUserEdits is true.",
-    inputSchema: { includeUserEdits }, annotations: WRITE,
+    description: "Redo the last undone edit and say which step it was. Refuses a step the user or another agent made, unless includeUserEdits / includeOtherAgentsEdits is true.",
+    inputSchema: { includeUserEdits, includeOtherAgentsEdits }, annotations: WRITE,
   }, async (args) => text(ctx.agentStep("redo", args)));
 }
