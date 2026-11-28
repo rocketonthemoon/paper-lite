@@ -399,6 +399,19 @@ test("MCP edge cases: instances in duplicated containers, artboard sizes and pla
     assert.equal(await cursorOf((x) => x.tool === "undo" && x.nodeIds.length === 0), undefined);
   });
 
+  await t.test("a checkpoint of ~1,500 layers saves fully and restores exactly", async () => {
+    const big = await call("create_artboard", { name: "Big checkpoint", width: 1200, height: 3000 });
+    await call("write_html", { parentId: big.id, html: Array.from({ length: 500 }, (_, i) => `<div data-name="row ${i}" style="padding:${i % 9}px"><p>text ${i}</p><span>${"x".repeat(i % 40)}</span></div>`).join("") });
+    const snapshot = (await state()).nodes;
+    const cp = await call("save_checkpoint", { name: "big one" });
+    await call("delete_nodes", { nodeIds: [big.id] });
+    await call("restore_checkpoint", { id: cp.id, force: true });
+    assert.deepStrictEqual((await state()).nodes, snapshot, "every layer comes back exactly");
+    const listed = (await call("list_checkpoints")).find((c) => c.id === cp.id);
+    assert.ok(listed.commit, "the checkpoint is a saved commit");
+    await call("delete_nodes", { nodeIds: [big.id] });
+  });
+
   await t.test("update_root_css warns about var() loops", async () => {
     const res = await call("update_root_css", { vars: { "--x": "var(--y)", "--y": "var(--x)", "--fine": "var(--x)" } });
     assert.ok(res.warnings.some((w) => w.includes("--x → --y → --x")), JSON.stringify(res.warnings));
