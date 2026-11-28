@@ -85,6 +85,28 @@ test("Blitz lays out text in the generic fonts like headless Chrome (serif by de
   }
 });
 
+test("Blitz measures transformed layers like getBoundingClientRect (rotate, scale, translate, origin, nesting)", {
+  skip: (!blitzBuilt && "weft-render not built") || (!chromeFound && "no Chrome"), timeout: 120_000,
+}, async (t) => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "weft-blitz-tf-"));
+  const srv = await startServer(dataDir);
+  const chrome = new Renderer(srv.baseUrl), blitz = new BlitzRenderer(srv.baseUrl);
+  t.after(async () => { chrome.stop(); blitz.stop(); await srv.stop(); await fs.rm(dataDir, { recursive: true, force: true }); });
+  const ab = await mcpCall(srv.baseUrl, "create_artboard", { name: "Transforms", width: 800, height: 400 });
+  await mcpCall(srv.baseUrl, "write_html", { parentId: ab.id, html: `<div data-name="Row" style="padding:40px;display:flex;gap:40px;flex-wrap:wrap">
+    <div data-name="Rotate" style="width:100px;height:60px;background:#36f;transform:rotate(30deg)"></div>
+    <div data-name="ScaleMove" style="width:100px;height:60px;background:#f60;transform:scale(1.5) translateX(10px)"></div>
+    <div data-name="Origin" style="width:100px;height:60px;background:#0a0;rotate:45deg;transform-origin:0 0"></div>
+    <div data-name="Outer" style="width:120px;height:80px;background:#eee;transform:rotate(-10deg)"><div data-name="Inner" style="margin:10px;width:50px;height:30px;background:#a0a;transform:rotate(20deg)"></div></div>
+    <div data-name="Props" style="width:100px;height:60px;background:#999;translate:20px 10px;scale:0.5"></div>
+  </div>` });
+  const s = await (await fetch(`${srv.baseUrl}/api/state`)).json();
+  const ids = Object.values(s.nodes).filter((n) => ["Rotate", "ScaleMove", "Origin", "Outer", "Inner", "Props"].includes(n.name)).map((n) => n.id);
+  const args = { artboardId: ab.id, nodeIds: ids, width: 800, height: 400, properties: ["width"] };
+  const c = await chrome.computed(args), b = await blitz.computed(args);
+  for (const id of ids) assert.deepEqual(b[id].box, c[id].box, `${s.nodes[id].name}: the transformed bounding box`);
+});
+
 test("PreferBlitz: Chrome for unsupported CSS, a missing sidecar or a Blitz error", async () => {
   const calls = [];
   const fake = (name, { available = true, fail = false } = {}) => ({
@@ -142,8 +164,8 @@ test("RENDERER=blitz: MCP screenshots and computed styles go through Blitz", {
   const box = Object.values(s.nodes).find((n) => n.name === "Box");
   const cs = await mcpCall(srv.baseUrl, "get_computed_styles", { nodeIds: [box.id], properties: ["width", "background-color"] });
   assert.deepEqual(cs[box.id], { box: { x: 20, y: 20, width: 100, height: 50 }, styles: { width: "100px", "background-color": "rgb(51, 102, 255)" } });
-  // Boxes Blitz reports differently are measured by Chrome: a shape inside an SVG (Blitz: 0×0) and a rotated layer
-  // (Chrome reports the rotated bounding box, Blitz the 20×20 layout box).
+  // A shape inside an SVG has no box in Blitz (0×0), so Chrome measures it; a rotated layer's bounding box comes from
+  // weft-render, which applies the transform like getBoundingClientRect.
   if (chromeFound) {
     await mcpCall(srv.baseUrl, "write_html", { parentId: ab.id, html: `<svg data-name="Ic" viewBox="0 0 10 10" width="10" height="10"><path data-name="Shape" d="M0 0L10 10" stroke="#000"/></svg><div data-name="Tilted" style="width:20px;height:20px;transform:rotate(10deg)"></div>` });
     const s2 = await (await fetch(`${srv.baseUrl}/api/state`)).json();

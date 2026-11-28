@@ -2767,12 +2767,25 @@ function setSessionTitle(text) {
 const renderKey = () => `${state.id}:${state.version}:${fontsRev}`;
 const chromeRenderer = new Renderer(`http://127.0.0.1:${PORT}`, { contentKey: renderKey });
 const blitzFallbacks = new Set();
-// CSS Blitz (0.3 beta) doesn't draw yet, found by comparing it with headless Chrome: artboards that use any of these,
-// on a layer or in the root CSS, go to Chrome.
-const BLITZ_UNSUPPORTED = ["filter", "backdropFilter", "clipPath", "columns", "columnCount", "columnWidth", "writingMode",
-  "textOverflow", "lineClamp", "WebkitLineClamp"];
+// CSS Blitz (0.3 beta) doesn't draw like Chrome yet, found by comparing the two: artboards that use any of these, on a
+// layer or in the root CSS, go to Chrome. Each check gets the value and says whether Blitz can't draw it.
+const always = () => true;
+const BLITZ_UNSUPPORTED = {
+  // Filters aren't drawn like Chrome: vello_cpu applies blur and drop-shadow only single-threaded, and even then clips
+  // the result to the element's box; colour filters (grayscale, brightness, …) aren't implemented.
+  filter: always,
+  backdropFilter: always,
+  // polygon(), ellipse() and inset() match Chrome; circle() resolves percentages differently and inset(… round …)
+  // loses its rounding.
+  clipPath: (v) => !/^(?:polygon|ellipse)\(|^inset\((?![^)]*\bround\b)/.test(String(v).trim()),
+  columns: always, columnCount: always, columnWidth: always,
+  writingMode: (v) => !/^horizontal-tb$/.test(String(v).trim()),
+  textOverflow: (v) => String(v).trim() !== "clip",
+  lineClamp: always, WebkitLineClamp: always,
+};
 function blitzUnsupported(artboardId) {
-  const uses = (styles) => BLITZ_UNSUPPORTED.find((k) => styles && styles[k] != null && styles[k] !== "" && styles[k] !== "none");
+  const uses = (styles) => Object.keys(BLITZ_UNSUPPORTED).find((k) => styles && styles[k] != null && styles[k] !== ""
+    && styles[k] !== "none" && BLITZ_UNSUPPORTED[k](styles[k]));
   for (const r of (state.rootCss || emptyRootCss()).rules) { const k = uses(r.styles); if (k) return `root CSS uses ${k}`; }
   const stack = [artboardId];
   while (stack.length) {
@@ -2784,17 +2797,12 @@ function blitzUnsupported(artboardId) {
   }
   return null;
 }
-// Boxes Blitz reports differently from Chrome's getBoundingClientRect, so get_computed_styles asks Chrome: shapes
-// inside an <svg> (Blitz draws an SVG as one image, its shapes have no box of their own), and layers under a transform
-// (Chrome reports the transformed bounding box, Blitz the untransformed one). Screenshots of both are fine.
-const TRANSFORMS = ["transform", "rotate", "scale", "translate"];
+// get_computed_styles asks Chrome for shapes inside an <svg>: Blitz draws an SVG as one image, so its shapes have no
+// box of their own. (Transformed layers are measured by weft-render itself, like getBoundingClientRect.)
 function blitzCantMeasure(artboardId, nodeIds = []) {
-  const transformed = (styles) => TRANSFORMS.some((k) => styles?.[k] != null && styles[k] !== "" && styles[k] !== "none");
-  if ((state.rootCss || emptyRootCss()).rules.some((r) => transformed(r.styles))) return "root CSS uses transforms";
   for (const id of nodeIds) {
-    for (let n = state.nodes[id]; n; n = n.id === artboardId ? null : state.nodes[n.parentId]) {
-      if (n.id !== id && n.tag === "svg") return `"${state.nodes[id].name}" is a shape inside an SVG`;
-      if (transformed(n.styles)) return `"${n.name}" is transformed`;
+    for (let n = state.nodes[state.nodes[id]?.parentId]; n && n.id !== artboardId; n = state.nodes[n.parentId]) {
+      if (n.tag === "svg") return `"${state.nodes[id].name}" is a shape inside an SVG`;
     }
   }
   return null;
