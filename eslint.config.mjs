@@ -3,7 +3,7 @@ export default [
     ignores: ["node_modules/**", "data/**", "public/**"],
   },
   {
-    files: ["*.js", "eslint.config.mjs", "test/*.js", "test/*.mjs", "scripts/*.mjs", "ui/vite.config.js"],
+    files: ["*.js", "server/*.js", "eslint.config.mjs", "test/*.js", "test/*.mjs", "scripts/*.mjs", "ui/vite.config.js"],
     languageOptions: {
       ecmaVersion: 2024,
       sourceType: "module",

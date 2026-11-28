@@ -1,6 +1,6 @@
 // Canvas document model: validation of tags / styles / attributes, comments and normalisation of project documents.
 import { randomBytes } from "node:crypto";
-import "./shared/root-css.js";
+import "../shared/root-css.js";
 
 export const ALLOWED_TAGS = new Set([
   "div", "section", "header", "footer", "nav", "main", "article", "aside",

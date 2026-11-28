@@ -59,7 +59,7 @@ async function startServer() {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "pl-ui-int-"));
   const port = await freePort();
   const baseUrl = `http://127.0.0.1:${port}`;
-  const child = spawn(process.execPath, ["server.js"], {
+  const child = spawn(process.execPath, ["server/index.js"], {
     cwd: PAPER_ROOT,
     env: { ...process.env, HOST: "127.0.0.1", PORT: String(port), PUBLIC_URL: baseUrl, DATA_DIR: dataDir, CHROME_PATH: "" },
     stdio: ["ignore", "pipe", "pipe"],

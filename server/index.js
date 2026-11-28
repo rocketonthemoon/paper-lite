@@ -24,7 +24,7 @@ import { MAX_ICONS, expandIconSpecs, parseSvgIcon } from "./icons.js";
 import { analyzeDesignLint, exportDesignTokens, importDesignTokens } from "./design-tokens.js";
 import { createComponentEngine, extractComponentOverridesFromSpec, trackNodeOverrides } from "./components.js";
 
-const ROOT = path.dirname(fileURLToPath(import.meta.url));
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."); // the repo root (data/, public/, shared/)
 const DATA_DIR = process.env.DATA_DIR || path.join(ROOT, "data");
 const PROJECTS_DIR = path.join(DATA_DIR, "projects");
 const WORKSPACE_FILE = path.join(DATA_DIR, "workspace.json");

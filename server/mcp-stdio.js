@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // stdio ⇄ Streamable HTTP relay for MCP clients that only launch stdio servers (Claude Desktop, Cursor, …).
 // The canvas server must already be running; this process just forwards JSON-RPC messages to its /mcp endpoint.
-//   { "command": "node", "args": ["<path>/mcp-stdio.js"], "env": { "WEFT_URL": "http://localhost:3000/mcp" } }
+//   { "command": "node", "args": ["<path>/server/mcp-stdio.js"], "env": { "WEFT_URL": "http://localhost:3000/mcp" } }
 import { randomBytes } from "node:crypto";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";

@@ -88,7 +88,7 @@ async function startTestServer({ chromePath = "" } = {}) {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "pl-tools-test-"));
   const port = await freePort();
   const baseUrl = `http://127.0.0.1:${port}`;
-  const child = spawn(process.execPath, ["server.js"], {
+  const child = spawn(process.execPath, ["server/index.js"], {
     cwd: PAPER_ROOT,
     env: { ...process.env, HOST: "127.0.0.1", PORT: String(port), PUBLIC_URL: baseUrl, DATA_DIR: dataDir, CHROME_PATH: chromePath },
     stdio: ["ignore", "pipe", "pipe"],
@@ -1239,7 +1239,7 @@ test("persistence: projects and edits survive a restart", { timeout: 60_000 }, a
 
   const port = await freePort();
   const B2 = `http://127.0.0.1:${port}`;
-  const child = spawn(process.execPath, ["server.js"], {
+  const child = spawn(process.execPath, ["server/index.js"], {
     cwd: PAPER_ROOT,
     env: { ...process.env, HOST: "127.0.0.1", PORT: String(port), PUBLIC_URL: B2, DATA_DIR: copyDir, CHROME_PATH: "" },
     stdio: "ignore",
@@ -1284,7 +1284,7 @@ test("startup survives a corrupt project file and reports it clearly", { timeout
 
   const port = await freePort();
   const B = `http://127.0.0.1:${port}`;
-  const child = spawn(process.execPath, ["server.js"], {
+  const child = spawn(process.execPath, ["server/index.js"], {
     cwd: PAPER_ROOT,
     env: { ...process.env, HOST: "127.0.0.1", PORT: String(port), PUBLIC_URL: B, DATA_DIR: dir, CHROME_PATH: "" },
     stdio: "ignore",
@@ -1431,7 +1431,7 @@ test("stdio relay forwards MCP traffic to the HTTP server", { timeout: 60_000 },
   t.after(() => srv.stop());
 
   const runRelay = async (url, messages) => {
-    const relay = spawn(process.execPath, ["mcp-stdio.js"], { cwd: PAPER_ROOT, env: { ...process.env, PAPER_LITE_URL: url }, stdio: ["pipe", "pipe", "pipe"] });
+    const relay = spawn(process.execPath, ["server/mcp-stdio.js"], { cwd: PAPER_ROOT, env: { ...process.env, PAPER_LITE_URL: url }, stdio: ["pipe", "pipe", "pipe"] });
     let out = "";
     relay.stdout.on("data", (d) => { out += d.toString(); });
     for (const m of messages) relay.stdin.write(`${JSON.stringify(m)}\n`);

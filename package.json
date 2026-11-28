@@ -5,9 +5,9 @@
   "license": "Apache-2.0",
   "description": "weft — self-hosted HTML/CSS design canvas with a live MCP server",
   "type": "module",
-  "main": "server.js",
+  "main": "server/index.js",
   "scripts": {
-    "start": "node server.js",
+    "start": "node server/index.js",
     "prestart": "node scripts/ensure-ui-build.mjs",
     "build": "vite build --config ui/vite.config.js",
     "dev:ui": "vite --config ui/vite.config.js",

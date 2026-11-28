@@ -57,7 +57,7 @@ If your client only supports stdio, start the server first, then use the relay:
   "mcpServers": {
     "weft": {
       "command": "node",
-      "args": ["/absolute/path/to/weft/mcp-stdio.js"],
+      "args": ["/absolute/path/to/weft/server/mcp-stdio.js"],
       "env": { "WEFT_URL": "http://localhost:3000/mcp" }
     }
   }
@@ -81,16 +81,23 @@ If your client only supports stdio, start the server first, then use the relay:
 
 | File | Role |
 | --- | --- |
-| [`server.js`](server.js) | Express 5 server: REST API, SSE (`/events`), JSON persistence, history/checkpoints/comments/activity, export, and `/mcp` |
-| [`mcp-tools.js`](mcp-tools.js) | Zod schemas and handlers for all 49 MCP tools |
-| [`mcp-stdio.js`](mcp-stdio.js) | stdio ↔ HTTP relay for stdio-only clients |
-| [`model.js`](model.js) | Project/node/comment normalization, CSS and attribute validation |
-| [`html-import.js`](html-import.js) | `parse5`-based HTML → node converter used by `write_html` |
-| [`renderer.js`](renderer.js) | Chrome DevTools Protocol client for screenshots and computed styles |
-| [`checkpoint-store.js`](checkpoint-store.js) | Checkpoints as commits in a per-project bare git repo ([isomorphic-git](https://isomorphic-git.org)) |
-| [`fonts.js`](fonts.js) | Uploaded fonts (WOFF2/WOFF/TTF/OTF), Google Fonts, and `/fonts.css` |
+| [`server/index.js`](server/index.js) | Express 5 server: REST API, SSE (`/events`), JSON persistence, history/checkpoints/comments/activity, export, and `/mcp` |
+| [`server/mcp-tools.js`](server/mcp-tools.js) | Zod schemas and handlers for all 49 MCP tools |
+| [`server/mcp-stdio.js`](server/mcp-stdio.js) | stdio ↔ HTTP relay for stdio-only clients |
+| [`server/model.js`](server/model.js) | Project/node/comment normalization, CSS and attribute validation |
+| [`server/html-import.js`](server/html-import.js) | `parse5`-based HTML → node converter used by `write_html` |
+| [`server/renderer.js`](server/renderer.js) | Chrome DevTools Protocol client for screenshots and computed styles |
+| [`server/checkpoint-store.js`](server/checkpoint-store.js) | Checkpoints as commits in a per-project bare git repo ([isomorphic-git](https://isomorphic-git.org)) |
+| [`server/fonts.js`](server/fonts.js) | Uploaded fonts (WOFF2/WOFF/TTF/OTF), Google Fonts, and `/fonts.css` |
+| [`server/components.js`](server/components.js) | Reusable components: definitions, instances and overrides |
+| [`server/icons.js`](server/icons.js) | Icon registry (`<icon name>` in `write_html`) and SVG import |
+| [`server/design-tokens.js`](server/design-tokens.js) | Design tokens (W3C DTCG `tokens.json`) import/export and design lint |
+| [`server/audit.js`](server/audit.js) | Contrast and font checks run in the renderer (`audit`) |
 | [`ui/`](ui/) | Browser canvas UI source (Vite + Svelte 5; `npm run build` writes `public/`). [`ui/index.html`](ui/index.html) is the page (markup and CSS); [`ui/src/editor/`](ui/src/editor/) is the canvas engine and editor state, and panels and menus are Svelte components in [`ui/src/components/`](ui/src/components/) |
 | [`shared/root-css.js`](shared/root-css.js) | Root CSS parser/serialiser used by both the server and the editor (served at `/root-css.js`) |
+| [`test/`](test/) | `node:test` suites (`npm test`) and the linter (`npm run lint`) |
+| [`scripts/`](scripts/) | `ensure-ui-build.mjs`: rebuilds `public/` before `npm start` when `ui/` changed |
+| [`docs/todo.txt`](docs/todo.txt) | Original redesign backlog (historical notes) |
 
 ## HTTP endpoints
 
@@ -136,7 +143,7 @@ Each project's checkpoints are commits in a git repo (`DATA_DIR/projects/<id>.gi
 | `CHROME_FLAGS` | empty (`--no-sandbox --disable-dev-shm-usage --disable-gpu` in Docker) | Extra Chrome flags, space-separated |
 | `TAB_MEASURE_MS` | `500` | `get_computed_styles` first asks open editor tabs, which already have the artboard laid out (a few ms, and no headless Chrome start). A tab answers only if it shows that artboard at the current version; otherwise, or after this long, headless Chrome measures. `0` always uses headless Chrome |
 | `PERSIST_THROTTLE_MS` | `300` | Edits apply in memory at once; disk writes are coalesced to at most one per this interval (`0` writes immediately). Pending writes are flushed on shutdown |
-| `WEFT_URL` (or `PAPER_LITE_URL`) | `http://localhost:3000/mcp` | Server URL used by `mcp-stdio.js` |
+| `WEFT_URL` (or `PAPER_LITE_URL`) | `http://localhost:3000/mcp` | Server URL used by `server/mcp-stdio.js` |
 
 ## Development
 

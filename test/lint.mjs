@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const jsFiles = [
   ...fs.readdirSync(ROOT).filter((f) => f.endsWith(".js") || f.endsWith(".mjs")).map((f) => path.join(ROOT, f)),
+  ...fs.readdirSync(path.join(ROOT, "server")).filter((f) => f.endsWith(".js")).map((f) => path.join(ROOT, "server", f)),
   ...fs.readdirSync(path.join(ROOT, "test"))
     .filter((f) => f.endsWith(".js") || f.endsWith(".mjs"))
     .map((f) => path.join(ROOT, "test", f)),
