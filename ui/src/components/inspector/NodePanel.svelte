@@ -21,6 +21,10 @@
   const weights = ["", "100", "200", "300", "400", "500", "600", "700", "800", "900"];
   const opacity = $derived(st.opacity == null ? "100" : String(Math.round(h.num(st.opacity, 1) * 100)));
   const mine = $derived(n.classes || []);
+  // What the layer's shared classes set (later classes win), so a field the layer doesn't set itself shows the class
+  // value greyed out, as Figma does for values coming from a style, instead of a misleading "auto" or "none".
+  const fromClasses = $derived(Object.assign({}, ...mine.map((c) => h.baseStylesOf(c))));
+  const ph = (key, fallback) => (fromClasses[key] != null ? h.px(fromClasses[key]) : fallback);
   const avail = $derived(m.definedClasses.filter((c) => !mine.includes(c)));
   const classable = $derived(Object.keys(h.classableStyles(n)).length > 0);
   const summary = (c) => {
@@ -53,16 +57,14 @@
     <Fld label="X" key="left" value={st.left} disabled={!abs} placeholder={abs ? undefined : "—"} title={abs ? undefined : "Set Position to absolute to move freely"} />
     <Fld label="Y" key="top" value={st.top} disabled={!abs} placeholder={abs ? undefined : "—"} title={abs ? undefined : "Set Position to absolute to move freely"} />
   </div>
-  <div class="grid2"><Fld label="W" key="width" value={st.width} placeholder="auto" /><Fld label="H" key="height" value={st.height} placeholder="auto" /></div>
+  <div class="grid2"><Fld label="W" key="width" value={st.width} placeholder={ph("width", "auto")} /><Fld label="H" key="height" value={st.height} placeholder={ph("height", "auto")} /></div>
   {#if ab}
     <div class="chips compact">{#each presets as [lbl, pw, ph] (lbl)}<button type="button" class="chip" class:on={presetOn(pw, ph)} data-action="preset-size" data-w={pw ?? ""} data-h={ph}>{lbl}</button>{/each}</div>
     <div class="sub-h" title="Render this screen at another width to check its @media rules">Preview width</div>
     <div class="chips compact" id="vp-preview-chips">{#each [["390", 390], ["834", 834], ["1440", 1440], ["Actual", null]] as [lbl, vw] (lbl)}<button type="button" class="chip" class:on={vw === null ? !m.viewportOverride : m.viewportOverride === vw} data-action="preview-vp" data-w={vw ?? ""}>{lbl}</button>{/each}</div>
   {:else}
-    <div class="grid2">
-      <label class="fld"><span>Pos</span><select data-style="position">{#each ["static", "relative", "absolute"] as p (p)}<option selected={(st.position || "static") === p}>{p}</option>{/each}</select></label>
-      <label class="fld"><span>Display</span><select data-style="display">{#each displays as [v, l] (v)}<option value={v} selected={(st.display || "") === v}>{l}</option>{/each}</select></label>
-    </div>
+    <div class="grid2"><label class="fld wide"><span>Position</span><select data-style="position">{#each ["static", "relative", "absolute"] as p (p)}<option selected={(st.position || "static") === p}>{p}</option>{/each}</select></label></div>
+    <div class="grid2"><label class="fld wide"><span>Display</span><select data-style="display">{#each displays as [v, l] (v)}<option value={v} selected={(st.display || "") === v}>{l}</option>{/each}</select></label></div>
   {/if}
 </Section>
 
@@ -75,10 +77,10 @@
       <div class="align-grid" role="group" aria-label="Alignment">{#each alignCells as c (c.j + c.a)}<button data-action="align" data-j={c.j} data-a={c.a} class={c.on ? "on" : ""} title="{c.j} / {c.a}" aria-label="Align {c.j} / {c.a}"></button>{/each}</div>
       <div class="stack">
         <div class="seg"><button data-action="dir" data-dir="row" class={st.flexDirection !== "column" ? "on" : ""} title="Row"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 8h10M9.5 4.5L13 8l-3.5 3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg><span>Row</span></button><button data-action="dir" data-dir="column" class={st.flexDirection === "column" ? "on" : ""} title="Column"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 3v10M4.5 9.5L8 13l3.5-3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg><span>Column</span></button></div>
-        <Fld label="Gap" key="gap" value={st.gap} placeholder="0" />
+        <Fld label="Gap" key="gap" value={st.gap} placeholder={ph("gap", "0")} />
       </div>
     </div>
-    <div class="grid2"><Fld label="Padding" key="padding" value={st.padding} placeholder="0" wide /></div>
+    <div class="grid2"><Fld label="Padding" key="padding" value={st.padding} placeholder={ph("padding", "0")} wide /></div>
     <div class="grid2"><label class="fld wide"><span>Wrap</span><select data-style="flexWrap"><option value="">nowrap</option><option selected={st.flexWrap === "wrap"}>wrap</option></select></label></div>
   {/if}
   <label class="check"><input type="checkbox" data-style="overflow" value="hidden" checked={st.overflow === "hidden" || st.overflow === "clip"}> Clip content</label>
@@ -88,27 +90,27 @@
   {#snippet actions()}
     {#if st.backgroundColor}<button class="icon-btn" data-action="clear" data-key="backgroundColor" title="Remove fill" aria-label="Remove fill"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3.5 8h9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" /></svg></button>{/if}
   {/snippet}
-  <ColorFld key="backgroundColor" value={st.backgroundColor} />
+  <ColorFld key="backgroundColor" value={st.backgroundColor} placeholder={ph("backgroundColor", "none")} fallback={fromClasses.backgroundColor || ""} />
 </Section>
 
 <Section key="node-appearance" collapsible={false} title="Appearance">
-  <div class="grid2"><Fld label="Radius" key="borderRadius" value={st.borderRadius} placeholder="0" /><label class="fld"><span>Opacity</span><input data-style="opacity" data-kind="percent" value={opacity}></label></div>
-  <div class="grid2"><Fld label="Border" key="border" value={st.border} placeholder="none" mono wide /></div>
-  <div class="grid2"><Fld label="Shadow" key="boxShadow" value={st.boxShadow} placeholder="none" mono wide /></div>
+  <div class="grid2"><Fld label="Radius" key="borderRadius" value={st.borderRadius} placeholder={ph("borderRadius", "0")} /><label class="fld"><span>Opacity</span><input data-style="opacity" data-kind="percent" value={st.opacity == null && fromClasses.opacity != null ? "" : opacity} placeholder={fromClasses.opacity != null ? String(Math.round(h.num(fromClasses.opacity, 1) * 100)) : "100"}></label></div>
+  <div class="grid2"><Fld label="Border" key="border" value={st.border} placeholder={ph("border", "none")} mono wide /></div>
+  <div class="grid2"><Fld label="Shadow" key="boxShadow" value={st.boxShadow} placeholder={ph("boxShadow", "none")} mono wide /></div>
 </Section>
 
 {#if texty}
   <Section key="node-type" collapsible={false} title="Text style">
-    <div class="grid2"><Fld label="Font" key="fontFamily" value={st.fontFamily} placeholder="inherit" list="font-families" kind="font" wide /></div>
-    <div class="grid2"><Fld label="Size" key="fontSize" value={st.fontSize} placeholder="16" /><label class="fld"><span>Weight</span><select data-style="fontWeight">{#each weights as w (w)}<option value={w} selected={String(st.fontWeight || "") === w}>{w || "—"}</option>{/each}</select></label></div>
-    <div class="grid2"><Fld label="Line" key="lineHeight" value={st.lineHeight} placeholder="normal" /><Fld label="Letter" key="letterSpacing" value={st.letterSpacing} placeholder="0" /></div>
+    <div class="grid2"><Fld label="Font" key="fontFamily" value={st.fontFamily} placeholder={ph("fontFamily", "inherit")} list="font-families" kind="font" wide /></div>
+    <div class="grid2"><Fld label="Size" key="fontSize" value={st.fontSize} placeholder={ph("fontSize", "16")} /><label class="fld"><span>Weight</span><select data-style="fontWeight">{#each weights as w (w)}<option value={w} selected={String(st.fontWeight || "") === w}>{w || "—"}</option>{/each}</select></label></div>
+    <div class="grid2"><Fld label="Line" key="lineHeight" value={st.lineHeight} placeholder={ph("lineHeight", "normal")} /><Fld label="Letter" key="letterSpacing" value={st.letterSpacing} placeholder={ph("letterSpacing", "0")} /></div>
     <div class="typo-color-row">
-      <div class="color-wrap"><ColorFld key="color" value={st.color} placeholder="inherit" /></div>
+      <div class="color-wrap"><ColorFld key="color" value={st.color} placeholder={ph("color", "inherit")} fallback={fromClasses.color || ""} /></div>
       <div class="seg seg-align">{#each textAligns as [a, d] (a)}<button type="button" data-action="textAlign" data-v={a} class={(st.textAlign || "left") === a ? "on" : ""} title="Align {a}" aria-label="Align {a}"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path {d} stroke="currentColor" stroke-width="1.4" stroke-linecap="round" /></svg></button>{/each}</div>
     </div>
   </Section>
 {/if}
-{#if !n.children.length && !h.VOID_TAGS.has(n.tag) && !h.SVG_TAGS.has(n.tag)}
+{#if texty && !n.children.length && !h.SVG_TAGS.has(n.tag)}
   <Section key="node-text" collapsible={false} title="Text" info="Double-click the layer on the canvas to edit it in place">
     <textarea class="code text" data-field="text" value={n.text}></textarea>
   </Section>
