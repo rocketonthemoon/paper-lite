@@ -314,6 +314,13 @@ export function updateOverlay() {
       x: Math.round(cx), y: Math.round(cy), flipX: cx > stage.clientWidth - 210, flipY: cy > stage.clientHeight - 86,
     }];
   });
+  // Two agents working on the same spot: stack their cursor tags instead of drawing one on top of the other.
+  for (let i = 1; i < cursors.length; i++) {
+    for (let j = 0; j < i; j++) {
+      const a = cursors[j], b = cursors[i];
+      if (Math.abs(a.x - b.x) < 200 && Math.abs(a.y - b.y) < 54) b.y = a.y + (b.flipY ? -54 : 54);
+    }
+  }
   const root = ed.S.nodes[ed.S.rootId];
   let ab = ed.sel && ed.S.nodes[ed.sel];
   while (ab && ab.parentId !== ed.S.rootId) ab = ed.S.nodes[ab.parentId];

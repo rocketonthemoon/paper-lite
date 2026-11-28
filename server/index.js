@@ -1092,7 +1092,7 @@ function agentUndo(mine) {
     stepHistory("mcp", "undo");
     return { undone: true, mode: "history", step: stepInfo(e, mine) };
   }
-  const res = selectiveRevert([e], { source: "mcp", tool: "undo", label: `Undo · ${e.label}`, kind: "agent-undo", mine });
+  const res = selectiveRevert([e], { source: "mcp", tool: "undo", target: e.label, kind: "agent-undo", mine });
   e.revertedBy = res.entryId;
   return { undone: true, mode: "selective", step: stepInfo(e, mine), ...res.report };
 }
@@ -1114,13 +1114,14 @@ function agentRedo(mine) {
   }
   if (!undoEntry) return { redone: false, reason: "Nothing of yours to redo" };
   const target = historyTimeline.find((x) => x.id === undoEntry.revertOf?.[0]);
-  const res = selectiveRevert([undoEntry], { source: "mcp", tool: "redo", label: `Redo · ${target?.label || undoEntry.label}`, kind: "agent-redo", mine });
+  const res = selectiveRevert([undoEntry], { source: "mcp", tool: "redo", target: target?.label || undoEntry.target, kind: "agent-redo", mine });
   undoEntry.redoneBy = res.entryId;
   return { redone: true, mode: "selective", step: target ? stepInfo(target, mine) : { label: undoEntry.label }, ...res.report };
 }
 
 // Revert history entries' own changes as one new step. Throws (and records nothing) when nothing could be reverted.
-function selectiveRevert(entries, { source, tool, label, kind, mine = () => true }) {
+function selectiveRevert(entries, { source, tool, target, kind, mine = () => true }) {
+  const label = `${tool} · ${target}`;
   let out;
   mutate(source, (s) => {
     out = revertPatches(s, entries.map((e) => e.patch));
@@ -1130,7 +1131,7 @@ function selectiveRevert(entries, { source, tool, label, kind, mine = () => true
       throw err;
     }
     return out;
-  }, { tool, target: label, label, entryExtra: { kind, revertOf: entries.map((e) => e.id) } });
+  }, { tool, target, label, entryExtra: { kind, revertOf: entries.map((e) => e.id) } });
   const report = {
     changed: out.reverted.length,
     ...(out.skipped.length ? { kept: annotateSkipped(out.skipped, entries, mine) } : {}),
@@ -3535,7 +3536,7 @@ app.post("/api/activity/:id/revert", wrap(async (req) => {
       const author = sessionAuthor(targetSession);
       const res = selectiveRevert(steps, {
         source: who(req), tool: "Revert session", kind: "session-revert", mine: author,
-        label: `Revert session · ${targetSession.title || targetSession.agentName || "session"}`,
+        target: targetSession.title || `${targetSession.agentName || "agent"}'s session`,
       });
       for (const e of steps) e.revertedBy = res.entryId;
       markReverted();
