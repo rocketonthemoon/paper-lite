@@ -13,6 +13,10 @@
 //!
 //! Stylesheets, fonts and images are fetched once and kept in memory (like a browser's HTTP cache) until `assetsKey`
 //! changes, which the server bumps when the font library changes.
+//!
+//! The generic families `serif` and `sans-serif` (and text with no font-family, which is serif) resolve to the fonts
+//! Chrome uses by default (Times New Roman, Arial, or their metric-compatible stand-ins), not to whatever the system
+//! lists first for those names, so text wraps the same as in headless Chrome.
 use anyrender::{render_to_buffer, AntiAliasing, PaintScene as _};
 use anyrender_vello_cpu::VelloCpuImageRenderer;
 use base64::Engine as _;
@@ -25,6 +29,8 @@ use blitz_traits::net::{Bytes, Method, NetHandler, NetProvider, Request as NetRe
 use blitz_traits::NodeId;
 use std::collections::HashMap;
 use std::sync::Mutex;
+use parley::fontique::GenericFamily;
+use parley::FontContext;
 use peniko::{kurbo::Rect, Fill};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -105,13 +111,46 @@ impl NetHandler for Remember {
 struct Assets {
     key: String,
     cache: Arc<Mutex<HashMap<String, Cached>>>,
+    fonts: FontContext,
+}
+
+// Chrome's default fonts for the generic families, by platform, followed by metric-compatible replacements that
+// fontconfig substitutes for them (Liberation, Croscore) on Linux. The first one installed is used.
+#[cfg(target_os = "macos")]
+const CHROME_GENERICS: &[(GenericFamily, &[&str])] = &[
+    (GenericFamily::Serif, &["Times", "Times New Roman"]),
+    (GenericFamily::SansSerif, &["Helvetica", "Arial"]),
+    (GenericFamily::Monospace, &["Courier", "Courier New"]),
+];
+#[cfg(target_os = "windows")]
+const CHROME_GENERICS: &[(GenericFamily, &[&str])] = &[
+    (GenericFamily::Serif, &["Times New Roman"]),
+    (GenericFamily::SansSerif, &["Arial"]),
+    (GenericFamily::Monospace, &["Consolas", "Courier New"]),
+];
+// On Linux Chrome's monospace is fontconfig's "Monospace", which is what the system collection already returns.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const CHROME_GENERICS: &[(GenericFamily, &[&str])] = &[
+    (GenericFamily::Serif, &["Times New Roman", "Liberation Serif", "Tinos", "Times", "Nimbus Roman"]),
+    (GenericFamily::SansSerif, &["Arial", "Liberation Sans", "Arimo", "Helvetica", "Nimbus Sans"]),
+];
+
+/// System fonts, with the generic families put first on Chrome's defaults (the rest stay as fallbacks).
+fn chrome_like_fonts() -> FontContext {
+    let mut fonts = FontContext::new();
+    for (generic, names) in CHROME_GENERICS {
+        let Some(id) = names.iter().find_map(|n| fonts.collection.family_id(n)) else { continue };
+        let rest: Vec<_> = fonts.collection.generic_families(*generic).filter(|f| *f != id).collect();
+        fonts.collection.set_generic_families(*generic, std::iter::once(id).chain(rest));
+    }
+    fonts
 }
 
 fn main() {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("tokio runtime");
     let _guard = runtime.enter();
     let mut loaded: Option<Loaded> = None;
-    let mut assets = Assets { key: String::new(), cache: Arc::new(Mutex::new(HashMap::new())) };
+    let mut assets = Assets { key: String::new(), cache: Arc::new(Mutex::new(HashMap::new())), fonts: chrome_like_fonts() };
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout().lock();
     for line in stdin.lock().lines() {
@@ -143,7 +182,7 @@ fn handle(op: Op, loaded: &mut Option<Loaded>, assets: &mut Assets) -> Result<Va
                 assets.key = assets_key;
                 assets.cache.lock().unwrap().clear();
             }
-            *loaded = Some(load(&html, &base_url, width.max(1), height.max(1), &assets.cache));
+            *loaded = Some(load(&html, &base_url, width.max(1), height.max(1), &assets.cache, &assets.fonts));
             Ok(json!({ "ms": started.elapsed().as_millis() as u64 }))
         }
         Op::Screenshot { node_id, scale, max_size } => {
@@ -157,7 +196,7 @@ fn handle(op: Op, loaded: &mut Option<Loaded>, assets: &mut Assets) -> Result<Va
     }
 }
 
-fn load(html: &str, base_url: &str, width: u32, height: u32, cache: &Arc<Mutex<HashMap<String, Cached>>>) -> Loaded {
+fn load(html: &str, base_url: &str, width: u32, height: u32, cache: &Arc<Mutex<HashMap<String, Cached>>>, fonts: &FontContext) -> Loaded {
     let net = Arc::new(Provider::new(None));
     let provider = Arc::new(CachingProvider { inner: Arc::clone(&net), cache: Arc::clone(cache) });
     let mut doc = HtmlDocument::from_html(
@@ -165,6 +204,8 @@ fn load(html: &str, base_url: &str, width: u32, height: u32, cache: &Arc<Mutex<H
         DocumentConfig {
             base_url: Some(base_url.to_string()),
             net_provider: Some(provider as _),
+            // A copy per document: web fonts a page loads stay with that page.
+            font_ctx: Some(fonts.clone()),
             viewport: Some(Viewport::new(width, height, 1.0, ColorScheme::Light)),
             ..Default::default()
         },
