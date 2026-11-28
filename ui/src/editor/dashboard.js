@@ -175,18 +175,27 @@ export async function dashMenuAction(act) {
 // "Revert session" in the activity feed (DashActivity.svelte).
 export async function revertSession(id) {
   const url = `/api/activity/${encodeURIComponent(id)}/revert`;
-  const done = (res) => { if (res?.ok) toast("Reverted session to checkpoint"); };
-  // The server refuses when the revert would also throw away later edits by you or another agent; ask first.
+  // By default only this session's own changes are taken back; anything you or another agent changed since stays.
+  const done = (res) => {
+    if (!res?.ok) return;
+    if (res.mode === "restore") return toast("Restored the project to before the session");
+    const kept = res.kept?.length || 0, shared = res.keptShared?.length || 0;
+    toast(kept || shared
+      ? `Reverted the session. Kept ${plural(kept + shared, "change")} others made afterwards`
+      : "Reverted the session's changes");
+  };
   const res = await api("POST", url, {}, {
     onError: (status, data) => {
-      if (status !== 409 || !data?.othersEdits) return false;
+      if (status !== 409 || !data?.needsRestore) return false;
+      // Its steps aren't in the undo history any more (restart, or too old): offer the whole-project restore.
+      const loses = data.othersEdits ? ` This also discards ${plural(data.othersEdits, "later edit")} by ${data.othersWho.join(", ")}.` : "";
       openDashModal({
-        title: "Revert this session?",
-        message: `${data.error}. ${data.othersEdits === 1 ? "It was" : "They were"} made after this session started, so restoring its checkpoint loses ${data.othersEdits === 1 ? "it" : "them"} too.`,
-        okText: "Revert anyway",
+        title: "Restore to before this session?",
+        message: `${data.error.replace(/ Restore the project.*$/, "")}${loses}`,
+        okText: "Restore project",
         danger: true,
         input: false,
-        onOk: async () => done(await api("POST", url, { force: true })),
+        onOk: async () => done(await api("POST", url, { mode: "restore", force: true })),
       });
       return true;
     },

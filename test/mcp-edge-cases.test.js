@@ -131,22 +131,29 @@ test("MCP edge cases: instances in duplicated containers, artboard sizes and pla
     await call("delete_nodes", { nodeIds: [box.id] });
   });
 
-  await t.test("agent undo never discards a user's edit unless asked", async () => {
-    const n = await call("create_node", { parentId: a.id, name: "Mine" });
+  await t.test("agent undo takes back only its own step and keeps the user's later edit", async () => {
+    const n = await call("create_node", { parentId: a.id, name: "Mine", styles: { width: "40px" } });
+    await call("update_styles", { updates: [{ nodeIds: [n.id], styles: { width: "80px", color: "red" } }] });
     const res = await fetch(`${srv.baseUrl}/api/nodes/${n.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ styles: { color: "green" } }) });
     assert.equal(res.status, 200);
-    await assert.rejects(call("undo"), /made by the user .*nothing was done/);
-    assert.equal((await state()).nodes[n.id].styles.color, "green", "the user's edit is still there");
+    const undone = await call("undo");
+    assert.equal(undone.mode, "selective");
+    assert.equal(undone.step.by, "agent");
+    assert.deepEqual(undone.kept.map((k) => [k.layer, k.fields, k.editedBy]), [["Mine", ["styles.color"], ["you"]]]);
+    let st = (await state()).nodes[n.id].styles;
+    assert.equal(st.width, "40px", "the agent's own change is taken back");
+    assert.equal(st.color, "green", "the user's later edit is kept");
+    const redone = await call("redo");
+    assert.equal(redone.redone, true);
+    st = (await state()).nodes[n.id].styles;
+    assert.equal(st.width, "80px");
+    assert.equal(st.color, "green");
+    // Only when asked, and only when the user's step is the latest, does the agent move the user's step.
     const forced = await call("undo", { includeUserEdits: true });
-    assert.equal(forced.step.by, "user");
-    assert.equal((await state()).nodes[n.id].styles.color, undefined);
-    await assert.rejects(call("redo"), /made by the user/);
-    assert.equal((await call("redo", { includeUserEdits: true })).redone, true);
+    assert.equal(forced.step.by, "agent", "the latest step is the agent's redo, so this is still its own");
     await call("delete_nodes", { nodeIds: [n.id] });
-    const mine = await call("undo");
-    assert.equal(mine.step.by, "agent");
-    assert.match(mine.step.label, /delete/i);
   });
+
 
   await t.test("small result accuracy: move counts, copy names, import gaps, long replies", async () => {
     const n = await call("create_node", { parentId: a.id, name: "Twice" });
@@ -219,18 +226,20 @@ test("MCP edge cases: instances in duplicated containers, artboard sizes and pla
     assert.equal(reopened.status, "replied");
   });
 
-  await t.test("two agents at once: neither undoes nor clears the other's work by default", async () => {
+  await t.test("two agents at once: each undoes only its own step and never clears the other's outlines", async () => {
     const as = (client) => (name, args) => mcpCall(srv.baseUrl, name, args, { "x-weft-client": client });
     const A = as("agent-a"), B = as("agent-b");
     const mineA = await A("create_node", { parentId: a.id, name: "From A" });
     const mineB = await B("create_node", { parentId: a.id, name: "From B" });
-    await assert.rejects(A("undo"), /another agent session/);
-    assert.ok((await state()).nodes[mineB.id], "B's layer is still there");
-    assert.equal((await B("undo")).step.by, "agent", "B can undo its own step");
-    assert.equal((await B("redo")).redone, true);
-    const forced = await A("undo", { includeOtherAgentsEdits: true });
-    assert.equal(forced.step.by, "another agent");
-    await A("redo", { includeOtherAgentsEdits: true });
+    const undoneA = await A("undo");
+    assert.equal(undoneA.mode, "selective");
+    let s = await state();
+    assert.ok(!s.nodes[mineA.id], "A's own layer is taken back");
+    assert.ok(s.nodes[mineB.id], "B's layer stays");
+    assert.equal((await A("redo")).redone, true);
+    s = await state();
+    assert.ok(s.nodes[mineA.id] && s.nodes[mineB.id]);
+    assert.deepEqual(s.nodes[a.id].children.filter((c) => [mineA.id, mineB.id].includes(c)), [mineA.id, mineB.id], "redo puts A's layer back in its place");
 
     await A("update_styles", { updates: [{ nodeIds: [mineA.id], styles: { color: "red" } }] });
     await B("update_styles", { updates: [{ nodeIds: [mineB.id], styles: { color: "blue" } }] });
@@ -241,6 +250,7 @@ test("MCP edge cases: instances in duplicated containers, artboard sizes and pla
     await A("finish_working_on_nodes", {});
     await A("delete_nodes", { nodeIds: [mineA.id, mineB.id] });
   });
+
 
   await t.test("each MCP connection is its own agent: session id, color, name and outline color", async () => {
     // Same client name and User-Agent, like two Claude Code windows: before, these were one agent.
@@ -257,8 +267,6 @@ test("MCP edge cases: instances in duplicated containers, artboard sizes and pla
       const tool = async (c, name, args) => JSON.parse((await c.client.callTool({ name, arguments: args })).content[0].text);
       const x = await tool(one, "create_node", { parentId: a.id, name: "One" });
       const y = await tool(two, "create_node", { parentId: a.id, name: "Two" });
-      const undo = await one.client.callTool({ name: "undo", arguments: {} });
-      assert.ok(undo.isError && /another agent session/.test(undo.content[0].text), "separate agents can't undo each other");
 
       const ctl = new AbortController();
       const res = await fetch(`${srv.baseUrl}/events`, { signal: ctl.signal });
@@ -272,39 +280,64 @@ test("MCP edge cases: instances in duplicated containers, artboard sizes and pla
       assert.notEqual(cursorOne.color, cursorTwo.color, "different colors");
       assert.notEqual(cursorOne.name, cursorTwo.name, "different labels (Claude, Claude 2)");
       assert.equal(presence.nodes.find((n) => n.id === x.id).color, cursorOne.color, "outline in the agent's color");
+      const undo = JSON.parse((await one.client.callTool({ name: "undo", arguments: {} })).content[0].text);
+      assert.equal(undo.mode, "selective", "the other connection edited later, so only this one's own step goes");
+      const after = await state();
+      assert.ok(!after.nodes[x.id] && after.nodes[y.id], "separate agents never undo each other");
+      await tool(one, "redo", {});
       await tool(one, "delete_nodes", { nodeIds: [x.id, y.id] });
     } finally {
       for (const c of [one, two]) { await c.transport.terminateSession().catch(() => {}); await c.client.close(); }
     }
   });
 
-  await t.test("activity: one session per agent with its own title and checkpoint; reverting asks before discarding others' work", async () => {
+  await t.test("activity: one session per agent; reverting a session takes back only its own changes", async () => {
     const as = (client) => (name, args) => mcpCall(srv.baseUrl, name, args, { "x-weft-client": client });
     const A = as("act-a"), B = as("act-b");
     await A("set_session_title", { text: "A: header pass" });
     const na = await A("create_node", { parentId: a.id, name: "Header (A)" });
     await B("set_session_title", { text: "B: footer pass" });
     const nb = await B("create_node", { parentId: a.id, name: "Footer (B)" });
-    await A("update_styles", { updates: [{ nodeIds: [na.id], styles: { color: "red" } }] });
+    await A("update_styles", { updates: [{ nodeIds: [na.id, nb.id], styles: { color: "red" } }] });
+    await B("update_styles", { updates: [{ nodeIds: [nb.id], styles: { color: "blue" } }] });
     const { sessions } = await (await fetch(`${srv.baseUrl}/api/activity`)).json();
     const sa = sessions.find((x) => x.title === "A: header pass");
     const sb = sessions.find((x) => x.title === "B: footer pass");
     assert.ok(sa && sb && sa.id !== sb.id, "two sessions, each keeping its own title");
     assert.equal(sa.editCount, 2);
-    assert.equal(sb.editCount, 1);
-    assert.ok(sa.checkpointId && sb.checkpointId, "each agent's run has a checkpoint to revert to");
+    assert.ok(sa.checkpointId && sb.checkpointId, "each agent's run has a checkpoint to restore");
 
     const post = (body) => fetch(`${srv.baseUrl}/api/activity/${sa.id}/revert`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-    const refused = await post({});
+    const res = await post({});
+    assert.equal(res.status, 200);
+    const out = await res.json();
+    assert.equal(out.mode, "own");
+    const keptB = out.kept.find((k) => k.id === nb.id);
+    assert.deepEqual(keptB?.fields, ["styles.color"], "B's later color on its own layer is kept and reported");
+    assert.equal(keptB.editedBy.length, 1);
+    let s = await state();
+    assert.ok(!s.nodes[na.id], "A's layer is gone");
+    assert.ok(s.nodes[nb.id], "B's layer stays");
+    assert.equal(s.nodes[nb.id].styles.color, "blue");
+    // Restoring the whole project instead still asks first when others worked since.
+    const refused = await fetch(`${srv.baseUrl}/api/activity/${sb.id}/revert`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ mode: "restore" }) });
     assert.equal(refused.status, 409);
-    const info = await refused.json();
-    assert.equal(info.othersEdits, 1);
-    assert.match(info.error, /discards 1 later edit by/);
-    assert.ok((await state()).nodes[nb.id], "nothing was reverted");
-    assert.equal((await post({ force: true })).status, 200);
-    const s = await state();
-    assert.ok(!s.nodes[na.id] && !s.nodes[nb.id], "a confirmed revert restores the session's start");
+    assert.ok((await refused.json()).othersEdits >= 1);
+    s = await state();
+    assert.ok(s.nodes[nb.id], "a refused restore changes nothing");
+    await call("delete_nodes", { nodeIds: [nb.id] });
   });
+
+  await t.test("restore_checkpoint over MCP refuses to discard others' later work unless forced", async () => {
+    const cp = await call("save_checkpoint", { name: "guard" });
+    const n = await call("create_node", { parentId: a.id, name: "Guarded" });
+    await fetch(`${srv.baseUrl}/api/nodes/${n.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "User touched" }) });
+    await assert.rejects(call("restore_checkpoint", { id: cp.id }), /discard 1 later edit by you/);
+    assert.ok((await state()).nodes[n.id]);
+    await call("restore_checkpoint", { id: cp.id, force: true });
+    assert.ok(!(await state()).nodes[n.id]);
+  });
+
 
   await t.test("update_root_css warns about var() loops", async () => {
     const res = await call("update_root_css", { vars: { "--x": "var(--y)", "--y": "var(--x)", "--fine": "var(--x)" } });

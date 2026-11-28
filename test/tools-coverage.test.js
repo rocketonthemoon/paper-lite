@@ -483,13 +483,20 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
     assert.equal(await countLayers(), before + 3);
     await ok(B, "delete_nodes", { nodeIds: [res.created[0].id] });
 
-    // A human edit through the REST API lands in the same stack; an agent only undoes it when told to.
-    await fetch(`${B}/api/nodes/${title}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "Human edit" }) });
-    assert.equal((await ok(B, "get_node_info", { nodeId: title })).name, "Human edit");
-    await fails(B, "undo", {}, /made by the user/);
-    assert.equal((await ok(B, "get_node_info", { nodeId: title })).name, "Human edit", "refused undo changes nothing");
+    // A human edit through the REST API lands in the same stack. The agent's undo still takes back its own last step
+    // (the delete) and keeps the human's edit; only with includeUserEdits does it move the human's step.
+    const rename = (name) => fetch(`${B}/api/nodes/${title}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ name }) });
+    await rename("Human edit");
+    const own = await ok(B, "undo");
+    assert.equal(own.mode, "selective");
+    assert.match(own.step.label, /delete_nodes/);
+    assert.ok(await ok(B, "get_node_info", { nodeId: res.created[0].id }), "the agent's delete is taken back");
+    assert.equal((await ok(B, "get_node_info", { nodeId: title })).name, "Human edit", "the human's edit stays");
+    await ok(B, "delete_nodes", { nodeIds: [res.created[0].id] });
+    await rename("Human edit 2");
     await ok(B, "undo", { includeUserEdits: true });
-    assert.equal((await ok(B, "get_node_info", { nodeId: title })).name, "Title");
+    assert.equal((await ok(B, "get_node_info", { nodeId: title })).name, "Human edit");
+    await rename("Title");
 
     // A failing batch must not leave partial changes or an undo entry.
     const name = (await ok(B, "get_node_info", { nodeId: para })).name;
