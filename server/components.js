@@ -334,6 +334,12 @@ export function createComponentEngine({
         }
 
         visited.add(existing.id);
+        // Someone moved this part elsewhere inside the instance: it goes back where the component puts it, so take
+        // it out of the parent that lists it now (otherwise two parents would claim it).
+        if (!isRoot && existing.parentId !== parentId) {
+          const prev = s.nodes[existing.parentId];
+          if (prev) prev.children = prev.children.filter((c) => c !== existing.id);
+        }
         existing.parentId = parentId;
         existing.componentId = comp.id;
         existing.componentKey = spec.key;

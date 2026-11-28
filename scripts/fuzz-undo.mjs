@@ -78,7 +78,21 @@ for (let i = 0; i < N && ok; i++) {
     else if (op === "rename" && target) r = await rest("PATCH", `/api/nodes/${target}`, { name: "U" + i });
     else if (op === "move" && target) r = await rest("PATCH", `/api/nodes/${target}`, { parentId: pick(containers), index: Math.floor(rnd() * 3) });
     else if (op === "delete" && target) r = await rest("DELETE", `/api/nodes/${target}`);
-    else continue;
+    // The UI's own history: plain undo / redo, a jump in the History panel, "undo agent run", checkpoints.
+    else if (op === "undo") r = await rest("POST", "/api/undo");
+    else if (op === "redo") r = await rest("POST", "/api/redo");
+    else if (op === "text") {
+      const h = (await rest("GET", "/api/history")).body;
+      const n = h?.entries?.length || 0;
+      r = n ? await rest("POST", "/api/history/jump", { index: Math.floor(rnd() * (n + 1)) - 1 }) : null;
+    } else if (op === "dup") r = await rest("POST", "/api/history/undo-agent-run");
+    else if (op === "css") r = await rest("POST", "/api/checkpoints", { name: "cp" + i });
+    else if (op === "page") {
+      const cps = (await rest("GET", "/api/checkpoints")).body;
+      const list = Array.isArray(cps) ? cps : cps?.checkpoints || [];
+      r = list.length ? await rest("POST", `/api/checkpoints/${pick(list).id}/restore`) : null;
+    } else continue;
+    if (!r) continue;
   } else {
     if (op === "create") r = await call(who, "write_html", { parentId: pick(containers), html: `<div data-name="${who}${i}"><p>t${i}</p></div>` });
     else if (op === "style" && target) r = await call(who, "update_styles", { updates: [{ nodeIds: [target], styles: { color: pick(["red", "blue"]), margin: pick(["3px", "4px"]) } }] });

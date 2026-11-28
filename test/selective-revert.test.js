@@ -184,3 +184,16 @@ test("a component some layer still links to isn't removed; a link to a missing c
   assert.equal(d2.nodes.y.componentId, undefined, "…as a plain layer, since its component is gone");
   assert.ok(r.skipped.some((k) => k.id === "y" && k.fields[0].startsWith("component link")));
 });
+
+test("the last page is never removed", () => {
+  const d = doc();
+  const mine = step(d, (s) => {
+    s.nodes.Q = { id: "Q", name: "Page 2", tag: "div", parentId: null, children: [], text: "", styles: {}, attrs: {} };
+    s.pages.push("Q");
+  });
+  step(d, (s) => { delete s.nodes.P; delete s.nodes.A; delete s.nodes.x; delete s.nodes.y; s.pages = ["Q"]; s.rootId = "Q"; });
+  const r = revertPatches(d, [mine]);
+  assert.deepEqual(d.pages, ["Q"]);
+  assert.equal(d.rootId, "Q");
+  assert.ok(r.skipped.some((k) => k.id === "Q"));
+});
