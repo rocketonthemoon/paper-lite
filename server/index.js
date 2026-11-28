@@ -550,7 +550,7 @@ async function duplicateProject(id, name) {
   const doc = await readProject(id);
   const copyId = newId();
   doc.id = copyId;
-  doc.name = cleanName(name, `${metaOf(id).name} copy`);
+  doc.name = cleanName(name, uniqueProjectName(`${metaOf(id).name} copy`));
   const now = new Date().toISOString();
   const initCp = makeCheckpointEntry("Project created", { auto: true, kind: "init", doc, historyId: null });
   await queueDisk(async () => {
@@ -564,6 +564,15 @@ async function duplicateProject(id, name) {
   await saveWorkspace();
   sendEvent("projects", { projects: projectList() });
   return { id: copyId, name: doc.name };
+}
+
+// "Main copy", then "Main copy 2", "Main copy 3", … so duplicates stay tell-apart in lists.
+function uniqueProjectName(base) {
+  const taken = new Set(workspace.projects.map((p) => p.name));
+  if (!taken.has(base)) return base;
+  let i = 2;
+  while (taken.has(`${base} ${i}`)) i += 1;
+  return `${base} ${i}`;
 }
 
 async function deleteProject(id, source = "api") {
@@ -1902,9 +1911,12 @@ async function updateRootCss({ vars, classes, css, rules, replace = false, prune
 async function importRootCss({ sourceProjectId, mode = "merge", varsOnly = false, classes } = {}, source = "mcp") {
   if (!["merge", "replace"].includes(mode)) throw new HttpError(400, `Invalid mode "${mode}" (use merge or replace)`);
   if (!sourceProjectId || !ID_RE.test(String(sourceProjectId))) throw new HttpError(400, "Invalid sourceProjectId");
+  if (sourceProjectId === state.id) throw new HttpError(400, `"${state.name}" is the open project; pass the id of the project to import from`);
   const srcDoc = await readProject(sourceProjectId);
   const srcRoot = srcDoc.rootCss || emptyRootCss();
   const classSet = Array.isArray(classes) && classes.length ? new Set(cleanClassList(classes)) : null;
+  const srcClasses = new Set(srcRoot.rules.flatMap((r) => rootClassesIn(r.selector)));
+  const missingClasses = classSet ? [...classSet].filter((c) => !srcClasses.has(c)) : [];
 
   let rulesToImport = [];
   if (!varsOnly) {
@@ -1940,6 +1952,7 @@ async function importRootCss({ sourceProjectId, mode = "merge", varsOnly = false
     mode,
     varsImported: Object.keys(varsToImport).length,
     rulesImported: rulesToImport.length,
+    ...(missingClasses.length ? { notInSource: missingClasses } : {}),
     ...res,
   };
 }
@@ -2141,7 +2154,8 @@ function addComment({ nodeId, text, agentsCanSee = true }) {
 function replyComment(id, { text, author = "you", linkStep = false, agentsCanSee } = {}) {
   const thread = (state.comments || []).find((c) => c.id === id);
   if (!thread) throw new HttpError(404, `Comment "${id}" not found`);
-  const cleanText = String(text ?? "").trim().slice(0, 4000);
+  const fullText = String(text ?? "").trim();
+  const cleanText = fullText.slice(0, 4000);
   if (!cleanText) throw new HttpError(400, "Reply text cannot be empty");
   const now = new Date().toISOString();
   const isAgent = author !== "you";
@@ -2160,7 +2174,7 @@ function replyComment(id, { text, author = "you", linkStep = false, agentsCanSee
     comments: state.comments,
     ...(isAgent ? { replyNotification: { commentId: thread.id, nodeId: thread.nodeId, author: cleanName(author, "Claude"), text: cleanText } } : {}),
   });
-  return thread;
+  return fullText.length > cleanText.length ? { ...thread, truncated: `Reply cut to ${cleanText.length} of ${fullText.length} characters` } : thread;
 }
 
 function updateComment(id, { status, agentsCanSee } = {}) {

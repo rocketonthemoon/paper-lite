@@ -603,7 +603,8 @@ export function registerTools(mcpServer, ctx) {
     description: "Move layers into a new parent (in order), optionally at a sibling index.",
     inputSchema: { nodeIds: ids, parentId: z.string(), index: z.number().int().optional() },
     annotations: WRITE,
-  }, async ({ nodeIds, parentId, index }) => {
+  }, async ({ nodeIds: given, parentId, index }) => {
+    const nodeIds = [...new Set(given)]; // the same id twice is one move, not two
     const targetName = nodeIds.length === 1 ? S().nodes[nodeIds[0]]?.name : `${nodeIds.length} layers`;
     ctx.batch("mcp", () => nodeIds.forEach((id, i) => ctx.updateNode(id, { parentId, index: index === undefined ? undefined : index + i }, "mcp")), {
       tool: "move_nodes",

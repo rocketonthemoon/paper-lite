@@ -146,6 +146,29 @@ test("MCP edge cases: instances in duplicated containers, artboard sizes and pla
     assert.match(mine.step.label, /delete/i);
   });
 
+  await t.test("small result accuracy: move counts, copy names, import gaps, long replies", async () => {
+    const n = await call("create_node", { parentId: a.id, name: "Twice" });
+    assert.equal((await call("move_nodes", { nodeIds: [n.id, n.id], parentId: a.id })).moved, 1);
+    await call("delete_nodes", { nodeIds: [n.id] });
+
+    const open = (await call("list_projects")).find((p) => p.active);
+    const c1 = await call("duplicate_project", { projectId: open.id });
+    const c2 = await call("duplicate_project", { projectId: open.id });
+    assert.equal(c2.name, `${c1.name} 2`, "a second copy gets a distinct name");
+    await call("update_root_css", { classes: { tile: { padding: "2px" } } });
+    const other = await call("create_project", { name: "Importer" });
+    const imp = await call("import_root_css", { sourceProjectId: open.id, classes: ["tile", "ghost"] });
+    assert.deepEqual(imp.notInSource, ["ghost"]);
+    await assert.rejects(call("import_root_css", { sourceProjectId: other.id }), /is the open project/);
+    await call("open_project", { projectId: open.id });
+    for (const id of [c1.id, c2.id, other.id]) await call("delete_project", { projectId: id });
+
+    const res = await fetch(`${srv.baseUrl}/api/comments`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ nodeId: a.id, text: "Long?" }) });
+    const thread = await res.json();
+    const reply = await call("reply_to_comment", { id: thread.id, text: "y".repeat(5000) });
+    assert.match(reply.truncated, /cut to 4000 of 5000/);
+  });
+
   await t.test("update_root_css warns about var() loops", async () => {
     const res = await call("update_root_css", { vars: { "--x": "var(--y)", "--y": "var(--x)", "--fine": "var(--x)" } });
     assert.ok(res.warnings.some((w) => w.includes("--x → --y → --x")), JSON.stringify(res.warnings));
