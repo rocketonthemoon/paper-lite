@@ -1,7 +1,7 @@
 <script>
   // Right panel → History: checkpoints, the project's git remote, and the labelled undo history.
   // Markup and class names match the panel's CSS in ui/index.html.
-  import { live, api, toast, clock } from "../lib/bridge.svelte.js";
+  import { live, api, toast, clock, stamp, fullStamp } from "../lib/bridge.svelte.js";
   import Bookmark from "./Bookmark.svelte";
   import GitIcon from "./GitIcon.svelte";
 
@@ -14,8 +14,8 @@
   let showAll = $state(false);
   const checkpoints = $derived([...(hist.checkpoints || [])].sort((a, b) => String(b.at).localeCompare(String(a.at))));
   const shownCheckpoints = $derived(showAll ? checkpoints : checkpoints.slice(0, 3));
-  const cpMeta = (c) => `${c.auto ? (c.kind === "agent-start" ? "Auto · agent run" : "Auto") : "Saved"} · ${clock(c.at)}`;
-  const cpTitle = (c) => `${c.name}${c.layerCount != null ? ` · ${c.layerCount} layers` : ""}`;
+  const cpMeta = (c) => `${c.auto ? (c.kind === "agent-start" ? "Auto · agent run" : "Auto") : "Saved"} · ${stamp(c.at)}`;
+  const cpTitle = (c) => `${c.name}${c.layerCount != null ? ` · ${c.layerCount} layers` : ""} · ${fullStamp(c.at)}`;
 
   function startNaming() {
     cpName = `Checkpoint ${clock(new Date().toISOString())}`;
@@ -45,8 +45,7 @@
   let draft = $state({ url: "", token: "", username: "", autoPush: false });
   const whenShort = (iso) => {
     if (!iso) return "never";
-    const d = new Date(iso);
-    return d.toDateString() === new Date().toDateString() ? clock(iso) : `${d.toLocaleDateString([], { month: "short", day: "numeric" })} ${clock(iso)}`;
+    return stamp(iso);
   };
   const repoLabel = (url) => { try { const u = new URL(url); return `${u.host}${u.pathname.replace(/\.git$/, "")}`; } catch { return url; } };
 
@@ -100,8 +99,8 @@
   const stepMeta = (e, i) => {
     const s = stepState(i);
     if (s === "undone") return "Undone · Ctrl+Shift+Z to redo";
-    if (s === "cur") return `Current state · ${clock(e.at)}`;
-    return `${clock(e.at)}${e.nodeIds?.length > 1 ? ` · ${e.nodeIds.length} layers` : e.source !== "mcp" ? " · You" : ""}`;
+    if (s === "cur") return `Current state · ${stamp(e.at)}`;
+    return `${stamp(e.at)}${e.nodeIds?.length > 1 ? ` · ${e.nodeIds.length} layers` : e.source !== "mcp" ? " · You" : ""}`;
   };
   const canUndoAgent = $derived(entries.some((e, i) => i <= hist.cursor && e.source === "mcp"));
 
@@ -181,7 +180,7 @@
       </div>
     {/if}
     {#each rows as { e, i } (e.id)}
-      <button type="button" class="hist-step {stepState(i)}" data-hist="jump" data-index={i} title={stepState(i) === "cur" ? "Current state" : "Jump to this step"} onclick={() => jump(i)}>
+      <button type="button" class="hist-step {stepState(i)}" data-hist="jump" data-index={i} title={`${stepState(i) === "cur" ? "Current state" : "Jump to this step"} · ${fullStamp(e.at)}`} onclick={() => jump(i)}>
         <span class="hist-av" class:ai={e.source === "mcp"}>{e.source === "mcp" ? "AI" : "Y"}</span>
         <span class="hist-txt">
           <span class="hist-lbl">{#if e.tool}<code>{e.tool}</code>{e.target ? ` · ${e.target}` : ""}{:else}{e.label || ""}{/if}</span>

@@ -24,8 +24,9 @@ export async function startServer(dataDir, extraEnv = {}) {
   const child = spawn(process.execPath, ["server/index.js"], {
     cwd: ROOT,
     env: { ...process.env, HOST: "127.0.0.1", PORT: String(port), PUBLIC_URL: baseUrl, DATA_DIR: dataDir, CHROME_PATH: "", ...extraEnv },
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["ignore", "pipe", "pipe", "ipc"],
   });
+  child.channel?.unref(); // the IPC channel alone must not keep a failed test run alive
   let logs = "";
   child.stdout.on("data", (d) => { logs += d; });
   child.stderr.on("data", (d) => { logs += d; });
@@ -36,10 +37,13 @@ export async function startServer(dataDir, extraEnv = {}) {
     if (Date.now() > deadline) throw new Error(`Server did not start:\n${logs}`);
     await new Promise((r) => setTimeout(r, 60));
   }
+  // "SIGTERM" means a graceful stop (flush pending writes, then exit). It goes over IPC so it behaves the same on
+  // Windows, where child.kill("SIGTERM") terminates the process without running its signal handlers.
   const stop = (signal = "SIGKILL") => new Promise((r) => {
     if (child.exitCode !== null) return r();
     child.once("exit", r);
-    child.kill(signal);
+    if (signal === "SIGTERM" && child.connected) child.send("shutdown");
+    else child.kill(signal);
   });
   return { baseUrl, child, stop };
 }

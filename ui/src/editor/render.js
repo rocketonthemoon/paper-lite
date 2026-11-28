@@ -46,7 +46,7 @@ export function buildNodeEl(nodes, id) {
   if (svg) { for (const [k, v] of Object.entries(n.attrs || {})) el.setAttribute(k, v); (n.children || []).forEach((c) => el.append(buildNodeEl(nodes, c))); return el; }
   for (const [k, v] of Object.entries(n.attrs || {})) el.setAttribute(k, v);
   if (n.tag === "button") el.type = "button";
-  if (n.tag === "a" || n.tag === "button") el.tabIndex = -1;
+  if (n.tag === "a" || n.tag === "button" || n.attrs?.tabindex !== undefined) el.tabIndex = -1; // canvas layers never take focus; exports keep tabindex
   if (n.tag === "img") el.draggable = false;
   if (VOID_TAGS.has(n.tag)) return el;
   if (n.text) el.append(n.text);
@@ -78,7 +78,7 @@ function nodeShell(n) {
   for (const [k, v] of Object.entries(n.attrs || {})) el.setAttribute(k, v);
   if (svg) return el;
   if (n.tag === "button") el.type = "button";
-  if (n.tag === "a" || n.tag === "button") el.tabIndex = -1;
+  if (n.tag === "a" || n.tag === "button" || n.attrs?.tabindex !== undefined) el.tabIndex = -1; // canvas layers never take focus; exports keep tabindex
   if (n.tag === "img") el.draggable = false;
   if (!VOID_TAGS.has(n.tag) && n.text) el.append(n.text);
   return el;
@@ -226,6 +226,14 @@ export function rectOnStage(el) {
   return { x: r.left - s.left, y: r.top - s.top, w: r.width, h: r.height };
 }
 
+// Layout size in canvas px. SVG shapes (svg, circle, path, …) have no offsetWidth/offsetHeight, so fall back to
+// their rendered box divided by the zoom.
+export function layoutSize(el) {
+  if (el.offsetWidth !== undefined) return { w: el.offsetWidth, h: el.offsetHeight };
+  const r = el.getBoundingClientRect(), z = ed.view.z || 1;
+  return { w: r.width / z, h: r.height / z };
+}
+
 export function placeBox(box, r) {
   if (!r) { box.style.display = "none"; return; }
   Object.assign(box.style, { display: "block", left: `${r.x}px`, top: `${r.y}px`, width: `${r.w}px`, height: `${r.h}px` });
@@ -317,7 +325,7 @@ export function updateOverlay() {
   placeBox($("#sel-box"), selRect);
   $("#sel-box").classList.toggle("multi", multiRects.length > 0);
   if (multiRects.length) $("#sel-size").textContent = `${ed.multi.length} layers`;
-  else if (selEl) $("#sel-size").textContent = `${Math.round(selEl.offsetWidth)} × ${Math.round(selEl.offsetHeight)}`;
+  else if (selEl) { const { w, h } = layoutSize(selEl); $("#sel-size").textContent = `${Math.round(w)} × ${Math.round(h)}`; }
   const outlines = $("#multi-boxes");
   while (outlines.children.length > multiRects.length) outlines.lastChild.remove();
   while (outlines.children.length < multiRects.length) outlines.append(Object.assign(document.createElement("span"), { className: "multi-box" }));

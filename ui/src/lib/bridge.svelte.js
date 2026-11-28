@@ -20,3 +20,5 @@ export { weft };
 export const api = (...args) => weft.api(...args);
 export const toast = (...args) => weft.toast(...args);
 export const clock = (iso) => weft.clock(iso);
+export const stamp = (iso) => weft.stamp(iso);
+export const fullStamp = (iso) => weft.fullStamp(iso);

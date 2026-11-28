@@ -4,7 +4,7 @@
 import interact from "interactjs";
 import { ed } from "./state.js";
 import { GRID, elOf, num, patchStyles, snapInput, topmostSelected } from "./core.js";
-import { markStale, render, updateOverlay } from "./render.js";
+import { layoutSize, markStale, render, updateOverlay } from "./render.js";
 import { batchEdit, select } from "./selection.js";
 
 let op = null;
@@ -72,7 +72,7 @@ function resizeStart(e) {
   if (!n || id !== ed.sel || ed.tool !== "select" || ed.spaceDown || ed.editingId) { e.interaction.stop(); return; }
   const el = e.target;
   markStale(el); // the resize preview sets inline width/height
-  op = { id, el, abs: n.styles.position === "absolute", w: el.offsetWidth, h: el.offsetHeight,
+  op = { id, el, abs: n.styles.position === "absolute", ...layoutSize(el),
     x: num(n.styles.left, el.offsetLeft), y: num(n.styles.top, el.offsetTop), moved: false };
   ed.busy = true;
 }

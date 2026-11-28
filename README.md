@@ -108,6 +108,7 @@ If your client only supports stdio, start the server first, then use the relay:
 | `/api/projects` | List/create projects; `:id/open`, `:id/preview`, `:id/duplicate` |
 | `/api/state`, `/api/nodes`, `/api/pages` | Active project, node and page CRUD |
 | `/api/history` | Undo timeline (`GET /api/history`, `POST /api/history/jump`, `POST /api/history/undo-agent-run`) |
+| `GET /api/history/search` | Edit log search, newest first: `?nodeId=&after=&before=&source=mcp\|you&limit=` (ISO dates; no patches) |
 | `/api/checkpoints` | Named checkpoints (`GET`, `POST`, `POST :id/restore`) |
 | `/api/git` | Git remote for the open project's checkpoints (`GET`, `PUT /remote`, `DELETE /remote`, `POST /push`, `POST /pull`) |
 | `/api/comments` | Layer comments (`GET`, `POST`, `POST :id/reply`, `PATCH :id`, `DELETE :id`) |
@@ -118,6 +119,12 @@ If your client only supports stdio, start the server first, then use the relay:
 | `GET /render/:id` | Clean page that headless Chrome renders |
 
 Requests are restricted by `Host`/`Origin` checks (see `ALLOWED_HOSTS`).
+
+## History, edit log and checkpoints
+
+- **Undo history** is in memory: the last 60 steps of the open project, cleared on restart or project switch. It powers Undo / Redo and the History panel.
+- **Edit log** (`DATA_DIR/projects/<id>.history.jsonl`) records every step's time, source, tool, label and layer ids, without the changes themselves, and survives restarts (newest 5,000 lines kept). It answers "when did this layer change?" through `GET /api/history/search`, but it is an audit trail only: it cannot restore anything.
+- **Checkpoints** are the long-term way to go back: save one before a big change, and restore it later.
 
 ## Syncing checkpoints to a git host
 

@@ -76,11 +76,11 @@ test("undo history: jumping to any position restores that exact document", { tim
 
 test("throttled saves reach disk, and pending saves are flushed on shutdown", { timeout: 60_000 }, async (t) => {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "weft-persist-"));
-  t.after(() => fs.rm(dataDir, { recursive: true, force: true }));
   const readDoc = async (id) => JSON.parse(await fs.readFile(path.join(dataDir, "projects", `${id}.json`), "utf8"));
 
   // Normal throttle: a burst of edits lands on disk shortly after.
   let srv = await startServer(dataDir, { PERSIST_THROTTLE_MS: "150" });
+  t.after(async () => { await srv.stop("SIGKILL"); await fs.rm(dataDir, { recursive: true, force: true }); });
   let call = api(srv.baseUrl);
   const s0 = await call("GET", "/api/state");
   const node = await call("POST", "/api/nodes", { parentId: s0.rootId, tag: "div", name: "Burst" });
@@ -104,7 +104,6 @@ test("throttled saves reach disk, and pending saves are flushed on shutdown", { 
   const other = await call("POST", "/api/projects", { name: "Other" });
   if ((await call("GET", "/api/state")).id !== other.id) await call("POST", `/api/projects/${other.id}/open`);
   assert.equal((await readDoc(s0.id)).nodes[node.id].name, "Saved on switch");
-  await srv.stop("SIGKILL");
 });
 
 test("activity sessions stay with their project when another project is created or opened", { timeout: 60_000 }, async (t) => {
@@ -124,4 +123,41 @@ test("activity sessions stay with their project when another project is created 
   sessions = (await call("GET", "/api/activity")).sessions;
   assert.equal(new Set(ids(sessions)).size, sessions.length, "no session listed twice after switching back");
   assert.deepEqual(sessions.map((s) => s.projectId).sort(), [a.id, b.id].sort());
+});
+
+test("the edit log survives restarts and can be searched by layer, time and source", { timeout: 60_000 }, async (t) => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "weft-log-"));
+  let srv = await startServer(dataDir, { PERSIST_THROTTLE_MS: "60000" });
+  // Stop whichever server is running even when an assertion fails, or the orphaned child keeps the test run alive.
+  t.after(async () => { await srv.stop("SIGKILL"); await fs.rm(dataDir, { recursive: true, force: true }); });
+  let call = api(srv.baseUrl);
+  const s0 = await call("GET", "/api/state");
+  const a = await call("POST", "/api/nodes", { parentId: s0.rootId, tag: "div", name: "Layer A" });
+  const b = await call("POST", "/api/nodes", { parentId: s0.rootId, tag: "div", name: "Layer B" });
+  // Keep "mid" strictly between the steps: B's timestamp can share a millisecond with a Date taken right after its response.
+  await new Promise((r) => setTimeout(r, 20));
+  const mid = new Date().toISOString();
+  await new Promise((r) => setTimeout(r, 20));
+  await call("PATCH", `/api/nodes/${a.id}`, { name: "Layer A2" });
+
+  // Unflushed steps are already searchable.
+  let res = await call("GET", `/api/history/search?nodeId=${a.id}`);
+  assert.equal(res.count, 2);
+  assert.ok(res.entries.every((e) => e.nodeIds.includes(a.id) && e.inUndoHistory && !("patch" in e)));
+  assert.ok(Date.parse(res.entries[0].at) >= Date.parse(res.entries[1].at), "newest first");
+
+  await srv.stop("SIGTERM");
+  srv = await startServer(dataDir);
+  call = api(srv.baseUrl);
+  assert.equal((await call("GET", "/api/history")).entries.length, 0, "undo history starts empty after a restart");
+
+  res = await call("GET", `/api/history/search?nodeId=${a.id}`);
+  assert.equal(res.count, 2, "the log outlives the in-memory undo history");
+  assert.ok(res.entries.every((e) => e.inUndoHistory === false));
+  assert.equal((await call("GET", `/api/history/search?nodeId=${b.id}`)).count, 1);
+  res = await call("GET", `/api/history/search?after=${encodeURIComponent(mid)}`);
+  assert.deepEqual(res.entries.map((e) => e.nodeIds), [[a.id]], "time range filter");
+  assert.equal((await call("GET", "/api/history/search?source=mcp")).count, 0);
+  assert.equal((await call("GET", "/api/history/search?limit=1")).count, 1);
+  await assert.rejects(call("GET", "/api/history/search?after=yesterday"), /400/);
 });

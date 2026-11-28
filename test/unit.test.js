@@ -78,6 +78,30 @@ test("model: mergeAttrs validates HTML URLs and SVG presentation attributes", ()
   assert.throws(() => mergeAttrs({}, { fill: "url(#grad)" }, "path"), /Unsafe value/);
 });
 
+test("model: mergeAttrs allows safe semantic attributes (type, role, aria-*, title, tabindex, target, rel)", () => {
+  assert.deepEqual(
+    mergeAttrs({}, { type: "button", role: "switch", "aria-label": "Toggle dark mode", "aria-pressed": "false", title: "Hi", tabindex: "0" }, "button"),
+    { type: "button", role: "switch", "aria-label": "Toggle dark mode", "aria-pressed": "false", title: "Hi", tabindex: "0" },
+  );
+  assert.deepEqual(mergeAttrs({}, { href: "https://x.dev", target: "_blank" }, "a"), { href: "https://x.dev", target: "_blank", rel: "noopener noreferrer" });
+  assert.deepEqual(mergeAttrs({}, { target: "_blank", rel: "noopener" }, "a"), { target: "_blank", rel: "noopener" });
+
+  assert.throws(() => mergeAttrs({}, { type: "evil" }, "button"), /Unsupported value for type/);
+  assert.throws(() => mergeAttrs({}, { type: "button" }, "div"), /only supported on <button>/);
+  assert.throws(() => mergeAttrs({}, { target: "_top" }, "a"), /Unsupported value for target/);
+  assert.throws(() => mergeAttrs({}, { role: "x\" onclick=\"y" }, "div"), /Unsafe value for role/);
+  assert.throws(() => mergeAttrs({}, { "aria-label": "a\u0000b" }, "div"), /Unsafe value/);
+  assert.throws(() => mergeAttrs({}, { "aria-label": "<script>x</script>" }, "div"), /Unsafe value for aria-label/);
+  assert.throws(() => mergeAttrs({}, { title: "a > b" }, "div"), /Unsafe value for title/);
+  assert.deepEqual(mergeAttrs({}, { "aria-label": "x".repeat(200) }, "div"), { "aria-label": "x".repeat(200) });
+  assert.throws(() => mergeAttrs({}, { "aria-label": "x".repeat(201) }, "div"), /too long/);
+  assert.deepEqual(mergeAttrs({}, { tabindex: "-1" }, "div"), { tabindex: "-1" });
+  for (const bad of ["1.5", "abc", "1000", "0 onclick"]) assert.throws(() => mergeAttrs({}, { tabindex: bad }, "div"), /Unsafe value for tabindex/, bad);
+  for (const bad of ["onclick", "onmouseover", "style", "id", "class", "aria-", "data-x"]) {
+    assert.throws(() => mergeAttrs({}, { [bad]: "1" }, "div"), /not supported/, bad);
+  }
+});
+
 test("model: lenientMerge keeps valid properties and records capped warnings", () => {
   const warnings = [];
   const res = lenientMerge(mergeStyles, { width: 100, "bad-key": 12, color: "#0a0b0d", height: "x;y" }, warnings, "Card");
@@ -156,7 +180,7 @@ test("html-import: htmlToSpecs parses layout, aliases, SVG namespace, mixed text
     </section>
   `);
   assert.equal(specs.length, 1);
-  assert.equal(warnings.length, 0);
+  assert.deepEqual(warnings, [`Event handler attribute "onclick" isn't allowed; dropped`]);
   assert.deepEqual(specs[0].classes, ["hero"], "class names are kept for the root CSS");
 
   const root = specs[0];
@@ -577,6 +601,46 @@ test("design-tokens: analyzeDesignLint catches spacing, radii, font-size, shorth
   assert.deepEqual(analyzeDesignLint(["n1"], doc, { lint: false }), []);
 });
 
+test("design-tokens: analyzeDesignLint only suggests tokens of the property's category; lint:false silences suggestions", () => {
+  const mk = (styles) => ({
+    pages: ["p1"],
+    nodes: { p1: { id: "p1", children: ["n1"] }, n1: { id: "n1", name: "Box", parentId: "p1", styles } },
+    rootCss: {
+      vars: {
+        "--radius-lg": "18px", "--radius-md": "12px", "--fs-md": "16px", "--space-3": "12px",
+        "--color-x": "#123456", "--shadow-float": "0 8px 24px rgba(0,0,0,.12)", "--size-18": "18px",
+      },
+      rules: [],
+    },
+  });
+  const run = (styles, opts) => analyzeDesignLint(["n1"], mk(styles), opts);
+
+  let h = run({ fontSize: "18px" });
+  assert.ok(!h.some((x) => /--radius-lg/.test(x)), h.join("\n"));
+  assert.ok(h.some((x) => /fontSize: 18px is the root variable --size-18/.test(x)), "uncategorized variables still match: " + h.join("\n"));
+
+  h = run({ padding: "16px" });
+  assert.ok(!h.some((x) => /--fs-md/.test(x)), h.join("\n"));
+
+  h = run({ gap: "12px" });
+  assert.ok(h.some((x) => /gap: 12px is the root variable --space-3; use var\(--space-3\) so/.test(x)), h.join("\n"));
+  assert.ok(!h.some((x) => /--radius-md/.test(x)), h.join("\n"));
+
+  h = run({ borderRadius: "18px", fontSize: "12px", width: "18px" });
+  assert.ok(h.some((x) => /borderRadius: 18px is the root variable --radius-lg( \/ --size-18)?;/.test(x)), h.join("\n"));
+  assert.ok(!h.some((x) => /fontSize: 12px.*(--space-3|--radius-md)/.test(x)), h.join("\n"));
+  assert.ok(!h.some((x) => /width: 18px.*--radius-lg/.test(x)), h.join("\n"));
+
+  h = run({ color: "#123456", border: "1px solid #123456", boxShadow: "0 8px 24px rgba(0,0,0,.12)" });
+  assert.ok(h.some((x) => /color: #123456 is the root variable --color-x/.test(x)), h.join("\n"));
+  assert.ok(h.some((x) => /border: 1px solid #123456 repeats root variable values \(#123456 → var\(--color-x\)\)/.test(x)), h.join("\n"));
+  assert.ok(h.some((x) => /boxShadow: .* is the root variable --shadow-float/.test(x)), h.join("\n"));
+
+  assert.deepEqual(run({ fontSize: "18px", color: "#123456", padding: "16px" }, { lint: false }), [], "lint:false emits no token suggestions");
+  h = run({ color: "var(--missing)" }, { lint: false });
+  assert.ok(h.some((x) => /var\(--missing\) isn't defined/.test(x)), "unknown variables are still reported with lint:false");
+});
+
 test("htmlToSpecs captures data-component and data-slot, and normalizeProject preserves components", () => {
   const { specs } = htmlToSpecs('<div data-component="hero-card"><span data-slot="title">Hi</span></div>');
   assert.equal(specs[0].component, "hero-card");
@@ -607,4 +671,20 @@ test("htmlToSpecs captures data-component and data-slot, and normalizeProject pr
   assert.equal(doc.components["bad name"], undefined);
   assert.equal(doc.components["hero-card"].tree.styles.padding, "12px");
   assert.deepEqual(doc.nodes.c1.componentOverrides, { text: true, styles: ["width"] });
+});
+
+test("ui time: stamp shows the date for steps that aren't from today", async () => {
+  const { clock, stamp, fullStamp } = await import("../ui/src/editor/time.js");
+  const now = new Date(2026, 10, 28, 12, 0, 0);
+  const today = new Date(2026, 10, 28, 9, 5, 0).toISOString();
+  const yesterday = new Date(2026, 10, 27, 9, 5, 0).toISOString();
+  const lastYear = new Date(2025, 2, 1, 9, 5, 0).toISOString();
+  assert.equal(stamp(today, now), clock(today), "today: time only");
+  assert.notEqual(stamp(yesterday, now), clock(yesterday));
+  assert.ok(stamp(yesterday, now).endsWith(clock(yesterday)), "other days: date then time");
+  assert.match(stamp(lastYear, now), /2025/, "another year shows the year");
+  assert.doesNotMatch(stamp(yesterday, now), /2026/, "this year's dates omit the year");
+  assert.match(fullStamp(yesterday), /2026/);
+  assert.equal(stamp("not a date", now), "");
+  assert.equal(fullStamp(undefined), "");
 });

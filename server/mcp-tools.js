@@ -85,6 +85,7 @@ takes. Aim for 2–4 calls per screen, not 10–15:
 - SVG: presentation attributes only (viewBox, d, fill, stroke, stroke-width, cx, cy, r, …). No url() or href.
   For repeated icons, register them once with register_icons and reference <icon name="nf-n" /> in write_html (exported HTML deduplicates repeated icons with <symbol>/<use>).
 - Images: <img src="https://…" alt="…">.
+- Attributes: src / href / alt, title, role, aria-* (plain text, no < >, max 200 chars), tabindex (-999…999), type on <button> (button | submit | reset), target (_blank | _self) and rel on <a>. aria-label also names the layer when there is no data-name. Event handlers (on*) are dropped with a warning; id, style and data-* are dropped.
 
 ## Styling
 - Colours, fonts and spacing come from root CSS variables: color: var(--color-text).

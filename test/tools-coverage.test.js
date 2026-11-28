@@ -646,7 +646,8 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
     assert.ok(res.warnings.some((w) => /#0000FF is the root variable --color-primary; use var\(--color-primary\)/.test(w)), "raw value that duplicates a variable is flagged");
     assert.ok(res.warnings.some((w) => /var\(--nope\) isn't defined/.test(w)), "unknown variable is flagged");
     const hinted = await ok(B, "update_styles", { updates: [{ nodeIds: [note], styles: { padding: "12px" } }] });
-    assert.ok(hinted.hints.some((h) => /padding: 12px is the root variable --space-3 \/ --radius; use var\(--space-3\) or var\(--radius\)/.test(h)), hinted.hints.join("\n"));
+    assert.ok(hinted.hints.some((h) => /padding: 12px is the root variable --space-3; use var\(--space-3\) so/.test(h)), hinted.hints.join("\n"));
+    assert.ok(!hinted.hints.some((h) => /--radius/.test(h)), "a radius token is never suggested for padding");
     assert.deepEqual(await ok(B, "update_styles", { updates: [{ nodeIds: [note], styles: { padding: "var(--space-3)", color: "var(--color-primary)", margin: null } }] }), { updated: 1 });
 
     // Strict tools reject classes that don't exist.
@@ -883,6 +884,113 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
     await ok(B, "undo");
     assert.equal((await ok(B, "list_icons")).length, 2, "delete_icon is undoable");
     await ok(B, "delete_nodes", { nodeIds: [rowId] });
+  });
+
+  await t.test("semantic HTML attributes round-trip: write_html, update_nodes_matching, get_jsx", async () => {
+    const res = await ok(B, "write_html", {
+      parentId: section,
+      html: '<div data-name="Attr Row"><button data-name="Attr Btn" type="button" role="switch" aria-label="Dark mode" aria-pressed="false">Go</button><a data-name="Attr Link" href="https://example.com" target="_blank">Docs</a></div>',
+    });
+    assert.ok(!res.warnings?.some((w) => /Attribute ".*" is not supported/.test(w)), (res.warnings || []).join("\n"));
+    const row = res.created[0].id;
+    const [btn, link] = await ok(B, "get_children", { nodeId: row });
+    assert.deepEqual((await ok(B, "get_node_info", { nodeId: btn.id })).attrs, { type: "button", role: "switch", "aria-label": "Dark mode", "aria-pressed": "false" });
+    assert.equal((await ok(B, "get_node_info", { nodeId: link.id })).attrs.rel, "noopener noreferrer");
+
+    await ok(B, "update_nodes_matching", { artboardIds: [board], tag: "button", query: "Attr Btn", attrs: { type: "submit" } });
+    assert.equal((await ok(B, "get_node_info", { nodeId: btn.id })).attrs.type, "submit");
+    await fails(B, "update_nodes_matching", { artboardIds: [board], tag: "button", query: "Attr Btn", attrs: { onclick: "x()" } }, /not supported/);
+
+    const html = await ok(B, "get_jsx", { nodeId: row, format: "html" });
+    assert.match(html, /<button[^>]* type="submit" role="switch" aria-label="Dark mode" aria-pressed="false">/);
+    const jsx = await ok(B, "get_jsx", { nodeId: row, format: "jsx" });
+    assert.match(jsx, /aria-label="Dark mode"/);
+    await ok(B, "delete_nodes", { nodeIds: [row] });
+  });
+
+  await t.test("tabindex, aria-label without data-name, and warned drops of unsafe attributes", async () => {
+    const res = await ok(B, "write_html", {
+      parentId: section,
+      lint: false,
+      html: '<div data-name="A11y Row"><button aria-label="Close dialog" tabindex="0">x</button><div tabindex="-1">t</div>'
+        + '<button aria-label="<script>x</script>" onclick="alert(1)" onmouseover="y()">r</button><div tabindex="9999">big</div></div>',
+    });
+    const warnings = res.warnings || [];
+    const row = res.created[0].id;
+    const [named, focusable, unsafe, big] = await ok(B, "get_children", { nodeId: row });
+
+    // aria-label names the layer AND stays an attribute; tabindex is allowed.
+    assert.equal(named.name, "Close dialog");
+    assert.deepEqual((await ok(B, "get_node_info", { nodeId: named.id })).attrs, { "aria-label": "Close dialog", tabindex: "0" });
+    assert.deepEqual((await ok(B, "get_node_info", { nodeId: focusable.id })).attrs, { tabindex: "-1" });
+    assert.ok(!warnings.some((w) => /tabindex" is not supported/.test(w)), warnings.join("\n"));
+
+    // A rejected aria-label leaves no markup in the layer name, and every dropped attribute is warned about.
+    assert.doesNotMatch(unsafe.name, /[<>]/);
+    assert.deepEqual((await ok(B, "get_node_info", { nodeId: unsafe.id })).attrs || {}, {});
+    assert.ok(warnings.some((w) => /Unsafe value for aria-label/.test(w)), warnings.join("\n"));
+    assert.ok(warnings.some((w) => /"onclick" isn't allowed; dropped/.test(w)), warnings.join("\n"));
+    assert.ok(warnings.some((w) => /"onmouseover" isn't allowed; dropped/.test(w)), warnings.join("\n"));
+    assert.ok(warnings.some((w) => /Unsafe value for tabindex/.test(w)), warnings.join("\n"));
+    assert.deepEqual((await ok(B, "get_node_info", { nodeId: big.id })).attrs || {}, {});
+
+    const jsx = await ok(B, "get_jsx", { nodeId: row, format: "jsx" });
+    assert.match(jsx, /<button aria-label="Close dialog" tabIndex="0">/);
+    const html = await ok(B, "get_jsx", { nodeId: row, format: "html" });
+    assert.match(html, /<button[^>]* aria-label="Close dialog" tabindex="0">/);
+    await ok(B, "delete_nodes", { nodeIds: [row] });
+  });
+
+  await t.test("string params with quotes or JSON-looking content arrive as strings (bugs.md #5 regression)", async () => {
+    const svg = `<svg viewBox="0 0 48 48" fill="none"><circle cx="24" cy="24" r="20" stroke="#0000ff" stroke-width="4"/></svg>`;
+    const reg = await ok(B, "register_icons", { name: "q-ring", svg });
+    assert.deepEqual(reg.registered, ["q-ring"]);
+
+    const res = await ok(B, "write_html", { parentId: section, html: `<div data-name='Quote Row' style="gap: 4px">${svg}<p>{"a":1}</p><p>[1, "two"]</p><p>it's "quoted"</p></div>` });
+    const row = res.created[0].id;
+    const kids = await ok(B, "get_children", { nodeId: row });
+    assert.deepEqual(kids.map((k) => k.tag), ["svg", "p", "p", "p"]);
+    assert.deepEqual(kids.slice(1).map((k) => k.text), ['{"a":1}', '[1, "two"]', `it's "quoted"`]);
+
+    const css = await ok(B, "update_root_css", { css: `.quote-test { font-family: "Geist", 'Geist Mono', sans-serif; }` });
+    assert.ok(css.addedClasses.includes("quote-test"), JSON.stringify(css));
+    assert.equal(typeof (await ok(B, "write_html", { parentId: row, html: '{"tag":"div"}' })), "object", "a JSON-looking html string is parsed as HTML text, not as an object");
+
+    await ok(B, "update_root_css", { classes: { "quote-test": null } });
+    await ok(B, "delete_icon", { name: "q-ring" });
+    await ok(B, "delete_nodes", { nodeIds: [row] });
+  });
+
+  await t.test("components expand <icon /> in create_component and update_component (html + appendHtml)", async () => {
+    const svgSlot = (slots) => slots.filter((s) => s.tag === "svg");
+    const noIconTagWarning = (res) => assert.ok(!(res.warnings || []).some((w) => /Tag "icon" is not allowed/.test(w)), (res.warnings || []).join("\n"));
+
+    const created = await ok(B, "create_component", { name: "icon-card", html: '<div><icon name="nf-n" /><p data-slot="title">Title</p></div>' });
+    noIconTagWarning(created);
+    assert.equal(svgSlot(created.slots).length, 1, "the <icon> becomes the registered <svg>");
+    assert.ok(!created.slots.some((s) => s.tag === "div" && s.name === "icon"));
+
+    const updated = await ok(B, "update_component", { component: "icon-card", html: '<div><icon name="dot" /><icon name="nf-n" /><p data-slot="title">Title</p></div>' });
+    noIconTagWarning(updated);
+    assert.equal(svgSlot(updated.slots).length, 2);
+
+    const appended = await ok(B, "update_component", { component: "icon-card", appendHtml: { html: '<icon name="dot" />' } });
+    noIconTagWarning(appended);
+    assert.equal(svgSlot(appended.slots).length, 3);
+
+    const inst = await ok(B, "instantiate_component", { component: "icon-card", parentId: section });
+    const kids = await ok(B, "get_children", { nodeId: inst.id });
+    assert.deepEqual(kids.map((k) => k.tag), ["svg", "svg", "p", "svg"]);
+    const svgKids = await ok(B, "get_children", { nodeId: kids[1].id });
+    assert.ok(svgKids.length >= 1 && svgKids.every((k) => k.tag === "path"), "icon shapes are copied into the instance");
+
+    const ghost = await ok(B, "create_component", { name: "ghost-card", html: '<div><icon name="ghost" /><p>Hi</p></div>' });
+    assert.ok(ghost.warnings.some((w) => /ghost.*isn't registered/.test(w)), ghost.warnings.join("\n"));
+    await fails(B, "update_component", { component: "ghost-card", appendHtml: { html: '<icon name="ghost" />' } }, /isn't registered/);
+
+    await ok(B, "delete_nodes", { nodeIds: [inst.id] });
+    await ok(B, "delete_component", { component: "icon-card" });
+    await ok(B, "delete_component", { component: "ghost-card" });
   });
 
   await t.test("preview: a screen opens as a live page sized to its artboard", async () => {
@@ -1449,9 +1557,22 @@ test("stdio relay forwards MCP traffic to the HTTP server", { timeout: 60_000 },
     { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "relay-test", version: "1" } } },
     { jsonrpc: "2.0", method: "notifications/initialized" },
     { jsonrpc: "2.0", id: 2, method: "tools/list" },
+    // bugs.md #5: quoted / JSON-looking strings must arrive as strings through the stdio relay too.
+    { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "register_icons", arguments: { name: "relay-dot", svg: `<svg viewBox="0 0 24 24" fill='none'><circle cx="12" cy="12" r="4" stroke="#000"/></svg>` } } },
+    { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "update_root_css", arguments: { css: `.relay-q { font-family: "Geist", 'Geist Mono', sans-serif; }` } } },
+    { jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "create_project", arguments: { name: `{"a":1} it's "quoted"` } } },
   ]);
   assert.equal(replies.find((r) => r.id === 1)?.result?.serverInfo?.name, "weft");
   assert.equal(replies.find((r) => r.id === 2)?.result?.tools?.length, EXPECTED_TOOLS.length);
+  const toolResult = (id) => {
+    const r = replies.find((x) => x.id === id);
+    assert.ok(r?.result && !r.result.isError, `call ${id}: ${JSON.stringify(r)}`);
+    return JSON.parse(r.result.content[0].text);
+  };
+  assert.deepEqual(toolResult(3).registered, ["relay-dot"]);
+  assert.ok(toolResult(4).addedClasses.includes("relay-q"));
+  const proj = toolResult(5);
+  assert.equal(proj.name ?? proj.project?.name, `{"a":1} it's "quoted"`, JSON.stringify(proj));
 
   const port = await freePort();
   const offline = await runRelay(`http://127.0.0.1:${port}/mcp`, [{ jsonrpc: "2.0", id: 7, method: "tools/list" }]);
