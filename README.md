@@ -64,25 +64,31 @@ If your client only supports stdio, start the server first, then use the relay:
 }
 ```
 
-## MCP tools (49)
+## MCP tools (62)
 
 | Category | Tools |
 | --- | --- |
 | Projects & pages | `list_projects`, `create_project`, `open_project`, `rename_project`, `duplicate_project`, `delete_project`, `create_page`, `switch_page`, `update_page`, `delete_page` |
-| Authoring | `create_artboard`, `write_html`, `create_node`, `update_styles`, `update_node`, `set_text_content`, `rename_nodes`, `duplicate_nodes`, `move_nodes`, `delete_nodes` |
-| Inspection & selection | `get_guide`, `get_basic_info`, `get_selection`, `set_selection`, `get_tree_summary`, `get_children`, `get_node_info`, `find_nodes`, `get_computed_styles`, `get_screenshot` |
+| Authoring | `create_artboard`, `write_html`, `create_node`, `update_styles`, `update_node`, `update_nodes_matching`, `set_text_content`, `rename_nodes`, `duplicate_nodes`, `move_nodes`, `delete_nodes` |
+| Inspection & selection | `get_guide`, `get_basic_info`, `get_selection`, `set_selection`, `get_tree_summary`, `get_children`, `get_node_info`, `find_nodes`, `get_computed_styles` |
+| Review | `get_screenshot` (one or many widths, optional diagnostics), `audit_artboard` (broken images, overflow, fonts, tap targets, contrast) |
+| Components | `list_components`, `create_component`, `instantiate_component`, `update_component`, `delete_component` |
+| Root CSS & design tokens | `get_root_css`, `update_root_css`, `import_root_css`, `export_design_tokens`, `import_design_tokens` |
+| Icons | `register_icons`, `list_icons`, `delete_icon` |
 | Comments & collaboration | `get_comments`, `reply_to_comment`, `resolve_comment`, `finish_working_on_nodes`, `set_session_title` |
 | Checkpoints & history | `save_checkpoint`, `list_checkpoints`, `restore_checkpoint`, `undo`, `redo` |
 | Git remote | `git_status`, `git_push`, `git_pull` |
-| Root CSS (shared styles) | `get_root_css`, `update_root_css` |
 | Fonts & export | `list_fonts`, `add_font`, `remove_font`, `get_jsx` |
+
+Tool arguments are checked strictly: a misspelt or unknown argument is refused with the closest valid name, rather
+than ignored.
 
 ## Project structure
 
 | File | Role |
 | --- | --- |
 | [`server/index.js`](server/index.js) | Express 5 server: REST API, SSE (`/events`), JSON persistence, history/checkpoints/comments/activity, export, and `/mcp` |
-| [`server/mcp-tools.js`](server/mcp-tools.js) | Zod schemas and handlers for all 49 MCP tools |
+| [`server/mcp-tools.js`](server/mcp-tools.js) | Zod schemas and handlers for all 62 MCP tools |
 | [`server/mcp-stdio.js`](server/mcp-stdio.js) | stdio ↔ HTTP relay for stdio-only clients |
 | [`server/model.js`](server/model.js) | Project/node/comment normalization, CSS and attribute validation |
 | [`server/html-import.js`](server/html-import.js) | `parse5`-based HTML → node converter used by `write_html` |
@@ -90,11 +96,14 @@ If your client only supports stdio, start the server first, then use the relay:
 | [`server/checkpoint-store.js`](server/checkpoint-store.js) | Checkpoints as commits in a per-project bare git repo ([isomorphic-git](https://isomorphic-git.org)) |
 | [`server/fonts.js`](server/fonts.js) | Uploaded fonts (WOFF2/WOFF/TTF/OTF), Google Fonts, and `/fonts.css` |
 | [`server/components.js`](server/components.js) | Reusable components: definitions, instances and overrides |
+| [`server/selective-revert.js`](server/selective-revert.js) | Takes back one author's history steps while keeping everyone else's later changes (agent `undo`, Revert session) |
 | [`server/icons.js`](server/icons.js) | Icon registry (`<icon name>` in `write_html`) and SVG import |
 | [`server/design-tokens.js`](server/design-tokens.js) | Design tokens (W3C DTCG `tokens.json`) import/export and design lint |
 | [`server/audit.js`](server/audit.js) | Contrast and font checks run in the renderer (`audit`) |
 | [`ui/`](ui/) | Browser canvas UI source (Vite + Svelte 5; `npm run build` writes `public/`). [`ui/index.html`](ui/index.html) is the page (markup and CSS); [`ui/src/editor/`](ui/src/editor/) is the canvas engine and editor state, and panels and menus are Svelte components in [`ui/src/components/`](ui/src/components/) |
 | [`shared/root-css.js`](shared/root-css.js) | Root CSS parser/serialiser used by both the server and the editor (served at `/root-css.js`) |
+| [`shared/css-properties.js`](shared/css-properties.js) | Every CSS property Chrome knows, for "isn't a CSS property" hints (`npm run gen:css-properties`) |
+| [`scripts/`](scripts/) | UI build check before `npm start`, the undo fuzzer (`npm run fuzz:undo`), and the CSS property list generator |
 | [`test/`](test/) | `node:test` suites (`npm test`) and the linter (`npm run lint`) |
 | [`scripts/`](scripts/) | `ensure-ui-build.mjs`: rebuilds `public/` before `npm start` when `ui/` changed |
 | [`docs/todo.txt`](docs/todo.txt) | Original redesign backlog (historical notes) |
@@ -125,6 +134,26 @@ Requests are restricted by `Host`/`Origin` checks (see `ALLOWED_HOSTS`).
 - **Undo history** is in memory: the last 60 steps of the open project, cleared on restart or project switch. It powers Undo / Redo and the History panel.
 - **Edit log** (`DATA_DIR/projects/<id>.history.jsonl`) records every step's time, source, tool, label and layer ids, without the changes themselves, and survives restarts (newest 5,000 lines kept). It answers "when did this layer change?" through `GET /api/history/search`, but it is an audit trail only: it cannot restore anything.
 - **Checkpoints** are the long-term way to go back: save one before a big change, and restore it later.
+
+## Several agents at once
+
+Any number of agents can work on the same canvas alongside you.
+
+- **Each MCP connection is its own agent**, with its own cursor color and label ("Claude", "Claude 2", …). The server
+  gives every connection a session id when it connects (the endpoint itself stays stateless); the stdio relay sends
+  its own id per process.
+- **Undo never takes back anyone else's work.** An agent's `undo` reverts that agent's own latest step. If you or
+  another agent edited afterwards, only the agent's own changes are reverted, field by field, like `git revert`:
+  whatever someone else changed since is kept, and the result lists it under `kept`. `redo` reapplies the change.
+- **Revert session** on the dashboard's Agent activity feed works the same way for a whole agent session. When that
+  session's steps are no longer in the undo history (after a restart, or more than 60 steps ago), it offers to
+  restore the whole project to before the session instead, and says whose later edits that would discard.
+- **`restore_checkpoint`** rolls back everyone's work, so over MCP it is refused while you or another agent edited
+  since the checkpoint, unless the agent passes `force: true`.
+- **The History panel and the activity feed** show which agent made each step, and each agent's run gets its own
+  session and its own "Before agent run" checkpoint.
+
+`npm run fuzz:undo` (also run in CI) checks these rules against random interleaved edits.
 
 ## Syncing checkpoints to a git host
 
