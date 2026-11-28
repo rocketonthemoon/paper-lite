@@ -129,6 +129,23 @@ test("MCP edge cases: instances in duplicated containers, artboard sizes and pla
     await call("delete_nodes", { nodeIds: [box.id] });
   });
 
+  await t.test("agent undo never discards a user's edit unless asked", async () => {
+    const n = await call("create_node", { parentId: a.id, name: "Mine" });
+    const res = await fetch(`${srv.baseUrl}/api/nodes/${n.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ styles: { color: "green" } }) });
+    assert.equal(res.status, 200);
+    await assert.rejects(call("undo"), /made by the user .*nothing was done/);
+    assert.equal((await state()).nodes[n.id].styles.color, "green", "the user's edit is still there");
+    const forced = await call("undo", { includeUserEdits: true });
+    assert.equal(forced.step.by, "user");
+    assert.equal((await state()).nodes[n.id].styles.color, undefined);
+    await assert.rejects(call("redo"), /made by the user/);
+    assert.equal((await call("redo", { includeUserEdits: true })).redone, true);
+    await call("delete_nodes", { nodeIds: [n.id] });
+    const mine = await call("undo");
+    assert.equal(mine.step.by, "agent");
+    assert.match(mine.step.label, /delete/i);
+  });
+
   await t.test("update_root_css warns about var() loops", async () => {
     const res = await call("update_root_css", { vars: { "--x": "var(--y)", "--y": "var(--x)", "--fine": "var(--x)" } });
     assert.ok(res.warnings.some((w) => w.includes("--x → --y → --x")), JSON.stringify(res.warnings));

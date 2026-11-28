@@ -51,7 +51,8 @@ const GUIDE = `# weft MCP guide
 Each tool call waits for a full model round trip, so the number of calls, not their size, sets how long a design
 takes. Aim for 2–4 calls per screen, not 10–15:
 - write_html: write a complete section (header + hero + cards) or a whole screen in one call. One write_html is
-  one undo step, so a big call is still easy to take back.
+  one undo step, so a big call is still easy to take back. undo reports the step it took back and refuses to undo
+  an edit the user made in the UI meanwhile (pass includeUserEdits: true only when the user asks for that).
 - update_styles / set_text_content / rename_nodes / move_nodes / delete_nodes take lists: collect every change you
   want and send one call, not one per layer.
 - Set up all the root CSS a screen needs in one update_root_css call before writing it.
@@ -883,8 +884,13 @@ export function registerTools(mcpServer, ctx) {
     annotations: { ...WRITE, destructiveHint: true },
   }, async (args) => text(ctx.components.remove(args, "mcp")));
 
-  server.registerTool("undo", { description: "Undo the last canvas edit (from the UI or any agent).", inputSchema: {}, annotations: WRITE },
-    async () => text({ undone: ctx.undo("mcp") }));
-  server.registerTool("redo", { description: "Redo the last undone edit.", inputSchema: {}, annotations: WRITE },
-    async () => text({ redone: ctx.redo("mcp") }));
+  const includeUserEdits = z.boolean().optional().describe("Also undo/redo a step the user made in the UI. Default false: such a step is refused, so the user's work is never discarded by accident");
+  server.registerTool("undo", {
+    description: "Undo the last canvas edit (one tool call is one step) and say which step it was. Refuses when the last step is the user's own edit, unless includeUserEdits is true.",
+    inputSchema: { includeUserEdits }, annotations: WRITE,
+  }, async (args) => text(ctx.agentStep("undo", args)));
+  server.registerTool("redo", {
+    description: "Redo the last undone edit and say which step it was. Refuses a step the user made, unless includeUserEdits is true.",
+    inputSchema: { includeUserEdits }, annotations: WRITE,
+  }, async (args) => text(ctx.agentStep("redo", args)));
 }

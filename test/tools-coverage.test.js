@@ -474,16 +474,21 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
     const before = await countLayers();
     const res = await ok(B, "write_html", { parentId: section, html: "<div><span>a</span><span>b</span></div>" });
     assert.equal(await countLayers(), before + 3);
-    assert.deepEqual(await ok(B, "undo"), { undone: true });
+    const undone = await ok(B, "undo");
+    assert.equal(undone.undone, true);
+    assert.equal(undone.step.by, "agent");
+    assert.match(undone.step.label, /write_html/);
     assert.equal(await countLayers(), before, "one write_html = one undo step");
-    assert.deepEqual(await ok(B, "redo"), { redone: true });
+    assert.equal((await ok(B, "redo")).redone, true);
     assert.equal(await countLayers(), before + 3);
     await ok(B, "delete_nodes", { nodeIds: [res.created[0].id] });
 
-    // A human edit through the REST API lands in the same stack.
+    // A human edit through the REST API lands in the same stack; an agent only undoes it when told to.
     await fetch(`${B}/api/nodes/${title}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "Human edit" }) });
     assert.equal((await ok(B, "get_node_info", { nodeId: title })).name, "Human edit");
-    await ok(B, "undo");
+    await fails(B, "undo", {}, /made by the user/);
+    assert.equal((await ok(B, "get_node_info", { nodeId: title })).name, "Human edit", "refused undo changes nothing");
+    await ok(B, "undo", { includeUserEdits: true });
     assert.equal((await ok(B, "get_node_info", { nodeId: title })).name, "Title");
 
     // A failing batch must not leave partial changes or an undo entry.
