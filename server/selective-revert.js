@@ -43,6 +43,14 @@ export function revertPatches(doc, patches) {
         skip(id, cur.name, "created layer was edited since");
       }
     }
+    // …and whatever the step created around a kept layer stays too, so it never loses its parent.
+    for (const id of [...keptCreated]) {
+      for (let p = doc.nodes[id]?.parentId; p && before.nodes[p] === null && after.nodes[p]; p = doc.nodes[p]?.parentId) {
+        if (keptCreated.has(p)) break;
+        keptCreated.add(p);
+        skip(p, doc.nodes[p].name, "keeps a layer that was edited since");
+      }
+    }
     const insideKept = (id) => {
       for (let p = doc.nodes[id]?.parentId; p; p = doc.nodes[p]?.parentId) if (keptCreated.has(p)) return true;
       return false;
@@ -87,6 +95,8 @@ export function revertPatches(doc, patches) {
         }
         if (same(b[k], a[k])) continue;
         if (!same(cur[k], a[k])) { skip(id, cur.name, k); continue; }
+        // Moving back into a parent that no longer exists would orphan the layer: leave it where it is.
+        if (k === "parentId" && b.parentId && !doc.nodes[b.parentId]) { skip(id, cur.name, "parentId: its old parent was deleted since"); continue; }
         if (b[k] === undefined) delete cur[k]; else cur[k] = structuredClone(b[k]);
         changed = true;
       }
