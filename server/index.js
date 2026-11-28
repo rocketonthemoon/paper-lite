@@ -59,6 +59,14 @@ let workspace = { activeProjectId: null, projects: [] }; // projects: [{ id, nam
 let state; // { version, id, name, pages: [pageRootId], rootId: activePageId, nodes, comments }
 let historyTimeline = []; // [{ id, patch: { before, after }, source, tool, target, label, nodeIds, layerCount, at }]
 let historyCursor = -1;
+// Undo history of projects opened earlier in this run, kept when another project is opened so that switching back
+// (by you or by another agent: the open project is shared) doesn't wipe everyone's undo. It's only restored when the
+// project's content is unchanged since, so its patches still apply. In memory only, like the open project's history.
+const closedHistories = new Map(); // id -> { timeline, cursor, fingerprint }
+const CLOSED_HISTORY_LIMIT = 8;
+// It covers what history patches change (applyPatchSide), with keys sorted because loading a project can reorder them.
+const sortedJson = (v) => JSON.stringify(v, (_k, x) => (x && typeof x === "object" && !Array.isArray(x) ? Object.fromEntries(Object.keys(x).sort().map((k) => [k, x[k]])) : x));
+const historyFingerprint = (doc) => sortedJson([doc.pages, doc.nodes, doc.rootCss, doc.icons ?? null, doc.components ?? {}]);
 let projectCheckpoints = []; // [{ id, name, auto, kind, at, historyId, layerCount, commit }] — snapshots live in git
 let projectRemote = { connected: false }; // open project's git remote, as the browser may see it (no token)
 let projectSessions = []; // [{ id, projectId, projectName, source, agentName, title, artboard, startedAt, updatedAt, editCount, toolCounts, checkpointId, live, reverted }]
@@ -451,10 +459,18 @@ async function openProject(id, source = "api") {
     flushWrites();
     sessionsCache.set(state.id, projectSessions);
   }
+  if (state && historyTimeline.length) {
+    closedHistories.delete(state.id);
+    closedHistories.set(state.id, { timeline: historyTimeline, cursor: historyCursor, fingerprint: historyFingerprint(state) });
+    while (closedHistories.size > CLOSED_HISTORY_LIMIT) closedHistories.delete(closedHistories.keys().next().value);
+  }
+  const kept = closedHistories.get(id);
+  closedHistories.delete(id);
+  const resume = kept && kept.fingerprint === historyFingerprint(doc);
   state = doc;
   projectSessions = []; // until loadProjectExtras() reads this project's own sessions
-  historyTimeline = [];
-  historyCursor = -1;
+  historyTimeline = resume ? kept.timeline : [];
+  historyCursor = resume ? kept.cursor : -1;
   lastMcpWriteAt.clear();
   lastCheckpointHistoryKey = null;
   pendingSessionTitles.clear();
@@ -590,6 +606,7 @@ async function deleteProject(id, source = "api") {
   workspace.projects = workspace.projects.filter((p) => p.id !== id);
   previewCache.delete(id);
   sessionsCache.delete(id);
+  closedHistories.delete(id);
   for (const key of [`project:${id}`, `sessions:${id}`]) pendingWrites.delete(key);
   await queueDisk(async () => {
     await fs.rm(projectFile(id), { force: true });
