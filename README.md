@@ -159,6 +159,9 @@ npm run build  # build the editor UI: ui/ -> public/ (not committed)
 npm run dev:ui # editor with hot reload on :5173; run `npm start` alongside for the API on :3000
 npm run lint   # syntax, CSS/DOM checks, ESLint
 npm test       # builds the UI, then unit, MCP tool coverage, integration, stdio relay, browser E2E
+npm run fuzz:undo           # random edits by two agents and the user, checking undo / session revert keep the
+                            # document consistent (SEEDS=1,2,3 N=500 for longer runs)
+npm run gen:css-properties  # regenerate shared/css-properties.js after upgrading Chrome
 ```
 
 Browser tests need Chrome or Chromium installed and are skipped if none is found.

@@ -119,3 +119,30 @@ test("several steps of one author revert newest first", () => {
   assert.equal(d.nodes.x.styles.color, "red");
   assert.equal(d.nodes.y.text, "hi");
 });
+
+// Found by fuzzing interleaved agents and user edits.
+test("a move isn't reverted into a parent that was deleted since", () => {
+  const d = doc();
+  d.nodes.B = { id: "B", name: "Other", tag: "div", parentId: "P", children: [], text: "", styles: {}, attrs: {} };
+  d.nodes.P.children.push("B");
+  const mine = step(d, (s) => { s.nodes.x.parentId = "B"; s.nodes.A.children = ["y"]; s.nodes.B.children = ["x"]; });
+  step(d, (s) => { delete s.nodes.A; delete s.nodes.y; s.nodes.P.children = ["B"]; });
+  const r = revertPatches(d, [mine]);
+  assert.equal(d.nodes.x.parentId, "B", "stays where it is instead of becoming an orphan");
+  assert.deepEqual(d.nodes.B.children, ["x"]);
+  assert.ok(r.skipped.some((k) => k.id === "x" && k.fields[0].startsWith("parentId")));
+});
+
+test("a created layer that holds a kept layer stays, so the kept one keeps its parent", () => {
+  const d = doc();
+  const mine = step(d, (s) => {
+    s.nodes.c = { id: "c", name: "Card", tag: "div", parentId: "A", children: ["t"], text: "", styles: {}, attrs: {} };
+    s.nodes.t = { id: "t", name: "Title", tag: "h3", parentId: "c", children: [], text: "T", styles: {}, attrs: {} };
+    s.nodes.A.children.push("c");
+  });
+  step(d, (s) => { s.nodes.t.text = "Edited by someone"; }); // the inner layer is edited, not the card
+  revertPatches(d, [mine]);
+  assert.ok(d.nodes.c && d.nodes.t, "card and title both stay");
+  assert.equal(d.nodes.t.parentId, "c");
+  assert.deepEqual(d.nodes.A.children, ["x", "y", "c"]);
+});
