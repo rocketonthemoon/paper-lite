@@ -4,6 +4,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { mcpCall, startServer } from "./helpers.js";
 
 test("MCP edge cases: instances in duplicated containers, artboard sizes and placement, override and patch typos, var loops", { timeout: 60_000 }, async (t) => {
@@ -215,6 +217,65 @@ test("MCP edge cases: instances in duplicated containers, artboard sizes and pla
     assert.match(kept.note, /stays resolved/);
     const reopened = await call("reply_to_comment", { id: thread.id, text: "Actually one more thing", reopen: true });
     assert.equal(reopened.status, "replied");
+  });
+
+  await t.test("two agents at once: neither undoes nor clears the other's work by default", async () => {
+    const as = (client) => (name, args) => mcpCall(srv.baseUrl, name, args, { "x-weft-client": client });
+    const A = as("agent-a"), B = as("agent-b");
+    const mineA = await A("create_node", { parentId: a.id, name: "From A" });
+    const mineB = await B("create_node", { parentId: a.id, name: "From B" });
+    await assert.rejects(A("undo"), /another agent session/);
+    assert.ok((await state()).nodes[mineB.id], "B's layer is still there");
+    assert.equal((await B("undo")).step.by, "agent", "B can undo its own step");
+    assert.equal((await B("redo")).redone, true);
+    const forced = await A("undo", { includeOtherAgentsEdits: true });
+    assert.equal(forced.step.by, "another agent");
+    await A("redo", { includeOtherAgentsEdits: true });
+
+    await A("update_styles", { updates: [{ nodeIds: [mineA.id], styles: { color: "red" } }] });
+    await B("update_styles", { updates: [{ nodeIds: [mineB.id], styles: { color: "blue" } }] });
+    await B("finish_working_on_nodes", {});
+    const working = (await A("get_basic_info")).agentWorkingOn;
+    assert.ok(working.includes(mineA.id), "A's outline survives B finishing");
+    assert.ok(!working.includes(mineB.id), "B's outline is gone");
+    await A("finish_working_on_nodes", {});
+    await A("delete_nodes", { nodeIds: [mineA.id, mineB.id] });
+  });
+
+  await t.test("each MCP connection is its own agent: session id, color, name and outline color", async () => {
+    // Same client name and User-Agent, like two Claude Code windows: before, these were one agent.
+    const connect = async () => {
+      const client = new Client({ name: "claude-code", version: "1" });
+      const transport = new StreamableHTTPClientTransport(new URL(`${srv.baseUrl}/mcp`));
+      await client.connect(transport);
+      return { client, transport };
+    };
+    const [one, two] = [await connect(), await connect()];
+    try {
+      assert.match(one.transport.sessionId, /^weft-/);
+      assert.notEqual(one.transport.sessionId, two.transport.sessionId);
+      const tool = async (c, name, args) => JSON.parse((await c.client.callTool({ name, arguments: args })).content[0].text);
+      const x = await tool(one, "create_node", { parentId: a.id, name: "One" });
+      const y = await tool(two, "create_node", { parentId: a.id, name: "Two" });
+      const undo = await one.client.callTool({ name: "undo", arguments: {} });
+      assert.ok(undo.isError && /another agent session/.test(undo.content[0].text), "separate agents can't undo each other");
+
+      const ctl = new AbortController();
+      const res = await fetch(`${srv.baseUrl}/events`, { signal: ctl.signal });
+      const reader = res.body.getReader();
+      let buf = "";
+      while (!/event: presence\ndata: .*\n/.test(buf)) buf += new TextDecoder().decode((await reader.read()).value);
+      ctl.abort();
+      const presence = JSON.parse(/event: presence\ndata: (.*)\n/.exec(buf)[1]);
+      const cursorOne = presence.agents.find((c) => c.nodeIds.includes(x.id));
+      const cursorTwo = presence.agents.find((c) => c.nodeIds.includes(y.id));
+      assert.notEqual(cursorOne.color, cursorTwo.color, "different colors");
+      assert.notEqual(cursorOne.name, cursorTwo.name, "different labels (Claude, Claude 2)");
+      assert.equal(presence.nodes.find((n) => n.id === x.id).color, cursorOne.color, "outline in the agent's color");
+      await tool(one, "delete_nodes", { nodeIds: [x.id, y.id] });
+    } finally {
+      for (const c of [one, two]) { await c.transport.terminateSession().catch(() => {}); await c.client.close(); }
+    }
   });
 
   await t.test("update_root_css warns about var() loops", async () => {
