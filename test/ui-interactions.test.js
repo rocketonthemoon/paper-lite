@@ -1185,7 +1185,8 @@ test("UI interactions: drawing, editing, shortcuts, panels, projects and live sy
     assert.equal(await ui.evalJs(`getComputedStyle(document.getElementById("ctx-bar")).display`), "none");
 
     // Dragging one of them moves both, as one undo step.
-    const before = (await (await fetch(`${B}/api/history`)).json()).entries.length;
+    // Counted by id: the history is capped, so its length can stay the same when a step is added.
+    const before = new Set((await (await fetch(`${B}/api/history`)).json()).entries.map((e) => e.id));
     a = await nodeRect(A);
     const z = await ui.evalJs("view.z");
     await ui.drag(a.cx, a.cy, a.cx + 40 * z, a.cy + 20 * z);
@@ -1194,7 +1195,7 @@ test("UI interactions: drawing, editing, shortcuts, panels, projects and live sy
     assert.equal((await styles(Bx)).top, "80px");
     assert.equal((await styles(C)).left, "200px", "C stayed");
     const hist = (await (await fetch(`${B}/api/history`)).json()).entries;
-    assert.equal(hist.length, before + 1, "one history entry for the move");
+    assert.equal(hist.filter((e) => !before.has(e.id)).length, 1, "one history entry for the move");
     assert.match(JSON.stringify(hist.at(-1)), /2 layers/);
 
     // Shift+click adds C, then takes B out.

@@ -412,6 +412,21 @@ test("MCP edge cases: instances in duplicated containers, artboard sizes and pla
     await call("delete_nodes", { nodeIds: [big.id] });
   });
 
+  await t.test("switching to another project and back keeps undo history (a rename meanwhile is fine)", async () => {
+    const home = (await state()).id;
+    const made = await call("create_artboard", { name: "Undo me later", width: 200, height: 200 });
+    const other = await call("create_project", { name: "Elsewhere", open: true });
+    await call("rename_project", { projectId: home, name: "Home renamed" });
+    await call("open_project", { projectId: home });
+    const res = await call("undo");
+    assert.equal(res.undone, true, JSON.stringify(res));
+    assert.ok(!(await state()).nodes[made.id], "the artboard made before the switch is undone");
+    await call("redo");
+    assert.ok((await state()).nodes[made.id]);
+    await call("delete_project", { projectId: other.id });
+    await call("delete_nodes", { nodeIds: [made.id] });
+  });
+
   await t.test("update_root_css warns about var() loops", async () => {
     const res = await call("update_root_css", { vars: { "--x": "var(--y)", "--y": "var(--x)", "--fine": "var(--x)" } });
     assert.ok(res.warnings.some((w) => w.includes("--x → --y → --x")), JSON.stringify(res.warnings));
