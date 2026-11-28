@@ -365,6 +365,40 @@ test("MCP edge cases: instances in duplicated containers, artboard sizes and pla
     await call("delete_nodes", { nodeIds: [one.id, two.id, label].filter((id) => st.nodes[id]) });
   });
 
+  await t.test("update_component puts a part someone moved inside the instance back, listed by one parent only", async () => {
+    await call("create_component", { name: "regroup", html: `<div data-name="R"><p data-slot="label">L</p></div>` });
+    const inst = await call("instantiate_component", { component: "regroup", parentId: a.id });
+    let st = await state();
+    const label = st.nodes[inst.id].children[0];
+    const wrap = await call("create_node", { parentId: inst.id, name: "Wrapper" }); // a layer added inside the instance
+    await call("move_nodes", { nodeIds: [label], parentId: wrap.id });
+    await call("update_component", { component: "regroup", slot: "root", patch: { styles: { gap: "2px" } } });
+    st = await state();
+    const claimants = Object.values(st.nodes).filter((n) => n.children.includes(label)).map((n) => n.id);
+    assert.deepEqual(claimants, [st.nodes[label].parentId], "exactly one parent lists the part");
+    await call("delete_nodes", { nodeIds: [inst.id] });
+  });
+
+  await t.test("after an agent's undo its cursor shows undo, or disappears when its layers are gone", async () => {
+    const as = (name, args) => mcpCall(srv.baseUrl, name, args, { "x-weft-client": "cursor-agent" });
+    const cursorOf = async (pred) => {
+      const ctl = new AbortController();
+      const reader = (await fetch(`${srv.baseUrl}/events`, { signal: ctl.signal })).body.getReader();
+      let buf = "";
+      while (!/event: presence\ndata: .*\n/.test(buf)) buf += new TextDecoder().decode((await reader.read()).value);
+      ctl.abort();
+      return JSON.parse(/event: presence\ndata: (.*)\n/.exec(buf)[1]).agents.find(pred);
+    };
+    const n = await as("create_node", { parentId: a.id, name: "Cursor target" });
+    await as("update_styles", { updates: [{ nodeIds: [n.id], styles: { color: "red" } }] });
+    await as("undo");
+    const c = await cursorOf((x) => x.nodeIds.includes(n.id));
+    assert.equal(c?.tool, "undo");
+    await as("undo"); // undoes the creation: the layer is gone
+    assert.equal(await cursorOf((x) => x.nodeIds.includes(n.id)), undefined);
+    assert.equal(await cursorOf((x) => x.tool === "undo" && x.nodeIds.length === 0), undefined);
+  });
+
   await t.test("update_root_css warns about var() loops", async () => {
     const res = await call("update_root_css", { vars: { "--x": "var(--y)", "--y": "var(--x)", "--fine": "var(--x)" } });
     assert.ok(res.warnings.some((w) => w.includes("--x → --y → --x")), JSON.stringify(res.warnings));

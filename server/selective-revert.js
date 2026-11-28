@@ -69,6 +69,8 @@ export function revertPatches(doc, patches) {
       if (!b) {
         // Created by the step: remove it, unless someone changed it since or put their own layers inside it.
         if (!cur || keptCreated.has(id) || insideKept(id)) continue;
+        // A project always keeps at least one page.
+        if (doc.pages.includes(id) && !doc.pages.some((p) => p !== id && doc.nodes[p])) { skip(id, cur.name, "it is the only page left"); continue; }
         delete doc.nodes[id];
         reverted.add(id);
         continue;

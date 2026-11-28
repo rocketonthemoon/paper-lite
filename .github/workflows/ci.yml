@@ -48,6 +48,13 @@ jobs:
         timeout-minutes: 10
         run: npm test
 
+      - name: Fuzz undo / session revert with interleaved agents and user
+        timeout-minutes: 5
+        run: npm run fuzz:undo
+        env:
+          SEEDS: "1,2,3,4,5"
+          N: "300"
+
   docker-and-trivy:
     name: Container Build, Runtime Smoke Test & Trivy Scan
     runs-on: ubuntu-latest

@@ -99,8 +99,10 @@
   const stepMeta = (e, i) => {
     const s = stepState(i);
     if (s === "undone") return "Undone · Ctrl+Shift+Z to redo";
-    if (s === "cur") return `Current state · ${stamp(e.at)}`;
-    return `${stamp(e.at)}${e.nodeIds?.length > 1 ? ` · ${e.nodeIds.length} layers` : e.source !== "mcp" ? " · You" : ""}`;
+    // Who made it: "You", or the agent's name, so steps from two agents working at once can be told apart.
+    const who = e.source === "mcp" ? e.agentName || "" : "You";
+    if (s === "cur") return `Current state · ${stamp(e.at)}${who ? ` · ${who}` : ""}`;
+    return [stamp(e.at), who, e.nodeIds?.length > 1 ? `${e.nodeIds.length} layers` : ""].filter(Boolean).join(" · ");
   };
   const canUndoAgent = $derived(entries.some((e, i) => i <= hist.cursor && e.source === "mcp"));
 
