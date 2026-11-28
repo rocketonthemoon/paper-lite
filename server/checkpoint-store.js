@@ -4,8 +4,11 @@
 // live in commit-message trailers, so a repo pulled from a remote is self-describing.
 // Remotes: any git host over HTTPS with a pasted token (GitHub, GitLab, Bitbucket, Gitea, …). The remote config
 // and token live in data/projects/<id>.remote.json, outside the repo, and are never sent to the browser.
+import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
+import path from "node:path";
+import { deflateSync, inflateSync } from "node:zlib";
 import git from "isomorphic-git";
 import http from "isomorphic-git/http/node";
 
@@ -117,13 +120,42 @@ export class CheckpointRepo {
   }
 
   async blob(text) {
-    let oid = this.blobCache.get(text);
-    if (!oid) {
-      oid = await git.writeBlob({ fs, gitdir: this.gitdir, blob: Buffer.from(text, "utf8") });
-      if (this.blobCache.size > 50_000) this.blobCache.clear();
-      this.blobCache.set(text, oid);
+    return (await this.blobs([text]))[0];
+  }
+
+  // Store texts as git blobs; returns their oids in order. Written as standard loose objects with Node's own SHA-1
+  // and zlib, in parallel batches: isomorphic-git's writeBlob hashes and compresses in JavaScript, one at a time, so
+  // a 6,000-layer checkpoint took ~10 s of mostly blocking work (now well under a second). Texts already stored
+  // (the cache, or an object file that exists) are skipped. Each object goes to a temp file first and is renamed
+  // into place, so a crash can't leave a truncated object behind.
+  async blobs(texts) {
+    const oids = new Array(texts.length);
+    const todo = [];
+    texts.forEach((text, i) => {
+      const hit = this.blobCache.get(text);
+      if (hit) oids[i] = hit; else todo.push(i);
+    });
+    const dirs = new Map(); // object folder -> its mkdir, shared by every write into it (awaited, not just started)
+    for (let k = 0; k < todo.length; k += 128) {
+      await Promise.all(todo.slice(k, k + 128).map(async (i) => {
+        const body = Buffer.from(texts[i], "utf8");
+        const store = Buffer.concat([Buffer.from(`blob ${body.length}\0`), body]);
+        const oid = createHash("sha1").update(store).digest("hex");
+        const dir = path.join(this.gitdir, "objects", oid.slice(0, 2));
+        const file = path.join(dir, oid.slice(2));
+        if (!fs.existsSync(file)) {
+          if (!dirs.has(dir)) dirs.set(dir, fs.promises.mkdir(dir, { recursive: true }));
+          await dirs.get(dir);
+          const tmp = `${file}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+          await fs.promises.writeFile(tmp, deflateSync(store));
+          await fs.promises.rename(tmp, file);
+        }
+        oids[i] = oid;
+        if (this.blobCache.size > 50_000) this.blobCache.clear();
+        this.blobCache.set(texts[i], oid);
+      }));
     }
-    return oid;
+    return oids;
   }
 
   // Commit `snapshot` ({ id, name, version, pages, rootId, nodes, rootCss }) as checkpoint `cp`. Returns the oid.
@@ -132,10 +164,9 @@ export class CheckpointRepo {
       await this.ensure();
       const { nodes, ...rest } = snapshot;
       delete rest.version; // bumps on every edit; keeping it would make weft.json change in every checkpoint
-      const nodeEntries = [];
-      for (const [id, node] of Object.entries(nodes)) {
-        nodeEntries.push({ mode: "100644", path: `${id}.json`, type: "blob", oid: await this.blob(`${JSON.stringify(node, null, 2)}\n`) });
-      }
+      const ids = Object.keys(nodes);
+      const oids = await this.blobs(ids.map((id) => `${JSON.stringify(nodes[id], null, 2)}\n`));
+      const nodeEntries = ids.map((id, i) => ({ mode: "100644", path: `${id}.json`, type: "blob", oid: oids[i] }));
       const nodesTree = await git.writeTree({ fs, gitdir: this.gitdir, tree: nodeEntries });
       const docOid = await this.blob(`${JSON.stringify({ format: FORMAT, ...rest }, null, 2)}\n`);
       const tree = await git.writeTree({
@@ -179,17 +210,30 @@ export class CheckpointRepo {
   // The document stored in a checkpoint commit.
   read(commitOid) {
     return this.run(async () => {
-      const { tree } = await git.readTree({ fs, gitdir: this.gitdir, oid: commitOid });
+      // One cache for the whole read: without it isomorphic-git redoes its object lookup for every one of the
+      // thousands of layer files (a 6,000-layer checkpoint took seconds to restore).
+      const cache = {};
+      const { tree } = await git.readTree({ fs, gitdir: this.gitdir, oid: commitOid, cache });
       const docEntry = tree.find((e) => e.path === "weft.json");
       const nodesEntry = tree.find((e) => e.path === "nodes");
       if (!docEntry || !nodesEntry) throw new GitError(422, "This checkpoint commit is not a weft snapshot");
-      const readText = async (oid) => Buffer.from((await git.readBlob({ fs, gitdir: this.gitdir, oid })).blob).toString("utf8");
+      // Loose objects (everything weft writes) are read directly with Node's zlib; objects that came in a packfile
+      // (e.g. after a pull) go through isomorphic-git.
+      const readText = async (oid) => {
+        try {
+          const raw = inflateSync(await fsp.readFile(path.join(this.gitdir, "objects", oid.slice(0, 2), oid.slice(2))));
+          return raw.subarray(raw.indexOf(0) + 1).toString("utf8");
+        } catch (err) {
+          if (err.code !== "ENOENT") throw err;
+          return Buffer.from((await git.readBlob({ fs, gitdir: this.gitdir, oid, cache })).blob).toString("utf8");
+        }
+      };
       const doc = JSON.parse(await readText(docEntry.oid));
       delete doc.format;
       const nodes = {};
-      const entries = (await git.readTree({ fs, gitdir: this.gitdir, oid: nodesEntry.oid })).tree;
-      for (let i = 0; i < entries.length; i += 64) {
-        const chunk = entries.slice(i, i + 64);
+      const entries = (await git.readTree({ fs, gitdir: this.gitdir, oid: nodesEntry.oid, cache })).tree;
+      for (let i = 0; i < entries.length; i += 256) {
+        const chunk = entries.slice(i, i + 256);
         const texts = await Promise.all(chunk.map((e) => readText(e.oid)));
         chunk.forEach((e, j) => { nodes[e.path.replace(/\.json$/, "")] = JSON.parse(texts[j]); });
       }
