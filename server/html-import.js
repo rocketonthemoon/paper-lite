@@ -40,7 +40,8 @@ export function parseInlineStyle(text) {
   return out;
 }
 
-const squash = (t) => t.replace(/\s+/g, " ");
+// Collapse whitespace like HTML does, and drop control characters (NUL, escape, …) that never belong in layer text.
+const squash = (t) => t.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g, "").replace(/\s+/g, " ");
 // A layer name taken from aria-label: plain text only (the attribute itself is validated separately by mergeAttrs).
 const plainName = (v) => squash(String(v).replace(/[<>\u0000-\u001f\u007f]/g, " ")).trim();
 

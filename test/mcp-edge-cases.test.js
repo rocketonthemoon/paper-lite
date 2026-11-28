@@ -43,8 +43,53 @@ test("MCP edge cases: instances in duplicated containers, artboard sizes and pla
 
   await t.test("update_component refuses no-ops and misshapen patch / appendHtml", async () => {
     await assert.rejects(call("update_component", { component: "chip" }), /Nothing to update/);
-    await assert.rejects(call("update_component", { component: "chip", patch: { label: { styles: { color: "red" } } } }), /Unrecognized key/);
-    await assert.rejects(call("update_component", { component: "chip", appendHtml: { slot: "label", html: "<b>x</b>" } }), /Unrecognized key/);
+    await assert.rejects(call("update_component", { component: "chip", patch: { label: { styles: { color: "red" } } } }), /Unknown argument "label"/);
+    await assert.rejects(call("update_component", { component: "chip", appendHtml: { slot: "label", html: "<b>x</b>" } }), /Unknown argument "slot"/);
+  });
+
+  await t.test("unknown or misspelled arguments are refused with a suggestion, top level and nested", async () => {
+    await assert.rejects(call("update_node", { nodeId: a.id, style: { color: "red" } }), /Unknown argument "style" \(did you mean "styles"\?\)/);
+    await assert.rejects(call("update_styles", { updates: [{ nodeIds: [a.id], styles: {}, lint: false }] }), /Unknown argument "lint"/);
+    await assert.rejects(call("update_node", { nodeId: a.id }), /Nothing to update/);
+  });
+
+  await t.test("void tags hold no text; delete_nodes checks every id", async () => {
+    await assert.rejects(call("create_node", { parentId: a.id, tag: "img", text: "x" }), /can't hold text/);
+    const n = await call("create_node", { parentId: a.id, name: "T", text: "words" });
+    await call("update_node", { nodeId: n.id, tag: "img" });
+    assert.equal((await state()).nodes[n.id].text, "");
+    await assert.rejects(call("delete_nodes", { nodeIds: [n.id, "nope"] }), /"nope" not found; nothing was deleted/);
+    assert.ok((await state()).nodes[n.id]);
+    await call("delete_nodes", { nodeIds: [n.id] });
+  });
+
+  await t.test("control characters are stripped from text; names also lose bidi overrides", async () => {
+    const n = await call("create_node", { parentId: a.id, tag: "p", name: "Na\u202eme\u0000", text: "a\u0000b\u001bc \u202ertl" });
+    const node = (await state()).nodes[n.id];
+    assert.equal(node.name, "Name");
+    assert.equal(node.text, "abc \u202ertl");
+    await call("delete_nodes", { nodeIds: [n.id] });
+  });
+
+  await t.test("data-slot from write_html names the slot of a component made from those layers", async () => {
+    const w = await call("write_html", { parentId: a.id, html: `<div data-name="Card"><h3 data-slot="title">T</h3></div>` });
+    const comp = await call("create_component", { name: "card-from-node", nodeId: w.created[0].id });
+    assert.ok(comp.slots.some((sl) => sl.slot === "title" && sl.key === "title"), JSON.stringify(comp.slots));
+  });
+
+  await t.test("lint hints only cover the styles a call set; @import gets a plain error", async () => {
+    await call("update_root_css", { vars: { "--color-primary": "#0000ff", "--space-4": "16px" } });
+    const res = await call("update_nodes_matching", { artboardIds: [a.id], styles: { padding: "16px" } });
+    assert.ok(res.hints?.length && res.hints.every((h) => /padding/.test(h)), JSON.stringify(res.hints));
+    await assert.rejects(call("update_root_css", { css: "@import url(https://example.com/x.css);" }), /@import isn't supported/);
+  });
+
+  await t.test("a layer moved onto the page goes to a free spot", async () => {
+    const kid = await call("create_node", { parentId: a.id, name: "Kid", styles: { width: "50px", height: "50px" } });
+    await call("move_nodes", { nodeIds: [kid.id], parentId: (await state()).rootId });
+    const s = await state();
+    const right = Math.max(...s.nodes[s.rootId].children.filter((id) => id !== kid.id).map((id) => parseFloat(s.nodes[id].styles.left) + parseFloat(s.nodes[id].styles.width)));
+    assert.ok(parseFloat(s.nodes[kid.id].styles.left) >= right, `Kid at ${s.nodes[kid.id].styles.left}`);
   });
 
   await t.test("update_root_css warns about var() loops", async () => {

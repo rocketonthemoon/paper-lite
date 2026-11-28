@@ -352,7 +352,15 @@ export function lenientMerge(merge, obj, warnings, where) {
   return out;
 }
 
-export const cleanName = (name, fallback = "Untitled") => String(name ?? "").trim().slice(0, 120) || fallback;
+// C0/C1 control characters (NUL, escape, …) never belong in layer text; tab and newline stay.
+const CONTROL_RE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g;
+// Names also drop bidi embedding/override/isolate characters, which can make a layer or project name in a list read
+// as something else. Text content keeps them: they are legitimate in mixed-direction copy.
+const BIDI_CONTROL_RE = /[\u202A-\u202E\u2066-\u2069]/g;
+export const cleanText = (text) => String(text ?? "").replace(CONTROL_RE, "");
+export const cleanName = (name, fallback = "Untitled") => String(name ?? "").replace(CONTROL_RE, "").replace(BIDI_CONTROL_RE, "").trim().slice(0, 120) || fallback;
+// Tags that can't hold text content.
+export const holdsNoText = (tag) => SVG_TAGS.has(tag) || VOID_TAGS.has(tag);
 
 export function emptyPage(name = "Page 1", id = newId()) {
   return { id, name: cleanName(name, "Page 1"), tag: "div", parentId: null, children: [], text: "", styles: {}, attrs: {} };
@@ -458,6 +466,7 @@ export function normalizeProject(raw, { id, name, warnings = null } = {}) {
     if (typeof n.componentId === "string" && COMPONENT_NAME_RE.test(n.componentId)) nodes[nid].componentId = n.componentId;
     if (typeof n.componentRootId === "string" && ID_RE.test(n.componentRootId)) nodes[nid].componentRootId = n.componentRootId;
     if (typeof n.componentKey === "string" && SLOT_NAME_RE.test(n.componentKey)) nodes[nid].componentKey = n.componentKey;
+    if (typeof n.slot === "string" && SLOT_NAME_RE.test(n.slot)) nodes[nid].slot = n.slot;
     const ov = normalizeOverrides(n.componentOverrides);
     if (ov) nodes[nid].componentOverrides = ov;
     for (const cid of Array.isArray(n.children) ? n.children : []) if (walk(cid, nid)) nodes[nid].children.push(cid);

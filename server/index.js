@@ -11,7 +11,7 @@ import { randomBytes } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
-  HttpError, ID_RE, SVG_TAGS, VOID_TAGS, cleanName, cleanTag, emptyPage, emptyProject, lenientMerge, mergeAttrs, mergeStyles,
+  HttpError, ID_RE, SLOT_NAME_RE, SVG_TAGS, VOID_TAGS, cleanName, cleanText, holdsNoText, cleanTag, emptyPage, emptyProject, lenientMerge, mergeAttrs, mergeStyles,
   newId, normalizeProject, emptyRootCss, mergeRootCss, rootCssText, rootCssFlat, rootBaseClasses, definedRootClasses,
   isBaseRule, rootClassesIn, cleanClassList, varsIn, analyzeRootCssUsage, pruneUnusedRootCss,
 } from "./model.js";
@@ -1394,10 +1394,12 @@ function createNode(input, source = "api", meta = null) {
   const attrs = mergeAttrs({}, input.attrs, tag);
   const classes = input.classes === undefined ? [] : definedClasses(cleanClassList(input.classes));
   const nodeName = cleanName(input.name, tag);
+  const text = cleanText(input.text);
+  if (holdsNoText(tag) && text.trim()) throw new HttpError(400, `<${tag}> can't hold text`);
   const toolFallback = isPage(parent.id) ? "Draw Frame" : (tag === "p" && input.text !== undefined ? "Create Text" : "Draw Rect");
   return mutate(source, (s) => {
     const id = newId();
-    s.nodes[id] = { id, name: nodeName, tag, parentId: parent.id, children: [], text: String(input.text ?? ""), styles, attrs };
+    s.nodes[id] = { id, name: nodeName, tag, parentId: parent.id, children: [], text: holdsNoText(tag) ? "" : text, styles, attrs };
     if (classes.length) s.nodes[id].classes = classes;
     insertChild(s.nodes[parent.id], id, input.index);
     return s.nodes[id];
@@ -1417,7 +1419,12 @@ function updateNode(id, patch, source = "api", meta = null) {
       if (toSvg !== wasSvg) throw new HttpError(400, `Can't switch between HTML and SVG tags while the layer has children`);
     }
   }
-  if (patch.text !== undefined) next.text = String(patch.text);
+  const finalTag = next.tag ?? node.tag;
+  if (patch.text !== undefined) {
+    next.text = cleanText(patch.text);
+    if (holdsNoText(finalTag) && next.text.trim()) throw new HttpError(400, `<${finalTag}> can't hold text`);
+  }
+  if (next.tag && holdsNoText(next.tag) && node.text) next.text = ""; // switching to img/svg/… drops text it can't show
   if (patch.styles !== undefined) next.styles = mergeStyles(patch.replaceStyles ? {} : node.styles, patch.styles);
   if (patch.attrs !== undefined) next.attrs = mergeAttrs(node.attrs, patch.attrs, next.tag ?? node.tag);
   if (patch.classes !== undefined || patch.addClasses !== undefined || patch.removeClasses !== undefined) {
@@ -1474,9 +1481,16 @@ function updateNode(id, patch, source = "api", meta = null) {
     if (moving) {
       const oldParent = s.nodes[n.parentId];
       oldParent.children = oldParent.children.filter((c) => c !== id);
+      const wasArtboard = isPage(n.parentId);
       n.parentId = patch.parentId ?? n.parentId;
+      // Anything moved onto a page becomes an artboard and needs a world position: the next free spot (not 0,0, where
+      // it would sit on top of the first artboard), unless this same patch places it.
+      const placed = patch.styles && (patch.styles.left !== undefined || patch.styles.top !== undefined);
+      if (isPage(n.parentId) && !wasArtboard && !placed) {
+        const pos = nextArtboardPosition(n.parentId);
+        n.styles = mergeStyles(n.styles, { position: "absolute", left: pos.x, top: pos.y });
+      }
       insertChild(s.nodes[n.parentId], id, patch.index);
-      // Anything moved onto a page becomes an artboard and needs a world position.
       if (isPage(n.parentId) && n.styles.position !== "absolute") n.styles = mergeStyles(n.styles, { position: "absolute", left: 0, top: 0 });
     }
     return n;
@@ -1956,10 +1970,11 @@ function addSubtree(spec, parentId, index, warnings) {
   }
   const attrs = lenientMerge((b, p) => mergeAttrs(b, p, tag), spec.attrs, warnings, label);
   const id = newId();
-  const noText = SVG_TAGS.has(tag) || VOID_TAGS.has(tag);
-  const text = String(spec.text ?? "");
+  const noText = holdsNoText(tag);
+  const text = cleanText(spec.text);
   if (noText && text.trim()) warnings.push(`${label}: <${tag}> can't hold text; dropped "${text.length > 40 ? `${text.slice(0, 37)}…` : text}"`);
   state.nodes[id] = { id, name: label, tag, parentId: parent.id, children: [], text: noText ? "" : text, styles, attrs };
+  if (spec.slot && SLOT_NAME_RE.test(spec.slot)) state.nodes[id].slot = spec.slot; // kept for create_component({ nodeId })
   let classes = [];
   for (const c of spec.classes || []) {
     try { classes = cleanClassList([...classes, c]); } catch (err) { warnings.push(`${label}: ${err.message}`); }
