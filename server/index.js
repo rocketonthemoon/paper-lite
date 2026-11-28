@@ -1035,6 +1035,21 @@ function stepHistory(source, direction) {
   return true;
 }
 
+// undo / redo for agents. They report which step moved, and refuse to move a step the user made unless asked:
+// an agent undoing "its last change" must not silently throw away an edit the user made in between.
+function agentHistoryStep(direction, { includeUserEdits = false } = {}) {
+  const idx = direction === "undo" ? historyCursor : historyCursor + 1;
+  const entry = historyTimeline[idx];
+  const key = direction === "undo" ? "undone" : "redone";
+  if (idx < 0 || !entry) return { [key]: false, reason: `Nothing to ${direction}` };
+  const by = entry.source === "mcp" ? "agent" : "user";
+  if (by === "user" && !includeUserEdits) {
+    throw new HttpError(409, `The ${direction === "undo" ? "last edit" : "next edit to redo"} was made by the user ("${entry.label}", ${entry.at}). ${direction === "undo" ? "Undoing" : "Redoing"} it would change their work, so nothing was done. Pass includeUserEdits: true only if the user asked for that`);
+  }
+  stepHistory("mcp", direction);
+  return { [key]: true, step: { label: entry.label, by, at: entry.at } };
+}
+
 function jumpHistory(source, targetIndex) {
   if (!Number.isInteger(targetIndex) || targetIndex < -1 || targetIndex >= historyTimeline.length) {
     throw new HttpError(400, "Invalid history index");
@@ -3036,6 +3051,7 @@ const mcpContext = {
   icons: { list: () => listIcons(), register: (opts) => registerIcons(opts, "mcp"), remove: (name) => deleteIcon(name, "mcp") },
   batch: (source, fn, meta) => batch(source, fn, meta),
   undo: (source) => stepHistory(source, "undo"),
+  agentStep: (direction, opts) => agentHistoryStep(direction, opts),
   redo: (source) => stepHistory(source, "redo"),
   selection: () => ({ ...uiSelection, ids: uiSelection.ids.filter((id) => state.nodes[id]) }),
   presence: presenceList,
