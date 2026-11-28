@@ -18,7 +18,7 @@
   <button class="icon-btn" data-dash-menu={p.id} aria-expanded="false" onclick={(e) => menu(e, p)} title="Project actions" aria-label="Project actions"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="3.5" cy="8" r="1.3" /><circle cx="8" cy="8" r="1.3" /><circle cx="12.5" cy="8" r="1.3" /></svg></button>
 {/snippet}
 
-{#if !m.list.length}
+{#if !m.list.length && m.query}
   <div class="dash-empty">
     <span class="dash-empty-ic"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.5" /><path d="M10.5 10.5L14 14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" /></svg></span>
     <div style="display:flex;flex-direction:column;gap:4px">
@@ -30,7 +30,7 @@
       <button class="btn primary" id="dash-empty-new" onclick={newProject}><svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" /></svg><span>New project</span></button>
     </div>
   </div>
-{:else if m.view === "list"}
+{:else if m.view === "list" && m.list.length}
   <div class="dash-list">
     {#each m.list as p (p.id)}
       <div class="dash-row" class:active={p.active} data-pid={p.id}>
