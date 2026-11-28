@@ -193,7 +193,7 @@
         <div class="hist-mark" class:manual={!c.auto}><Bookmark filled={c.auto && c.kind === "agent-start"} /><span>{c.name}</span></div>
       {/each}
     {:else}
-      <div class="hist-empty">{entries.length ? "No steps match this filter." : "No edits yet. Every change by you or an agent shows up here, newest first. History resets when you switch projects."}</div>
+      <div class="hist-empty">{entries.length ? "No steps match this filter." : "No edits yet. Every change by you or an agent shows up here, newest first. It lasts until the server restarts."}</div>
     {/each}
   </section>
 </div>
