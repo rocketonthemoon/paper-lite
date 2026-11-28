@@ -190,7 +190,7 @@ fn handle(op: Op, loaded: &mut Option<Loaded>, assets: &mut Assets) -> Result<Va
             screenshot(l, &node_id, scale, max_size)
         }
         Op::Computed { artboard_id, node_ids, properties } => {
-            let l = loaded.as_ref().ok_or("nothing loaded")?;
+            let l = loaded.as_mut().ok_or("nothing loaded")?;
             computed(l, &artboard_id, &node_ids, &properties)
         }
     }
@@ -282,19 +282,45 @@ fn unpremultiply(mut buf: Vec<u8>) -> Vec<u8> {
     buf
 }
 
-fn computed(l: &Loaded, artboard_id: &str, node_ids: &[String], properties: &[String]) -> Result<Value, String> {
-    let doc = l.doc.as_ref();
-    let root = find(l, artboard_id).and_then(|n| doc.get_client_bounding_rect(n)).ok_or("artboard not found")?;
+// A node's box as getBoundingClientRect reports it: its layout box with its own transform and every ancestor's
+// applied (rotate, scale, translate, transform, around transform-origin), then the bounding box of the result.
+// Blitz's get_client_bounding_rect returns the untransformed box.
+fn transformed_rect(l: &mut Loaded, node: NodeId) -> Option<(f64, f64, f64, f64)> {
+    let doc = l.doc.as_mut();
+    let r = doc.get_client_bounding_rect(node)?;
+    let mut pts = [(r.x, r.y), (r.x + r.width, r.y), (r.x, r.y + r.height), (r.x + r.width, r.y + r.height)];
+    let mut cur = Some(node);
+    while let Some(id) = cur {
+        let origin = doc.get_client_bounding_rect(id).map(|b| (b.x, b.y));
+        let affine = doc.get_node_mut(id).and_then(|n| n.set_transform(1.0));
+        if let (Some((ox, oy)), Some(a)) = (origin, affine) {
+            let [m11, m12, m21, m22, tx, ty] = a.as_coeffs();
+            for p in &mut pts {
+                let (x, y) = (p.0 - ox, p.1 - oy);
+                *p = (ox + m11 * x + m21 * y + tx, oy + m12 * x + m22 * y + ty);
+            }
+        }
+        cur = doc.get_node(id).and_then(|n| n.parent);
+    }
+    let (xs, ys): (Vec<f64>, Vec<f64>) = pts.iter().copied().unzip();
+    let (x0, y0) = (xs.iter().copied().fold(f64::INFINITY, f64::min), ys.iter().copied().fold(f64::INFINITY, f64::min));
+    let (x1, y1) = (xs.iter().copied().fold(f64::NEG_INFINITY, f64::max), ys.iter().copied().fold(f64::NEG_INFINITY, f64::max));
+    Some((x0, y0, x1 - x0, y1 - y0))
+}
+
+fn computed(l: &mut Loaded, artboard_id: &str, node_ids: &[String], properties: &[String]) -> Result<Value, String> {
+    let root = find(l, artboard_id).and_then(|n| transformed_rect(l, n)).ok_or("artboard not found")?;
     let mut out = Map::new();
     for id in node_ids {
         let Some(node) = find(l, id) else {
             out.insert(id.clone(), Value::Null);
             continue;
         };
-        let Some(r) = doc.get_client_bounding_rect(node) else {
+        let Some((x, y, w, h)) = transformed_rect(l, node) else {
             out.insert(id.clone(), Value::Null);
             continue;
         };
+        let doc = l.doc.as_ref();
         let mut styles = Map::new();
         for p in properties {
             let v = doc.resolved_style_value(node, p);
@@ -304,8 +330,8 @@ fn computed(l: &Loaded, artboard_id: &str, node_ids: &[String], properties: &[St
         }
         out.insert(id.clone(), json!({
             "box": {
-                "x": (r.x - root.x).round() as i64, "y": (r.y - root.y).round() as i64,
-                "width": r.width.round() as i64, "height": r.height.round() as i64,
+                "x": (x - root.0).round() as i64, "y": (y - root.1).round() as i64,
+                "width": w.round() as i64, "height": h.round() as i64,
             },
             "styles": styles,
         }));
