@@ -2,7 +2,7 @@
 // and what their fields and buttons do: Inspector.svelte and RightHead.svelte pass their events to the functions
 // below (inspectorChange, inspectorKeydown, inspectorAction, …).
 import { ed } from "./state.js";
-import { $, api, elOf, inspector, inspectorFoot, num, patch, patchStyles, toast } from "./core.js";
+import { $, api, elOf, inspector, inspectorFoot, num, patch, patchStyles, px, toast } from "./core.js";
 import { classUsage, definedClassList, rootOf, setViewportOverride } from "./render.js";
 import { duplicateSelected, removeSelected } from "./selection.js";
 import { zoomCmd } from "./view.js";
@@ -108,7 +108,45 @@ function parseVal(raw, kind) {
   if (t === "") return null;
   if (kind === "percent") return Math.max(0, Math.min(100, num(t, 100))) / 100;
   if (kind === "font") return fontStack(t);
-  return /^-?\d+(\.\d+)?$/.test(t) ? Number(t) : t;
+  if (/^-?\d+(\.\d+)?$/.test(t)) return Number(t);
+  const sum = arithmetic(t);
+  return sum ?? t;
+}
+
+// Simple sums typed into a number field, like Figma's: "120 + 40", "300/2", "(16 + 8) * 2". Plain numbers, + - * /
+// and brackets only; anything else (units, var(), words) is left to CSS. Returns null when it isn't such a sum.
+function arithmetic(text) {
+  if (!/^[\d.\s+\-*/()]+$/.test(text) || !/\d\s*[+\-*/]\s*[\d(]/.test(text)) return null;
+  const tokens = text.match(/\d+(?:\.\d+)?|\.\d+|[+\-*/()]/g) || [];
+  let i = 0;
+  const peek = () => tokens[i];
+  const factor = () => {
+    const tok = tokens[i++];
+    if (tok === "-") return -factor();
+    if (tok === "+") return factor();
+    if (tok === "(") { const v = expr(); if (tokens[i++] !== ")") throw new Error("bracket"); return v; }
+    const n = Number(tok);
+    if (tok === undefined || Number.isNaN(n)) throw new Error("number");
+    return n;
+  };
+  const term = () => { let v = factor(); while (peek() === "*" || peek() === "/") v = tokens[i++] === "*" ? v * factor() : v / factor(); return v; };
+  const expr = () => { let v = term(); while (peek() === "+" || peek() === "-") v = tokens[i++] === "+" ? v + term() : v - term(); return v; };
+  try {
+    const v = expr();
+    return i === tokens.length && Number.isFinite(v) ? Math.round(v * 100) / 100 : null;
+  } catch {
+    return null;
+  }
+}
+
+// Whether the browser accepts a value for a style key. A value CSS rejects (a word in a size field, a negative width,
+// "notacolor" as a fill) would be stored but ignored on the canvas, so the layer would quietly change instead.
+// Numbers are accepted when either the bare number or the number in px is valid (opacity 0.5, width 120).
+function validStyleValue(key, value) {
+  if (value == null || typeof CSS === "undefined" || !CSS.supports) return true;
+  const prop = key.replace(/[A-Z]/g, (m) => `-${m.toLowerCase()}`);
+  if (!CSS.supports(prop, "initial")) return true; // not a property this browser knows: leave it to the server's checks
+  return typeof value === "number" ? CSS.supports(prop, String(value)) || CSS.supports(prop, `${value}px`) : CSS.supports(prop, String(value));
 }
 // Escape leaves a field without saving: blurring it would fire "change", so that one change is ignored.
 let cancellingField = null;
@@ -207,6 +245,20 @@ export function inspectorChange(e) {
     const key = t.dataset.style;
     let value = t.type === "checkbox" ? (t.checked ? t.value : null) : parseVal(t.value, t.dataset.kind);
     if (key === "lineHeight" && typeof value === "number" && value >= 4) value = `${value}px`;
+    // Bare numbers in a multi-value field ("8 16" padding, "1 solid red" border) mean px, when that's what makes it valid.
+    // Only space-separated ones: numbers inside rgba(…) or calc(…) are left alone.
+    if (typeof value === "string" && !validStyleValue(key, value)) {
+      const withPx = value.replace(/(^|\s)(-?\d*\.?\d+)(?=$|\s)/g, (m, pre, n) => (Number(n) === 0 ? m : `${pre}${n}px`));
+      if (withPx !== value && validStyleValue(key, withPx)) value = withPx;
+    }
+    if (t.type !== "checkbox" && !validStyleValue(key, value)) {
+      // Short labels (W, H, X, Y) and swatch-only fields name the CSS property instead: "isn't a valid width value".
+      const shown = t.closest(".fld")?.querySelector("span:not(.swatch)")?.textContent?.trim() || "";
+      const label = shown.length > 2 ? shown : key.replace(/[A-Z]/g, (m) => ` ${m.toLowerCase()}`);
+      toast(`“${t.value.trim()}” isn't a valid ${label.toLowerCase()} value`, { ms: 3000 });
+      t.value = px(ed.S.nodes[ed.sel]?.styles[key]); // put the real value back in the field
+      return;
+    }
     const styles = { [key]: value };
     if (key === "position" && value === "absolute") {
       const el = elOf(ed.sel);

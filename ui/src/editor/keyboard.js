@@ -7,7 +7,7 @@ import { zoomCmd } from "./view.js";
 import { openProjectMenu, projectMenu } from "./projects.js";
 import { cmdkEl, openCmdk } from "./cmdk.js";
 import { closeDashModal, dashEl, dashModal, openDashboard } from "./dashboard.js";
-import { exportMenu, openExportMenu, setUiHidden } from "./chrome.js";
+import { exportMenu, openExportMenu, setUiHidden, setZoomMenuOpen } from "./chrome.js";
 import { closeCommentThread } from "./comments.js";
 
 const typing = (e) => e.target.matches?.("input, textarea, select") || e.target.isContentEditable;
@@ -26,6 +26,7 @@ export function setup() {
     if (!cmdkEl.hidden) { if (e.key === "Escape") openCmdk(false); return; }
     if (!exportMenu.hidden && e.key === "Escape") { e.preventDefault(); return openExportMenu(false); }
     if (!projectMenu.hidden && e.key === "Escape") { e.preventDefault(); return openProjectMenu(false); }
+    if (!$("#zoom-menu").hidden && e.key === "Escape") { e.preventDefault(); return setZoomMenuOpen(false); }
     if (mod && k === "f" && dashEl.hidden) { e.preventDefault(); $("#layer-filter").focus(); $("#layer-filter").select(); return; }
     if (typing(e)) return;
     // Ctrl/Cmd+A: every layer at the selection's level (its siblings), or every artboard on the page.

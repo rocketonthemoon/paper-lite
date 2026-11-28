@@ -494,6 +494,19 @@ test("UI interactions: drawing, editing, shortcuts, panels, projects and live sy
     await setField('input[data-style="borderRadius"]', "12");
     await waitFor(async () => (await styles()).borderRadius === "12px", "radius");
 
+    // Values CSS would reject are refused (the field shows the real value again); simple sums are worked out.
+    for (const [sel, bad] of [['input[data-style="width"]', "abc"], ['input[data-style="width"]', "-40"], ['input[data-style="backgroundColor"]:not([type=color])', "notacolor"]]) {
+      const before = await styles();
+      await setField(sel, bad);
+      await waitFor(() => ui.evalJs(`/isn't a valid/.test(document.querySelector("#toast .toast-msg")?.textContent || "")`), `"${bad}" refused`);
+      await settle();
+      assert.deepEqual(await styles(), before, `"${bad}" changed nothing`);
+      assert.notEqual(await ui.evalJs(`document.querySelector('#inspector ${sel}').value`), bad, "the field shows the real value again");
+    }
+    assert.match(await ui.evalJs(`document.querySelector("#toast .toast-msg").textContent`), /“notacolor” isn't a valid background color value/);
+    await setField('input[data-style="width"]', "(100 + 11) * 2");
+    await waitFor(async () => (await styles()).width === "222px", "a sum in a number field");
+
     // ArrowUp steps a numeric field
     const h0 = parseFloat((await styles()).height);
     await ui.evalJs(`document.querySelector('#inspector input[data-style="height"]').focus()`);
@@ -777,6 +790,11 @@ test("UI interactions: drawing, editing, shortcuts, panels, projects and live sy
     const zin = await rect('#zoom-menu [data-zoom="in"]');
     await ui.click(zin.cx, zin.cy);
     assert.equal(await z(), 1.25);
+    // Escape closes the zoom menu, like the Export and project menus.
+    await ui.click(zb.cx, zb.cy);
+    await waitFor(() => ui.evalJs(`!document.getElementById("zoom-menu").hidden`), "zoom menu open");
+    await ui.key("Escape");
+    await waitFor(() => ui.evalJs(`document.getElementById("zoom-menu").hidden`), "Escape closes the zoom menu");
     await ui.key("1", 8);
     const fitZ = await z();
     assert.ok(fitZ > 0 && fitZ <= 1, `Shift+1 fits (z=${fitZ})`);

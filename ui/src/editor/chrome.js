@@ -57,7 +57,7 @@ export function setUiHidden(on = !app.classList.contains("ui-hidden")) {
   b.title = on ? "Show UI (Ctrl+\\)" : "Hide UI (Ctrl+\\)";
   setTimeout(updateOverlay);
 }
-function setZoomMenuOpen(open) {
+export function setZoomMenuOpen(open) {
   $("#zoom-menu").hidden = !open;
   $("#zoom-btn").setAttribute("aria-expanded", String(open));
 }
