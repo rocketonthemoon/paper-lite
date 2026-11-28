@@ -136,14 +136,17 @@ export class Renderer {
     const port = new URL(wsUrl).port;
     let page;
     for (let i = 0; i < 40 && !page; i++) {
-      try { page = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find((t) => t.type === "page"); } catch {}
+      try { page = (await (await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(2000) })).json()).find((t) => t.type === "page"); } catch {}
       if (!page) await sleep(150);
     }
     if (!page) { this.stop(); throw new Error("Chrome page target not found"); }
     const ws = new WebSocket(page.webSocketDebuggerUrl);
     this.ws = ws;
-    await new Promise((res, rej) => { ws.onopen = res; ws.onerror = () => rej(new Error("CDP connect failed")); })
-      .catch((err) => { this.stop(); throw err; });
+    await new Promise((res, rej) => {
+      const timer = setTimeout(() => rej(new Error(`CDP connect did not finish within ${START_TIMEOUT / 1000}s`)), START_TIMEOUT);
+      ws.onopen = () => { clearTimeout(timer); res(); };
+      ws.onerror = () => { clearTimeout(timer); rej(new Error("CDP connect failed")); };
+    }).catch((err) => { this.stop(); throw err; });
     ws.onclose = () => {
       // A late close from an older browser must not fail calls that belong to its replacement.
       if (this.ws !== ws) return;

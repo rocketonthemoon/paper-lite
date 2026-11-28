@@ -5,13 +5,16 @@ import http from "node:http";
 import { Renderer } from "../server/renderer.js";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Each step's limit must exceed the renderer's own worst case (start ≤ 15 s, page lookup, one CDP call ≤ 30 s),
+// or a slow cold start on a busy CI runner (other suites start Chrome at the same time) fails the test spuriously.
+const STEP_MS = 90_000;
 const withTimeout = (p, ms, label) => {
   let timer;
   const limit = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${label} hung for ${ms}ms`)), ms); });
   return Promise.race([p, limit]).finally(() => clearTimeout(timer));
 };
 
-test("renderer recovers after Chrome exits between and during jobs", { timeout: 180_000 }, async (t) => {
+test("renderer recovers after Chrome exits between and during jobs", { timeout: 600_000 }, async (t) => {
   const probe = new Renderer("http://127.0.0.1:1");
   if (!probe.available) {
     t.skip("no Chrome/Chromium available");
@@ -30,25 +33,25 @@ test("renderer recovers after Chrome exits between and during jobs", { timeout: 
 
   const shot = () => renderer.screenshot({ artboardId: "board", nodeId: "box", width: 300, height: 200 });
 
-  const first = await withTimeout(shot(), 30_000, "first screenshot");
+  const first = await withTimeout(shot(), STEP_MS, "first screenshot");
   assert.equal(first.width, 100);
   assert.equal(first.height, 50);
 
   // Chrome dies while idle: the next job starts a fresh browser.
   renderer.proc.kill("SIGKILL");
   await sleep(500);
-  const second = await withTimeout(shot(), 30_000, "screenshot after Chrome exited");
+  const second = await withTimeout(shot(), STEP_MS, "screenshot after Chrome exited");
   assert.equal(second.width, 100);
 
   // Chrome dies mid-job: that job fails fast, and the queue keeps working.
   const during = shot();
   await sleep(30);
   renderer.proc?.kill("SIGKILL");
-  await withTimeout(during.then(() => "ok", () => "failed"), 30_000, "job interrupted by Chrome exit");
-  const third = await withTimeout(shot(), 30_000, "screenshot after mid-job crash");
+  await withTimeout(during.then(() => "ok", () => "failed"), STEP_MS, "job interrupted by Chrome exit");
+  const third = await withTimeout(shot(), STEP_MS, "screenshot after mid-job crash");
   assert.equal(third.width, 100);
 
-  const computed = await withTimeout(renderer.computed({ artboardId: "board", nodeIds: ["box"], width: 300, height: 200, properties: ["width"] }), 30_000, "computed");
+  const computed = await withTimeout(renderer.computed({ artboardId: "board", nodeIds: ["box"], width: 300, height: 200, properties: ["width"] }), STEP_MS, "computed");
   assert.deepEqual(computed.box.box, { x: 0, y: 0, width: 100, height: 50 });
 });
 
