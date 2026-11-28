@@ -120,6 +120,20 @@ test("server + MCP integration & edge cases", { timeout: 120_000 }, async (t) =>
     assert.equal(del.status, 400);
   });
 
+  await t.test("the untouched startup project is a placeholder: the first new project replaces it, an edited one stays", async () => {
+    const json = { "content-type": "application/json" };
+    const [placeholder] = await (await fetch(`${srv.baseUrl}/api/projects`)).json();
+    assert.equal(placeholder.placeholder, true);
+    const made = await (await fetch(`${srv.baseUrl}/api/projects`, { method: "POST", headers: json, body: JSON.stringify({ name: "Real" }) })).json();
+    let projects = await (await fetch(`${srv.baseUrl}/api/projects`)).json();
+    assert.deepEqual(projects.map((p) => p.id), [made.id]);
+    assert.equal(projects[0].placeholder, undefined);
+    await fetch(`${srv.baseUrl}/api/projects`, { method: "POST", headers: json, body: JSON.stringify({ name: "Another" }) });
+    projects = await (await fetch(`${srv.baseUrl}/api/projects`)).json();
+    assert.equal(projects.length, 2, "a real project is never removed");
+    await fetch(`${srv.baseUrl}/api/projects/${made.id}/open`, { method: "POST" });
+  });
+
   await t.test("manages pages and prevents deleting the final page", async () => {
     const state1 = await (await fetch(`${srv.baseUrl}/api/state`)).json();
     const firstPageId = state1.rootId;

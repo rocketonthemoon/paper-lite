@@ -1039,9 +1039,10 @@ test("browser: dashboard (Svelte): thumbnails kept across unrelated updates, act
     assert.fail(`timed out waiting for ${label}`);
   };
   const a = await rest("GET", "/api/state");
+  // Edit A first: an untouched startup project is a placeholder that the next new project replaces.
+  await rest("POST", "/api/nodes", { parentId: a.rootId, tag: "div", name: "Board", styles: { width: "300px", height: "200px" } });
   const other = await rest("POST", "/api/projects", { name: "Other" });
   await rest("POST", `/api/projects/${a.id}/open`);
-  await rest("POST", "/api/nodes", { parentId: a.rootId, tag: "div", name: "Board", styles: { width: "300px", height: "200px" } });
   await cdp.send("Page.navigate", { url: `${srv.baseUrl}/#dashboard` });
   const card = (id) => `document.querySelector('#dash-content [data-pid="${id}"]')`;
   await waitFor(`${card(a.id)}?.querySelector(".dash-thumb-world")?.children.length > 0`, "A's thumbnail drawn");
@@ -1183,6 +1184,10 @@ test("browser: toast and dashboard dialog / card menu (Svelte)", { timeout: 120_
   assert.equal(await cdp.evalJs(`document.getElementById("dash-modal").hidden`), false, "empty name keeps the dialog open");
   await cdp.evalJs(`(() => { const i = document.getElementById("dash-modal-input"); i.value = "Made here"; i.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); })()`);
   await waitFor(`document.getElementById("project-name").textContent === "Made here"`, "project created");
+  // The untouched startup "Untitled" project was a placeholder: the new project replaced it.
+  await cdp.evalJs(`openDashboard(true)`);
+  await waitFor(`document.querySelectorAll("#dash-content [data-dash-menu]").length === 1 && document.querySelector("#dash-content .dash-card")?.textContent.includes("Made here")`, "placeholder replaced");
+  await fetch(`${srv.baseUrl}/api/projects`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "Second" }) });
   // With two projects, delete is allowed and confirms without an input.
   await cdp.evalJs(`openDashboard(true)`);
   await waitFor(`document.querySelectorAll("#dash-content [data-dash-menu]").length === 2`, "two cards");
