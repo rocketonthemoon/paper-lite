@@ -246,7 +246,10 @@ function persist({ touchUpdatedAt = true } = {}) {
   const id = state.id;
   const meta = workspace.projects.find((p) => p.id === id);
   if (meta) {
-    if (touchUpdatedAt) meta.updatedAt = new Date().toISOString();
+    if (touchUpdatedAt) {
+      meta.updatedAt = new Date().toISOString();
+      delete meta.placeholder; // edited: it's the user's project now
+    }
     Object.assign(meta, projectSummary(state));
   }
   previewCache.delete(id);
@@ -302,9 +305,17 @@ async function loadWorkspace() {
       } catch {}
     }
   }
+  // Older versions created the startup "Untitled" project without the placeholder flag: an untouched, empty one
+  // (never edited since it was created) is one, too.
+  for (const p of workspace.projects) {
+    if (!p.placeholder && p.name === "Untitled" && p.createdAt === p.updatedAt && !p.layers && !p.artboards && p.pages === 1) {
+      p.placeholder = true;
+      backfilled = true;
+    }
+  }
   if (backfilled) await saveWorkspace();
   if (!workspace.projects.length) {
-    await createProject("Untitled", { open: false });
+    await createProject("Untitled", { open: false, placeholder: true });
   }
   // Open the last active project; if its file is unreadable, fall back to the next one instead of failing to boot.
   const active = workspace.projects.find((p) => p.id === workspace.activeProjectId);
@@ -316,7 +327,7 @@ async function loadWorkspace() {
       console.error(`[weft] could not open project "${p.name}" (${p.id}): ${err.message}`);
     }
   }
-  await createProject("Untitled", { open: true, source: "init" });
+  await createProject("Untitled", { open: true, source: "init", placeholder: true });
 }
 
 async function readProject(id) {
@@ -484,7 +495,15 @@ function commitCheckpoint(projectId, cp, doc) {
   return job;
 }
 
-async function createProject(name, { open = true, source = "api" } = {}) {
+// The startup "Untitled" project exists only so the editor always has something open. It is a placeholder until it is
+// edited or renamed; the first project the user creates replaces it, so it doesn't linger as an empty extra card.
+async function dropPlaceholders(keepId, source) {
+  for (const p of [...workspace.projects]) {
+    if (p.placeholder && p.id !== keepId && workspace.projects.length > 1) await deleteProject(p.id, source);
+  }
+}
+
+async function createProject(name, { open = true, source = "api", placeholder = false } = {}) {
   const id = newId();
   const doc = emptyProject(id, cleanName(name, "Untitled"));
   const now = new Date().toISOString();
@@ -496,16 +515,18 @@ async function createProject(name, { open = true, source = "api" } = {}) {
   await commitCheckpoint(id, initCp, doc);
   sessionsCache.set(id, []);
   const accentColor = PROJECT_COLORS[workspace.projects.length % PROJECT_COLORS.length];
-  workspace.projects.push({ id, name: doc.name, accentColor, createdAt: now, updatedAt: now, ...projectSummary(doc) });
+  workspace.projects.push({ id, name: doc.name, accentColor, createdAt: now, updatedAt: now, ...(placeholder && { placeholder: true }), ...projectSummary(doc) });
   await saveWorkspace();
   if (open) await openProject(id, source);
   else sendEvent("projects", { projects: projectList() });
+  if (!placeholder) await dropPlaceholders(id, source);
   return { id, name: doc.name };
 }
 
 async function renameProject(id, name, source = "api") {
   const meta = metaOf(id);
   meta.name = cleanName(name, meta.name);
+  delete meta.placeholder;
   meta.updatedAt = new Date().toISOString();
   if (state.id === id) {
     state.name = meta.name;
@@ -3386,6 +3407,8 @@ if (process.send) process.on("message", (msg) => { if (msg === "shutdown") shutd
 
 await fonts.load();
 await loadWorkspace();
+// A leftover placeholder next to real projects (from an older version, or a crash) goes now rather than on the next create.
+if (workspace.projects.some((p) => !p.placeholder)) await dropPlaceholders(workspace.projects.find((p) => !p.placeholder).id, "init");
 app.listen(PORT, HOST, () => {
   console.log(`weft UI   ${PUBLIC_URL}`);
   console.log(`weft MCP  ${PUBLIC_URL}/mcp`);
