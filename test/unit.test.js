@@ -23,12 +23,12 @@ import {
   definedRootClasses,
   analyzeRootCssUsage,
   pruneUnusedRootCss,
-} from "../model.js";
-import { htmlToSpecs, parseInlineStyle } from "../html-import.js";
-import { expandIconSpecs, parseSvgIcon } from "../icons.js";
-import { FontLibrary, familiesIn, parseFontFileName, renameWithRetry } from "../fonts.js";
-import { analyzeDesignLint, exportDesignTokens, importDesignTokens } from "../design-tokens.js";
-import { extractCustomFontFamilies, parseRgbaColor, blendColor, contrastRatio, isLargeText, buildDomAuditScript } from "../audit.js";
+} from "../server/model.js";
+import { htmlToSpecs, parseInlineStyle } from "../server/html-import.js";
+import { expandIconSpecs, parseSvgIcon } from "../server/icons.js";
+import { FontLibrary, familiesIn, parseFontFileName, renameWithRetry } from "../server/fonts.js";
+import { analyzeDesignLint, exportDesignTokens, importDesignTokens } from "../server/design-tokens.js";
+import { extractCustomFontFamilies, parseRgbaColor, blendColor, contrastRatio, isLargeText, buildDomAuditScript } from "../server/audit.js";
 
 test("model: cleanTag normalises case and rejects disallowed tags", () => {
   assert.equal(cleanTag("DIV"), "div");

@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { Renderer } from "../renderer.js";
+import { Renderer } from "../server/renderer.js";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const withTimeout = (p, ms, label) => {
@@ -61,7 +61,7 @@ test("renderer falls back to the next browser when one fails to start", { timeou
   // of the module so its candidate list picks that up first.
   const saved = process.env.CHROME_PATH;
   process.env.CHROME_PATH = process.execPath;
-  const { Renderer: FreshRenderer } = await import(`../renderer.js?fallback=${Date.now()}`);
+  const { Renderer: FreshRenderer } = await import(`../server/renderer.js?fallback=${Date.now()}`);
   if (saved === undefined) delete process.env.CHROME_PATH;
   else process.env.CHROME_PATH = saved;
 

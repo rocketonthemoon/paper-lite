@@ -25,7 +25,7 @@ async function startTestServer() {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "pl-srv-test-"));
   const port = await freePort();
   const baseUrl = `http://127.0.0.1:${port}`;
-  const child = spawn(process.execPath, ["server.js"], {
+  const child = spawn(process.execPath, ["server/index.js"], {
     cwd: PAPER_ROOT,
     env: {
       ...process.env,

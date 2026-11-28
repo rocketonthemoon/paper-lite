@@ -21,7 +21,7 @@ async function freePort() {
 export async function startServer(dataDir, extraEnv = {}) {
   const port = await freePort();
   const baseUrl = `http://127.0.0.1:${port}`;
-  const child = spawn(process.execPath, ["server.js"], {
+  const child = spawn(process.execPath, ["server/index.js"], {
     cwd: ROOT,
     env: { ...process.env, HOST: "127.0.0.1", PORT: String(port), PUBLIC_URL: baseUrl, DATA_DIR: dataDir, CHROME_PATH: "", ...extraEnv },
     stdio: ["ignore", "pipe", "pipe"],
