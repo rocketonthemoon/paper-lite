@@ -92,6 +92,43 @@ test("MCP edge cases: instances in duplicated containers, artboard sizes and pla
     assert.ok(parseFloat(s.nodes[kid.id].styles.left) >= right, `Kid at ${s.nodes[kid.id].styles.left}`);
   });
 
+  await t.test("agent ergonomics: names for ids, unitless lengths, unknown CSS properties, layer-named hints", async () => {
+    await assert.rejects(call("get_node_info", { nodeId: "a" }), /did you mean layer "A" \(/);
+    const page = (await state()).rootId;
+    await assert.rejects(call("switch_page", { pageId: a.id }), new RegExp(`that's a layer, not a page; its page is ${page}`));
+    await assert.rejects(call("instantiate_component", { component: "CHIP", parentId: a.id }), /Ids are case-sensitive: did you mean component "chip"/);
+    const n = await call("create_node", { parentId: a.id, name: "Typo", styles: { width: "120", colour: "red" } });
+    assert.equal((await state()).nodes[n.id].styles.width, "120px", "a bare number string for a length becomes px");
+    assert.ok(n.hints.some((h) => h.startsWith(`Typo (${n.id}): colour isn't a CSS property`) && h.includes("did you mean color?")), JSON.stringify(n.hints));
+    await call("update_styles", { updates: [{ nodeIds: [n.id], styles: { lineHeight: "1.5", flex: "1" } }] });
+    const st = (await state()).nodes[n.id].styles;
+    assert.equal(st.lineHeight, "1.5");
+    assert.equal(st.flex, "1");
+    await call("delete_nodes", { nodeIds: [n.id] });
+  });
+
+  await t.test("big results are capped and say so", async () => {
+    const box = await call("create_node", { parentId: a.id, name: "Box" });
+    const w = await call("write_html", { parentId: box.id, html: Array.from({ length: 120 }, (_, i) => `<span>r${i}</span>`).join("") });
+    assert.equal(w.created.length, 50);
+    assert.equal(w.createdTotal, 120);
+    const kids = await call("get_children", { nodeId: box.id, limit: 100 });
+    assert.equal(kids.total, 120);
+    assert.equal(kids.nextOffset, 100);
+    const rest = await call("get_children", { nodeId: box.id, offset: 100 });
+    assert.equal(rest.children.length, 20);
+    assert.equal(rest.nextOffset, undefined);
+    const info = await call("get_node_info", { nodeId: box.id });
+    assert.equal(info.children.length, 50);
+    assert.equal(info.childrenTotal, 120);
+    const tree = await call("get_tree_summary", { nodeId: box.id });
+    assert.match(tree, /… 80 more children of Box/);
+    const found = await call("find_nodes", { query: "r1", limit: 5 });
+    assert.equal(found.more, true);
+    assert.deepEqual(found.nodes.map((x) => x.text), ["r1", "r10", "r11", "r12", "r13"], "document order");
+    await call("delete_nodes", { nodeIds: [box.id] });
+  });
+
   await t.test("update_root_css warns about var() loops", async () => {
     const res = await call("update_root_css", { vars: { "--x": "var(--y)", "--y": "var(--x)", "--fine": "var(--x)" } });
     assert.ok(res.warnings.some((w) => w.includes("--x → --y → --x")), JSON.stringify(res.warnings));

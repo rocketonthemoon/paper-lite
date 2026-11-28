@@ -330,7 +330,9 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
     assert.equal(found[0].artboard, "Desktop");
     assert.equal((await ok(B, "find_nodes", { tag: "button" }))[0].id, button);
     assert.equal((await ok(B, "find_nodes", { query: title })).length, 1, "exact id matches");
-    assert.equal((await ok(B, "find_nodes", { tag: "div", limit: 1 })).length, 1);
+    const capped = await ok(B, "find_nodes", { tag: "div", limit: 1 });
+    assert.equal(capped.nodes.length, 1);
+    assert.equal(capped.more, true, "a cut-off result says so");
 
     assert.deepEqual((await ok(B, "get_selection")).nodes, []);
     const sel = await fetch(`${B}/api/selection`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ids: [title, "ghost"] }) });

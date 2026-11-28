@@ -11,7 +11,7 @@ import { randomBytes } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
-  HttpError, ID_RE, SLOT_NAME_RE, SVG_TAGS, VOID_TAGS, cleanName, cleanText, holdsNoText, cleanTag, emptyPage, emptyProject, lenientMerge, mergeAttrs, mergeStyles,
+  HttpError, ID_RE, SLOT_NAME_RE, SVG_TAGS, VOID_TAGS, cleanName, cleanText, didYouMean, holdsNoText, cleanTag, emptyPage, emptyProject, lenientMerge, mergeAttrs, mergeStyles,
   newId, normalizeProject, emptyRootCss, mergeRootCss, rootCssText, rootCssFlat, rootBaseClasses, definedRootClasses,
   isBaseRule, rootClassesIn, cleanClassList, varsIn, analyzeRootCssUsage, pruneUnusedRootCss,
 } from "./model.js";
@@ -107,7 +107,7 @@ const historyLogFile = (id) => {
 };
 const metaOf = (id) => {
   const m = workspace.projects.find((p) => p.id === id);
-  if (!m) throw new HttpError(404, `Project "${id}" not found`);
+  if (!m) throw new HttpError(404, `Project "${id}" not found${didYouMean("project", id, workspace.projects)}`);
   return m;
 };
 
@@ -1059,7 +1059,7 @@ function undoLastAgentRun(source) {
 
 async function restoreCheckpointById(id, source = "api") {
   const cp = projectCheckpoints.find((c) => c.id === id);
-  if (!cp) throw new HttpError(404, `Checkpoint "${id}" not found`);
+  if (!cp) throw new HttpError(404, `Checkpoint "${id}" not found${didYouMean("checkpoint", id, projectCheckpoints)}`);
   const projectId = state.id;
   const oid = cp.commit || (await pendingCommits.get(cp.id));
   if (!oid) throw new HttpError(409, `Checkpoint "${cp.name}" was not saved and can't be restored`);
@@ -1274,7 +1274,11 @@ setInterval(() => {
 const isPage = (id) => state.pages.includes(id);
 
 function getPage(id) {
-  if (!isPage(id)) throw new HttpError(404, `Page "${id}" not found`);
+  if (!isPage(id)) {
+    const hint = didYouMean("page", id, state.pages.map((pid) => state.nodes[pid]));
+    const notPage = !hint && state.nodes[id] ? ` (that's a layer, not a page; its page is ${pageOf(id)})` : "";
+    throw new HttpError(404, `Page "${id}" not found${hint || notPage}`);
+  }
   return state.nodes[id];
 }
 
@@ -1347,7 +1351,10 @@ function deletePage(id, source = "api") {
 // ---------------------------------------------------------------------------
 function getNode(id) {
   const n = state.nodes[id];
-  if (!n) throw new HttpError(404, `Node "${id}" not found`);
+  if (!n) {
+    const hint = state ? didYouMean("layer", id, Object.values(state.nodes).filter((x) => !state.pages.includes(x.id))) : "";
+    throw new HttpError(404, `Node "${id}" not found in the open project "${state?.name}"${hint || " (it was deleted, or it belongs to another project)"}`);
+  }
   return n;
 }
 
@@ -2855,16 +2862,26 @@ async function exportProjectZip(projectId, format = "html") {
 }
 
 // Compact indented outline: cheap for agents to read.
-function outline(nodeId = state.rootId, depth = 4) {
+// Indented outline for agents. Bounded so a big page can't flood the context: long sibling runs are cut after
+// `maxChildren` (with a pointer to get_children), and the whole outline stops after `maxLines`.
+function outline(nodeId = state.rootId, depth = 4, { maxLines = 400, maxChildren = 40 } = {}) {
   const lines = [];
+  let cut = false;
   const walk = (id, lvl) => {
+    if (lines.length >= maxLines) { cut = true; return; }
     const n = state.nodes[id];
     const size = n.styles.width || n.styles.height ? ` [${n.styles.width || "auto"} x ${n.styles.height || "auto"}]` : "";
     const txt = n.text ? ` "${n.text.length > 40 ? `${n.text.slice(0, 37)}...` : n.text}"` : "";
-    lines.push(`${"  ".repeat(lvl)}${id} <${isPage(id) ? "page" : n.tag}> ${n.name}${size}${txt}`);
-    if (lvl < depth) n.children.forEach((c) => walk(c, lvl + 1));
+    const hidden = lvl >= depth && n.children.length ? ` (+${n.children.length} children)` : "";
+    lines.push(`${"  ".repeat(lvl)}${id} <${isPage(id) ? "page" : n.tag}> ${n.name}${size}${txt}${hidden}`);
+    if (lvl >= depth) return;
+    n.children.slice(0, maxChildren).forEach((c) => walk(c, lvl + 1));
+    if (n.children.length > maxChildren && lines.length < maxLines) {
+      lines.push(`${"  ".repeat(lvl + 1)}… ${n.children.length - maxChildren} more children of ${n.name} (get_children({ nodeId: "${id}", offset: ${maxChildren} }))`);
+    }
   };
   walk(getNode(nodeId).id, 0);
+  if (cut) lines.push(`… outline cut at ${maxLines} lines; pass a deeper nodeId or a smaller depth`);
   return lines.join("\n");
 }
 
@@ -2973,10 +2990,35 @@ async function auditArtboards({ nodeIds, nodeId, width, checkContrast = false, c
       checkContrast,
       checkTapTargets,
     });
+    explainAudit(report);
     for (const k of Object.keys(summary)) summary[k] += report.summary?.[k] || 0;
     audits.push({ artboardId: ab, name: state.nodes[ab].name, ...report });
   }
   return { ok: audits.every((a) => a.ok), summary, audits };
+}
+
+// Make an audit report easy to act on: every finding names its layer, and a container that only overflows because a
+// layer inside it is too wide points at that layer (causedBy) instead of counting as a separate problem.
+function explainAudit(report) {
+  if (!report || report.error) return report;
+  const named = (list) => (list || []).map((f) => (f.nodeId && state.nodes[f.nodeId] ? { nodeId: f.nodeId, name: state.nodes[f.nodeId].name, ...f } : f));
+  for (const k of ["brokenImages", "tapTargets", "lowContrast"]) report[k] = named(report[k]);
+  const overflows = named(report.overflows);
+  const ids = overflows.map((o) => o.nodeId);
+  for (const o of overflows) {
+    if (o.type !== "horizontal-overflow") continue;
+    const inside = ids.filter((id) => id !== o.nodeId && state.nodes[id] && isAncestor(o.nodeId, id));
+    if (inside.length) o.causedBy = inside;
+  }
+  // Point at the real causes only, not at containers that are themselves just overflowing because of them.
+  const effects = new Set(overflows.filter((o) => o.causedBy).map((o) => o.nodeId));
+  for (const o of overflows) if (o.causedBy) o.causedBy = o.causedBy.filter((id) => !effects.has(id));
+  report.overflows = overflows;
+  if (report.summary) {
+    report.summary.overflows = overflows.filter((o) => !o.causedBy).length;
+    report.ok = Object.values(report.summary).every((v) => v === 0);
+  }
+  return report;
 }
 
 const components = createComponentEngine({
@@ -2986,7 +3028,7 @@ const components = createComponentEngine({
 const mcpContext = {
   state: () => state,
   urls: { ui: PUBLIC_URL, mcp: `${PUBLIC_URL}/mcp` },
-  getNode, isPage, pageOf, artboardOf, artboardSize, outline, exportCode, renderer, measureInTab, auditArtboards,
+  getNode, isPage, pageOf, artboardOf, artboardSize, outline, exportCode, renderer, measureInTab, auditArtboards, explainAudit,
   createNode, updateNode, updateNodesMatching, deleteNode, duplicateNode, createArtboard, writeHtml,
   components: { list: () => components.list(), create: (a, s) => components.create(a, s), instantiate: (a, s) => components.instantiate(a, s), update: (a, s) => components.update(a, s), remove: (a, s) => components.remove(a, s) },
   rootCss: { get: (opts) => getRootCss(opts), update: (patch) => updateRootCss(patch, "mcp"), import: (opts) => importRootCss(opts, "mcp"), hints: (ids, opts) => rootCssHints(ids, state, opts) },

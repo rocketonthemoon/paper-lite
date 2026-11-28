@@ -65,8 +65,12 @@ function cleanStyleValue(key, value) {
   }
   const v = String(value).trim();
   if (/[;{}<>]|javascript:|expression\s*\(/i.test(v)) throw new HttpError(400, `Unsafe value for style "${key}"`);
+  // "390" for a length is invalid CSS (the browser drops it, so the layer silently loses its size); treat it like the
+  // number 390. Properties where a bare number means something else (flex, lineHeight, gridRow, …) are untouched.
+  if (LENGTH_PROP_RE.test(key) && /^-?\d*\.?\d+$/.test(v) && parseFloat(v) !== 0) return `${v}px`;
   return v;
 }
+const LENGTH_PROP_RE = /^(width|height|(min|max)(Width|Height)|top|right|bottom|left|inset(Block|Inline)?(Start|End)?|(margin|padding)(Top|Right|Bottom|Left|Block|Inline|BlockStart|BlockEnd|InlineStart|InlineEnd)?|gap|rowGap|columnGap|fontSize|letterSpacing|wordSpacing|textIndent|flexBasis|outlineWidth|outlineOffset|border(Top|Right|Bottom|Left)?Width|border(TopLeft|TopRight|BottomLeft|BottomRight)?Radius)$/;
 
 // Merge a style patch: null/"" removes a key, everything else is validated.
 export function mergeStyles(base, patch) {
@@ -350,6 +354,18 @@ export function lenientMerge(merge, obj, warnings, where) {
     }
   }
   return out;
+}
+
+// For a "not found" error: when the caller passed a name where an id belongs, point at the matching id(s).
+// `items` is [{ id, name }]; matches the name case-insensitively (or an id that only differs in case).
+export function didYouMean(kind, given, items) {
+  const g = String(given ?? "").trim().toLowerCase();
+  if (!g) return "";
+  const hits = items.filter((it) => String(it.name ?? "").trim().toLowerCase() === g || String(it.id).toLowerCase() === g);
+  if (!hits.length) return "";
+  const shown = hits.slice(0, 3).map((it) => `"${it.name}" (${it.id})`).join(", ");
+  const why = hits.every((it) => String(it.id).toLowerCase() === g) ? "Ids are case-sensitive" : "Ids are expected, not names";
+  return `. ${why}: did you mean ${kind} ${shown}${hits.length > 3 ? `, +${hits.length - 3} more` : ""}?`;
 }
 
 // C0/C1 control characters (NUL, escape, …) never belong in layer text; tab and newline stay.
