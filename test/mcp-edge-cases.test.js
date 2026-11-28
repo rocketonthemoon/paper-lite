@@ -146,6 +146,77 @@ test("MCP edge cases: instances in duplicated containers, artboard sizes and pla
     assert.match(mine.step.label, /delete/i);
   });
 
+  await t.test("small result accuracy: move counts, copy names, import gaps, long replies", async () => {
+    const n = await call("create_node", { parentId: a.id, name: "Twice" });
+    assert.equal((await call("move_nodes", { nodeIds: [n.id, n.id], parentId: a.id })).moved, 1);
+    await call("delete_nodes", { nodeIds: [n.id] });
+
+    const open = (await call("list_projects")).find((p) => p.active);
+    const c1 = await call("duplicate_project", { projectId: open.id });
+    const c2 = await call("duplicate_project", { projectId: open.id });
+    assert.equal(c2.name, `${c1.name} 2`, "a second copy gets a distinct name");
+    await call("update_root_css", { classes: { tile: { padding: "2px" } } });
+    const other = await call("create_project", { name: "Importer" });
+    const imp = await call("import_root_css", { sourceProjectId: open.id, classes: ["tile", "ghost"] });
+    assert.deepEqual(imp.notInSource, ["ghost"]);
+    await assert.rejects(call("import_root_css", { sourceProjectId: other.id }), /is the open project/);
+    await call("open_project", { projectId: open.id });
+    for (const id of [c1.id, c2.id, other.id]) await call("delete_project", { projectId: id });
+
+    const res = await fetch(`${srv.baseUrl}/api/comments`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ nodeId: a.id, text: "Long?" }) });
+    const thread = await res.json();
+    const reply = await call("reply_to_comment", { id: thread.id, text: "y".repeat(5000) });
+    assert.match(reply.truncated, /cut to 4000 of 5000/);
+  });
+
+  await t.test("a copy of a layer inside an instance is a plain layer, so update_component keeps both", async () => {
+    await call("create_component", { name: "pair", html: `<div data-name="Pair"><h3 data-slot="title">T</h3><p data-slot="body">B</p></div>` });
+    const inst = await call("instantiate_component", { component: "pair", parentId: a.id, overrides: { title: "Mine" } });
+    const title = (await state()).nodes[inst.id].children[0];
+    const [copy] = await call("duplicate_nodes", { nodeIds: [title] });
+    let s = await state();
+    assert.equal(s.nodes[copy.id].componentKey, undefined, "the copy doesn't claim the slot");
+    await call("update_styles", { updates: [{ nodeIds: [copy.id], styles: { color: "red" } }] });
+    await call("update_component", { component: "pair", slot: "title", patch: { styles: { fontSize: "30px" } } });
+    s = await state();
+    assert.ok(s.nodes[title], "the original title layer survives");
+    assert.equal(s.nodes[title].text, "Mine");
+    assert.equal(s.nodes[title].styles.fontSize, "30px");
+    assert.ok(s.nodes[copy.id] && s.nodes[inst.id].children.includes(copy.id), "the copy stays in the instance");
+    assert.equal(s.nodes[copy.id].styles.color, "red");
+    await call("delete_nodes", { nodeIds: [inst.id] });
+  });
+
+  await t.test("update_nodes_matching lists ids in document order", async () => {
+    const box = await call("create_node", { parentId: a.id, name: "Ordered" });
+    const w = await call("write_html", { parentId: box.id, html: Array.from({ length: 8 }, (_, i) => `<em data-name="o${i}">o</em>`).join("") });
+    const res = await call("update_nodes_matching", { artboardIds: [a.id], tag: "em", styles: { color: "blue" } });
+    assert.deepEqual(res.nodeIds, w.created.map((c) => c.id));
+    await call("delete_nodes", { nodeIds: [box.id] });
+  });
+
+  await t.test("a layer moved onto the page gets artboard fill and clipping unless it has its own", async () => {
+    const plain = await call("create_node", { parentId: a.id, name: "Plain", styles: { width: "40px", height: "40px" } });
+    const own = await call("create_node", { parentId: a.id, name: "Own", styles: { width: "40px", height: "40px", backgroundColor: "#ff0000", overflow: "visible" } });
+    await call("move_nodes", { nodeIds: [plain.id, own.id], parentId: (await state()).rootId });
+    const s = await state();
+    assert.equal(s.nodes[plain.id].styles.backgroundColor, "#ffffff");
+    assert.equal(s.nodes[plain.id].styles.overflow, "hidden");
+    assert.equal(s.nodes[own.id].styles.backgroundColor, "#ff0000");
+    assert.equal(s.nodes[own.id].styles.overflow, "visible");
+    await call("delete_nodes", { nodeIds: [plain.id, own.id] });
+  });
+
+  await t.test("an agent's reply keeps a resolved thread resolved unless it reopens it", async () => {
+    const thread = await (await fetch(`${srv.baseUrl}/api/comments`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ nodeId: a.id, text: "Fix spacing" }) })).json();
+    await call("resolve_comment", { id: thread.id });
+    const kept = await call("reply_to_comment", { id: thread.id, text: "FYI: also aligned the icon" });
+    assert.equal(kept.status, "resolved");
+    assert.match(kept.note, /stays resolved/);
+    const reopened = await call("reply_to_comment", { id: thread.id, text: "Actually one more thing", reopen: true });
+    assert.equal(reopened.status, "replied");
+  });
+
   await t.test("update_root_css warns about var() loops", async () => {
     const res = await call("update_root_css", { vars: { "--x": "var(--y)", "--y": "var(--x)", "--fine": "var(--x)" } });
     assert.ok(res.warnings.some((w) => w.includes("--x → --y → --x")), JSON.stringify(res.warnings));

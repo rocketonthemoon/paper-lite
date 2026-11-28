@@ -12,6 +12,7 @@
     "build": "vite build --config ui/vite.config.js",
     "dev:ui": "vite --config ui/vite.config.js",
     "lint": "node test/lint.mjs",
+    "gen:css-properties": "node scripts/gen-css-properties.mjs",
     "pretest": "npm run build",
     "test": "node --test --test-force-exit test/*.test.js"
   },

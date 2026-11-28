@@ -603,7 +603,8 @@ export function registerTools(mcpServer, ctx) {
     description: "Move layers into a new parent (in order), optionally at a sibling index.",
     inputSchema: { nodeIds: ids, parentId: z.string(), index: z.number().int().optional() },
     annotations: WRITE,
-  }, async ({ nodeIds, parentId, index }) => {
+  }, async ({ nodeIds: given, parentId, index }) => {
+    const nodeIds = [...new Set(given)]; // the same id twice is one move, not two
     const targetName = nodeIds.length === 1 ? S().nodes[nodeIds[0]]?.name : `${nodeIds.length} layers`;
     ctx.batch("mcp", () => nodeIds.forEach((id, i) => ctx.updateNode(id, { parentId, index: index === undefined ? undefined : index + i }, "mcp")), {
       tool: "move_nodes",
@@ -638,10 +639,10 @@ export function registerTools(mcpServer, ctx) {
   }, async ({ status, nodeId }) => text(ctx.comments.list({ status, nodeId })));
 
   server.registerTool("reply_to_comment", {
-    description: "Reply to a comment thread. By default links your most recent canvas edit step so the reviewer can inspect or undo it directly.",
-    inputSchema: { id: z.string(), text: z.string().min(1), linkStep: z.boolean().optional() },
+    description: "Reply to a comment thread. By default links your most recent canvas edit step so the reviewer can inspect or undo it directly. A thread the user resolved stays resolved unless you pass reopen: true.",
+    inputSchema: { id: z.string(), text: z.string().min(1), linkStep: z.boolean().optional(), reopen: z.boolean().optional().describe("Reopen a resolved thread (default false)") },
     annotations: WRITE,
-  }, async ({ id, text: msg, linkStep = true }) => text(ctx.comments.reply(id, msg, linkStep)));
+  }, async ({ id, text: msg, linkStep = true, reopen = false }) => text(ctx.comments.reply(id, msg, linkStep, reopen)));
 
   server.registerTool("resolve_comment", {
     description: "Mark a comment thread as resolved.",

@@ -550,7 +550,7 @@ async function duplicateProject(id, name) {
   const doc = await readProject(id);
   const copyId = newId();
   doc.id = copyId;
-  doc.name = cleanName(name, `${metaOf(id).name} copy`);
+  doc.name = cleanName(name, uniqueProjectName(`${metaOf(id).name} copy`));
   const now = new Date().toISOString();
   const initCp = makeCheckpointEntry("Project created", { auto: true, kind: "init", doc, historyId: null });
   await queueDisk(async () => {
@@ -564,6 +564,15 @@ async function duplicateProject(id, name) {
   await saveWorkspace();
   sendEvent("projects", { projects: projectList() });
   return { id: copyId, name: doc.name };
+}
+
+// "Main copy", then "Main copy 2", "Main copy 3", … so duplicates stay tell-apart in lists.
+function uniqueProjectName(base) {
+  const taken = new Set(workspace.projects.map((p) => p.name));
+  if (!taken.has(base)) return base;
+  let i = 2;
+  while (taken.has(`${base} ${i}`)) i += 1;
+  return `${base} ${i}`;
 }
 
 async function deleteProject(id, source = "api") {
@@ -1512,11 +1521,33 @@ function updateNode(id, patch, source = "api", meta = null) {
         const pos = nextArtboardPosition(n.parentId);
         n.styles = mergeStyles(n.styles, { position: "absolute", left: pos.x, top: pos.y });
       }
+      // It is an artboard now, so it gets an artboard's fill and clipping, unless it already sets its own.
+      if (isPage(n.parentId) && !wasArtboard) {
+        const st = n.styles;
+        const ownFill = st.background !== undefined || st.backgroundColor !== undefined || st.backgroundImage !== undefined;
+        n.styles = mergeStyles(st, {
+          ...(ownFill ? {} : { backgroundColor: ARTBOARD_DEFAULTS.backgroundColor }),
+          ...(st.overflow !== undefined || st.overflowX !== undefined || st.overflowY !== undefined ? {} : { overflow: ARTBOARD_DEFAULTS.overflow }),
+        });
+      }
       insertChild(s.nodes[n.parentId], id, patch.index);
       if (isPage(n.parentId) && n.styles.position !== "absolute") n.styles = mergeStyles(n.styles, { position: "absolute", left: 0, top: 0 });
     }
     return n;
   }, meta || (source === "mcp" ? null : { tool: uiTool, target: next.name || node.name, nodeIds: [id] }));
+}
+
+// Every node in the open project, pages first, each tree depth-first: the order of the layers panel.
+function documentOrder() {
+  const out = [];
+  const walk = (id) => {
+    const n = state.nodes[id];
+    if (!n) return;
+    out.push(n);
+    for (const c of n.children) walk(c);
+  };
+  for (const pid of state.pages) walk(pid);
+  return out;
 }
 
 function updateNodesMatching({ artboardIds, pageId, query, tag, hasClass, classes, addClasses, removeClasses, styles, replaceStyles, attrs } = {}, source = "mcp") {
@@ -1538,7 +1569,7 @@ function updateNodesMatching({ artboardIds, pageId, query, tag, hasClass, classe
   if (attrs !== undefined) patch.attrs = attrs;
 
   const matched = [];
-  for (const n of Object.values(state.nodes)) {
+  for (const n of documentOrder()) {
     if (isPage(n.id)) continue;
     if (pageId && pageOf(n.id) !== pageId) continue;
     if (filterArtboards && !filterArtboards.has(artboardOf(n.id))) continue;
@@ -1594,6 +1625,11 @@ function duplicateNode(id, source = "api") {
       const cloned = { ...structuredClone(src), id: nid, parentId, children: [] };
       if (src.componentId && !src.componentRootId) newRootOf.set(srcId, nid);
       if (cloned.componentRootId && newRootOf.has(cloned.componentRootId)) cloned.componentRootId = newRootOf.get(cloned.componentRootId);
+      // A copy of a layer from inside an instance (whose instance root isn't being copied) would claim the same slot
+      // as the original, and the next update_component would keep one and delete the other. It becomes a plain layer.
+      else if (cloned.componentRootId) {
+        delete cloned.componentId; delete cloned.componentKey; delete cloned.componentRootId; delete cloned.componentOverrides;
+      }
       s.nodes[nid] = cloned;
       s.nodes[nid].children = src.children.map((c) => copy(c, nid));
       return nid;
@@ -1902,9 +1938,12 @@ async function updateRootCss({ vars, classes, css, rules, replace = false, prune
 async function importRootCss({ sourceProjectId, mode = "merge", varsOnly = false, classes } = {}, source = "mcp") {
   if (!["merge", "replace"].includes(mode)) throw new HttpError(400, `Invalid mode "${mode}" (use merge or replace)`);
   if (!sourceProjectId || !ID_RE.test(String(sourceProjectId))) throw new HttpError(400, "Invalid sourceProjectId");
+  if (sourceProjectId === state.id) throw new HttpError(400, `"${state.name}" is the open project; pass the id of the project to import from`);
   const srcDoc = await readProject(sourceProjectId);
   const srcRoot = srcDoc.rootCss || emptyRootCss();
   const classSet = Array.isArray(classes) && classes.length ? new Set(cleanClassList(classes)) : null;
+  const srcClasses = new Set(srcRoot.rules.flatMap((r) => rootClassesIn(r.selector)));
+  const missingClasses = classSet ? [...classSet].filter((c) => !srcClasses.has(c)) : [];
 
   let rulesToImport = [];
   if (!varsOnly) {
@@ -1940,6 +1979,7 @@ async function importRootCss({ sourceProjectId, mode = "merge", varsOnly = false
     mode,
     varsImported: Object.keys(varsToImport).length,
     rulesImported: rulesToImport.length,
+    ...(missingClasses.length ? { notInSource: missingClasses } : {}),
     ...res,
   };
 }
@@ -2138,10 +2178,11 @@ function addComment({ nodeId, text, agentsCanSee = true }) {
   return thread;
 }
 
-function replyComment(id, { text, author = "you", linkStep = false, agentsCanSee } = {}) {
+function replyComment(id, { text, author = "you", linkStep = false, agentsCanSee, reopen = false } = {}) {
   const thread = (state.comments || []).find((c) => c.id === id);
   if (!thread) throw new HttpError(404, `Comment "${id}" not found`);
-  const cleanText = String(text ?? "").trim().slice(0, 4000);
+  const fullText = String(text ?? "").trim();
+  const cleanText = fullText.slice(0, 4000);
   if (!cleanText) throw new HttpError(400, "Reply text cannot be empty");
   const now = new Date().toISOString();
   const isAgent = author !== "you";
@@ -2154,13 +2195,20 @@ function replyComment(id, { text, author = "you", linkStep = false, agentsCanSee
     ...(linkedStep ? { linkedStep } : {}),
   });
   if (agentsCanSee !== undefined && !isAgent) thread.agentsCanSee = Boolean(agentsCanSee);
-  thread.status = isAgent ? "replied" : "open";
+  // A thread the user resolved stays resolved when an agent adds a note to it, unless the agent reopens it on purpose.
+  // A reply from the user reopens it: they're asking again.
+  const keptResolved = isAgent && thread.status === "resolved" && !reopen;
+  if (!keptResolved) thread.status = isAgent ? "replied" : "open";
   persist({ touchUpdatedAt: false });
   sendEvent("comments", {
     comments: state.comments,
     ...(isAgent ? { replyNotification: { commentId: thread.id, nodeId: thread.nodeId, author: cleanName(author, "Claude"), text: cleanText } } : {}),
   });
-  return thread;
+  return {
+    ...thread,
+    ...(fullText.length > cleanText.length ? { truncated: `Reply cut to ${cleanText.length} of ${fullText.length} characters` } : {}),
+    ...(keptResolved ? { note: "The thread was resolved and stays resolved; pass reopen: true to reopen it" } : {}),
+  };
 }
 
 function updateComment(id, { status, agentsCanSee } = {}) {
@@ -3079,10 +3127,10 @@ const mcpContext = {
   comments: {
     openCount: openCommentCount,
     list: mcpGetComments,
-    reply: (id, text, linkStep = true) => {
+    reply: (id, text, linkStep = true, reopen = false) => {
       agentVisibleComment(id);
       const store = mcpContextStore.getStore();
-      return replyComment(id, { text, author: store?.agent?.name || "Claude", linkStep });
+      return replyComment(id, { text, author: store?.agent?.name || "Claude", linkStep, reopen });
     },
     resolve: (id) => {
       agentVisibleComment(id);
