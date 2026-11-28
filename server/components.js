@@ -9,6 +9,7 @@ import {
   newId, normalizeComponentTree,
 } from "./model.js";
 import { htmlToSpecs } from "./html-import.js";
+import { expandIconSpecs } from "./icons.js";
 
 export function validateComponentId(raw) {
   const id = String(raw ?? "").trim();
@@ -95,6 +96,13 @@ export function trackNodeOverrides(node, patch, next) {
 export function createComponentEngine({
   getState, getNode, isPage, safePageOf, nestError, insertChild, nextArtboardPosition, definedClasses, mutate, specTag,
 }) {
+  // Parse component HTML like write_html does, including <icon name="..." /> expansion from the project registry.
+  function parseComponentHtml(html, warnings) {
+    const parsed = htmlToSpecs(html);
+    warnings.push(...parsed.warnings);
+    return expandIconSpecs(parsed.specs, getState().icons, warnings);
+  }
+
   function nodeToComponentTree(nodeId, doc = getState()) {
     const usedKeys = new Set(["root"]);
     const counter = { n: 0 };
@@ -428,10 +436,9 @@ export function createComponentEngine({
       if (isPage(src.id)) throw new HttpError(400, "Pages cannot be converted into components");
       tree = nodeToComponentTree(src.id);
     } else {
-      const parsed = htmlToSpecs(html);
-      warnings.push(...parsed.warnings);
-      if (parsed.specs.length !== 1) throw new HttpError(400, "Component HTML must have a single root element");
-      tree = specToComponentTree(parsed.specs[0], { prevTree: s0.components?.[compId]?.tree || null, warnings });
+      const specs = parseComponentHtml(html, warnings);
+      if (specs.length !== 1) throw new HttpError(400, "Component HTML must have a single root element");
+      tree = specToComponentTree(specs[0], { prevTree: s0.components?.[compId]?.tree || null, warnings });
     }
     const comp = { id: compId, name: cleanName(name, compId), tree: normalizeComponentTree(tree, { warnings }) };
     let stats = { updatedInstances: 0, createdNodes: 0, removedNodes: 0 };
@@ -484,10 +491,9 @@ export function createComponentEngine({
     const warnings = [];
     let nextTree;
     if (html !== undefined) {
-      const parsed = htmlToSpecs(html);
-      warnings.push(...parsed.warnings);
-      if (parsed.specs.length !== 1) throw new HttpError(400, "Component HTML must have a single root element");
-      nextTree = specToComponentTree(parsed.specs[0], { prevTree: prevComp.tree, warnings });
+      const specs = parseComponentHtml(html, warnings);
+      if (specs.length !== 1) throw new HttpError(400, "Component HTML must have a single root element");
+      nextTree = specToComponentTree(specs[0], { prevTree: prevComp.tree, warnings });
     } else {
       nextTree = structuredClone(prevComp.tree);
       if (removeSlot) {
@@ -508,13 +514,12 @@ export function createComponentEngine({
       if (appendHtml?.html) {
         const target = findTreeNode(nextTree, appendHtml.parentSlot || "root");
         if (!target) throw new HttpError(404, `Parent slot "${appendHtml.parentSlot}" not found`);
-        const parsed = htmlToSpecs(appendHtml.html);
-        warnings.push(...parsed.warnings);
-        if (!parsed.specs.length) throw new HttpError(400, "No elements found in appendHtml.html");
+        const specs = parseComponentHtml(appendHtml.html, warnings);
+        if (!specs.length) throw new HttpError(400, warnings.find((w) => w.startsWith("<icon")) || "No elements found in appendHtml.html");
         const usedKeys = collectTreeKeys(nextTree);
         const counter = { n: usedKeys.size };
         const idx = Number.isInteger(appendHtml.index) ? Math.max(0, Math.min(appendHtml.index, target.children.length)) : target.children.length;
-        const inserted = parsed.specs.map((sp) => {
+        const inserted = specs.map((sp) => {
           assertCanNest({ id: "comp", tag: target.tag }, specTag(sp));
           return specToComponentTree(sp, { usedKeys, counter, warnings, isRoot: false });
         });

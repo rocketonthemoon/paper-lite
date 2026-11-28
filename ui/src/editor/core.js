@@ -15,7 +15,7 @@ export const GENERIC_FONTS = ["system-ui", "sans-serif", "serif", "monospace", "
 export const viewKey = () => (ed.S ? `paper-lite:view:${ed.S.id}:${ed.S.rootId}` : null);
 export const expanded = new Set(JSON.parse(localStorage.getItem("paper-lite:expanded") || "[]"));
 export const saveExpanded = () => localStorage.setItem("paper-lite:expanded", JSON.stringify([...expanded].slice(-400)));
-export const clock = (iso) => { const d = new Date(iso); return Number.isNaN(+d) ? "" : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }); };
+export { clock, stamp, fullStamp } from "./time.js";
 
 export const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 export function ago(iso) {

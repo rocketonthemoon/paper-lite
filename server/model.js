@@ -19,6 +19,24 @@ const SVG_ATTRS = new Set([
 const SAFE_SVG_VALUE = /^[\w\s.,#%()+-]*$/;
 const UNITLESS = new Set(["opacity", "zIndex", "flexGrow", "flexShrink", "fontWeight", "lineHeight", "order", "aspectRatio"]);
 const SAFE_URL = /^(https?:\/\/|data:image\/(png|jpe?g|gif|webp|svg\+xml);|\/|#|\.\/)/i;
+// Plain HTML attributes layers may carry (beyond styles/classes). Event handlers, style, id and class are never allowed.
+const TOKEN_LIST_RE = /^[a-z]+(?: [a-z]+)*$/;
+const HTML_ATTRS = {
+  src: { url: true },
+  href: { url: true },
+  alt: {},
+  title: { text: true },
+  role: { re: TOKEN_LIST_RE },
+  type: { tags: ["button"], values: ["button", "submit", "reset"] },
+  target: { tags: ["a"], values: ["_blank", "_self"] },
+  rel: { tags: ["a"], re: TOKEN_LIST_RE },
+  tabindex: { re: /^-?\d{1,3}$/ },
+};
+// Text attribute values (title, aria-*): plain text only, no markup or control characters.
+const UNSAFE_TEXT_RE = /[<>\u0000-\u001f\u007f]/;
+const MAX_TEXT_ATTR = 200;
+const ARIA_ATTR_RE = /^aria-[a-z]+$/;
+const ARIA_RULE = { text: true };
 export const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 export const ICON_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
 export const COMPONENT_NAME_RE = /^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/;
@@ -73,10 +91,18 @@ export function mergeAttrs(base, patch, tag) {
       out[key] = v;
       continue;
     }
-    if (!["src", "href", "alt"].includes(key)) throw new HttpError(400, `Attribute "${key}" is not supported`);
-    if (key !== "alt" && !SAFE_URL.test(v)) throw new HttpError(400, `Unsafe URL for ${key}`);
+    const rule = ARIA_ATTR_RE.test(key) ? ARIA_RULE : Object.hasOwn(HTML_ATTRS, key) ? HTML_ATTRS[key] : null;
+    if (!rule) throw new HttpError(400, `Attribute "${key}" is not supported`);
+    if (rule.tags && tag && !rule.tags.includes(tag)) throw new HttpError(400, `Attribute "${key}" is only supported on <${rule.tags.join(">, <")}>`);
+    if (rule.url && !SAFE_URL.test(v)) throw new HttpError(400, `Unsafe URL for ${key}`);
+    if (rule.values && !rule.values.includes(v)) throw new HttpError(400, `Unsupported value for ${key} (use ${rule.values.join(", ")})`);
+    if (rule.re && !rule.re.test(v)) throw new HttpError(400, `Unsafe value for ${key}`);
+    if (rule.text && UNSAFE_TEXT_RE.test(v)) throw new HttpError(400, `Unsafe value for ${key} (plain text only, no < > or control characters)`);
+    if (rule.text && v.length > MAX_TEXT_ATTR) throw new HttpError(400, `${key} is too long (max ${MAX_TEXT_ATTR} characters)`);
     out[key] = v;
   }
+  // Links that open a new tab never get access to the opener.
+  if (out.target === "_blank" && !/\bnoopener\b/.test(out.rel || "")) out.rel = `${out.rel ? `${out.rel} ` : ""}noopener noreferrer`;
   return out;
 }
 

@@ -2,7 +2,7 @@
 // fonts, focus), the right panel tabs, and window.weft, the bridge the Svelte components read.
 import { ed } from "./state.js";
 import { answerMeasure } from "./measure.js";
-import { $, GENERIC_FONTS, SVG_TAGS, TAGS, TEXT_TAGS, VOID_TAGS, ago, api, clock, commentsPanelEl, elOf, expanded, inspector, num, plural, px, rightHead, toast, viewKey, world } from "./core.js";
+import { $, GENERIC_FONTS, SVG_TAGS, TAGS, TEXT_TAGS, VOID_TAGS, ago, api, clock, commentsPanelEl, fullStamp, stamp, elOf, expanded, inspector, num, plural, px, rightHead, toast, viewKey, world } from "./core.js";
 import { applyView, baseStylesOf, kebabCss, layerRows, render, renderLayers, resolveVars, rootOf, rulesUsing, setViewportOverride, updateOverlay } from "./render.js";
 import { classableStyles, copyText, ctxAction, downloadZip, hex6, inspectorAction, inspectorChange, inspectorFocusout, inspectorInput, inspectorKeydown, inspectorModel, renderInspector, renderRightHead, rightHeadModel } from "./inspector.js";
 import { createNode, select, shareSelection, toggleSelected } from "./selection.js";
@@ -164,7 +164,7 @@ export function setup() {
   // Bridge to the Svelte components in ui/src (loaded after this script): helpers they call and live data they
   // render. renderHistory() hands the latest history to the Svelte History panel (ui/src/components/HistoryPanel).
   window.weft = {
-    api, toast, clock, history: hist, events: new EventTarget(),
+    api, toast, clock, stamp, fullStamp, history: hist, events: new EventTarget(),
     // Command palette (CommandPalette.svelte)
     cmdkEntries: () => buildCmdkEntries(),
     closeCmdk: () => openCmdk(false),

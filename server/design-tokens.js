@@ -274,10 +274,12 @@ const CATEGORY_LABEL = {
 
 /**
  * Design system hints & linter for `write_html` and `update_styles`.
- * - Preserves exact-value matches (`k: v is the root variable --x; use var(--x) so it stays shared`).
- * - Flags undefined `var(--missing)`.
- * - When `lint` is enabled (default), detects color/px/rem equivalence, shorthand multi-value token matches,
+ * - Flags undefined `var(--missing)` (always, even with `lint: false`).
+ * - When `lint` is enabled (default): exact-value matches (`k: v is the root variable --x; use var(--x)…`), and
+ *   detects color/px/rem equivalence, shorthand multi-value token matches,
  *   and raw values for properties whose category has defined tokens (color, spacing, radius, fontSize, fontFamily).
+ * - Suggestions stay in category: color tokens only for color values, spacing/radius/font tokens only for properties
+ *   of the same category (so `fontSize: 18px` never suggests `--radius-lg`). Uncategorized variables match anything.
  */
 export function analyzeDesignLint(nodeIds, doc, { lint = true, limit = 20 } = {}) {
   const root = doc?.rootCss || { vars: {}, rules: [] };
@@ -287,6 +289,7 @@ export function analyzeDesignLint(nodeIds, doc, { lint = true, limit = 20 } = {}
   const byNormPx = new Map();
   const byCategory = { color: [], spacing: [], radius: [], fontSize: [], fontFamily: [] };
 
+  const varCat = {};
   for (const [k, rawV] of Object.entries(vars)) {
     const lower = String(rawV).toLowerCase();
     byValue.set(lower, [...(byValue.get(lower) || []), k]);
@@ -295,8 +298,22 @@ export function analyzeDesignLint(nodeIds, doc, { lint = true, limit = 20 } = {}
     const np = normalizeDimensionPx(rawV);
     if (np) byNormPx.set(np, [...(byNormPx.get(np) || []), k]);
     const cat = classifyVar(k, rawV);
+    varCat[k] = cat;
     if (cat) byCategory[cat].push(k);
   }
+  // Keep only the variables whose category fits this property/value; null when none are left.
+  const inCategory = (names, prop, value) => {
+    if (!names) return null;
+    const isColor = !!normalizeCssColor(value);
+    const pc = propCategory(prop);
+    const out = names.filter((x) => {
+      const c = varCat[x];
+      if (!c) return true;
+      if (c === "color") return isColor;
+      return pc === c;
+    });
+    return out.length ? out : null;
+  };
 
   const hints = new Set();
   for (const id of nodeIds) {
@@ -311,26 +328,26 @@ export function analyzeDesignLint(nodeIds, doc, { lint = true, limit = 20 } = {}
         if (!(ref in vars)) hints.add(`${n.name}: var(${ref}) isn't defined in the root CSS (add it with update_root_css)`);
       }
 
+      if (!lint) continue;
+
       // 2. Exact match to a root variable
-      const known = byValue.get(v.toLowerCase());
+      const known = inCategory(byValue.get(v.toLowerCase()), k, v);
       if (known) {
         hints.add(`${k}: ${v} is the root variable ${known.join(" / ")}; use ${known.map((x) => `var(${x})`).join(" or ")} so it stays shared`);
         continue;
       }
-
-      if (!lint) continue;
       if (v.includes("var(") || ZERO_OR_KEYWORD_RE.test(v.trim())) continue;
 
       // 3. Normalized single-value equivalence (hex3/rgb <-> hex6, rem <-> px)
       const nc = normalizeCssColor(v);
-      const colorMatches = nc ? byNormColor.get(nc) : null;
+      const colorMatches = nc ? inCategory(byNormColor.get(nc), k, v) : null;
       if (colorMatches) {
         hints.add(`${k}: ${v} matches the root variable ${colorMatches.join(" / ")}; use ${colorMatches.map((x) => `var(${x})`).join(" or ")} so it stays shared`);
         continue;
       }
       const np = normalizeDimensionPx(v);
-      const pxMatches = np ? byNormPx.get(np) : null;
-      if (pxMatches && propCategory(k) !== "color") {
+      const pxMatches = np ? inCategory(byNormPx.get(np), k, v) : null;
+      if (pxMatches) {
         hints.add(`${k}: ${v} matches the root variable ${pxMatches.join(" / ")}; use ${pxMatches.map((x) => `var(${x})`).join(" or ")} so it stays shared`);
         continue;
       }
@@ -341,9 +358,9 @@ export function analyzeDesignLint(nodeIds, doc, { lint = true, limit = 20 } = {}
         const hits = [];
         for (const p of parts) {
           if (ZERO_OR_KEYWORD_RE.test(p)) continue;
-          const m = byValue.get(p.toLowerCase())
-            || (normalizeCssColor(p) && byNormColor.get(normalizeCssColor(p)))
-            || (normalizeDimensionPx(p) && byNormPx.get(normalizeDimensionPx(p)));
+          const m = inCategory(byValue.get(p.toLowerCase()), k, p)
+            || (normalizeCssColor(p) && inCategory(byNormColor.get(normalizeCssColor(p)), k, p))
+            || (normalizeDimensionPx(p) && inCategory(byNormPx.get(normalizeDimensionPx(p)), k, p));
           if (m) hits.push(`${p} → var(${m[0]})`);
         }
         if (hits.length) {

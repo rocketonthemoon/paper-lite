@@ -38,6 +38,7 @@ const ALLOWED_HOSTS = new Set(
     .filter(Boolean),
 );
 const HISTORY_LIMIT = 60;
+const HISTORY_LOG_LIMIT = 5000; // edit-log lines kept per project (metadata only; undo stays in memory)
 // Edits update memory at once; their disk writes are coalesced and land at most this often.
 const PERSIST_THROTTLE_MS = Number(process.env.PERSIST_THROTTLE_MS ?? 300);
 // get_computed_styles asks an open editor tab first (it already has the artboard laid out); this long for an answer
@@ -98,6 +99,12 @@ const sessionsFile = (id) => {
   if (!ID_RE.test(id)) throw new HttpError(400, "Invalid project id");
   return path.join(PROJECTS_DIR, `${id}.sessions.json`);
 };
+// Append-only edit log: one JSON line per history step ({ id, at, source, tool, target, label, nodeIds }), no patches.
+// It answers "when did this layer change?" across restarts; undo/redo still only use the in-memory timeline.
+const historyLogFile = (id) => {
+  if (!ID_RE.test(id)) throw new HttpError(400, "Invalid project id");
+  return path.join(PROJECTS_DIR, `${id}.history.jsonl`);
+};
 const metaOf = (id) => {
   const m = workspace.projects.find((p) => p.id === id);
   if (!m) throw new HttpError(404, `Project "${id}" not found`);
@@ -127,9 +134,21 @@ function scheduleWrite(key, file, getText) {
   if (!flushTimer) flushTimer = setTimeout(flushWrites, PERSIST_THROTTLE_MS);
   return diskQueue;
 }
+const pendingLogLines = new Map(); // projectId -> [jsonLine]
+function scheduleLogAppend(id, entry) {
+  const line = JSON.stringify(entry);
+  pendingLogLines.set(id, [...(pendingLogLines.get(id) || []), line]);
+  if (PERSIST_THROTTLE_MS <= 0) return flushWrites();
+  if (!flushTimer) flushTimer = setTimeout(flushWrites, PERSIST_THROTTLE_MS);
+  return diskQueue;
+}
 function flushWrites() {
   clearTimeout(flushTimer);
   flushTimer = null;
+  for (const [id, lines] of pendingLogLines) {
+    queueDisk(() => fs.appendFile(historyLogFile(id), `${lines.join("\n")}\n`, "utf8"));
+  }
+  pendingLogLines.clear();
   const jobs = [...pendingWrites.values()];
   pendingWrites.clear();
   for (const { file, getText } of jobs) {
@@ -356,7 +375,44 @@ async function migrateLegacyCheckpoints(id) {
   await fs.rename(file, `${file}.migrated`);
 }
 
+// Keep the edit log bounded: on open, rewrite it with only the newest HISTORY_LOG_LIMIT lines.
+function trimHistoryLog(id) {
+  return queueDisk(async () => {
+    let text;
+    try { text = await fs.readFile(historyLogFile(id), "utf8"); } catch { return; }
+    const lines = text.split("\n").filter(Boolean);
+    if (lines.length > HISTORY_LOG_LIMIT) await writeAtomic(historyLogFile(id), `${lines.slice(-HISTORY_LOG_LIMIT).join("\n")}\n`);
+  });
+}
+
+// Search the edit log (and anything not yet flushed) by layer id, time range and source; newest first.
+async function searchHistory({ nodeId, after, before, source, limit } = {}) {
+  await flushWrites();
+  const afterMs = after ? Date.parse(after) : -Infinity;
+  const beforeMs = before ? Date.parse(before) : Infinity;
+  if (Number.isNaN(afterMs) || Number.isNaN(beforeMs)) throw new HttpError(400, "after / before must be ISO dates");
+  if (source && source !== "mcp" && source !== "you") throw new HttpError(400, 'source must be "mcp" or "you"');
+  const max = Math.max(1, Math.min(Number(limit) || 100, 1000));
+  let text = "";
+  try { text = await fs.readFile(historyLogFile(state.id), "utf8"); } catch {}
+  const live = new Set(historyTimeline.map((e) => e.id));
+  const out = [];
+  const lines = text.split("\n");
+  for (let i = lines.length - 1; i >= 0 && out.length < max; i--) {
+    if (!lines[i]) continue;
+    let e;
+    try { e = JSON.parse(lines[i]); } catch { continue; }
+    const t = Date.parse(e.at);
+    if (!(t >= afterMs && t <= beforeMs)) continue;
+    if (source && e.source !== source) continue;
+    if (nodeId && !(e.nodeIds || []).includes(nodeId)) continue;
+    out.push({ ...e, inUndoHistory: live.has(e.id) });
+  }
+  return { entries: out, count: out.length, limit: max };
+}
+
 async function loadProjectExtras(id) {
+  trimHistoryLog(id);
   try {
     await migrateLegacyCheckpoints(id);
     projectCheckpoints = await repoOf(id).list();
@@ -505,6 +561,7 @@ async function deleteProject(id, source = "api") {
     await fs.rm(legacyCheckpointFile(id), { force: true });
     await fs.rm(remoteFile(id), { force: true });
     await fs.rm(sessionsFile(id), { force: true });
+    await fs.rm(historyLogFile(id), { force: true });
   });
   repos.delete(id);
   await saveWorkspace();
@@ -901,6 +958,7 @@ function commit(source, patch, meta = null, startCpId = null) {
   };
   historyTimeline.push(entry);
   if (historyTimeline.length > HISTORY_LIMIT) historyTimeline.shift();
+  scheduleLogAppend(state.id, { id: entry.id, at, source: histSource, tool, target, label, nodeIds });
   historyCursor = historyTimeline.length - 1;
   const commentsChanged = syncCommentsWithState(historyCursor + 1);
 
@@ -2428,7 +2486,8 @@ function jsxBuilder(doc, roots, { sheet } = {}) {
   };
 
   const jsxText = (t) => `{${JSON.stringify(t)}}`;
-  const jsxName = (k) => (k.startsWith("aria-") ? k : k.replace(/-([a-z])/g, (_, c) => c.toUpperCase()));
+  const JSX_ATTR_NAMES = { tabindex: "tabIndex" };
+  const jsxName = (k) => JSX_ATTR_NAMES[k] || (k.startsWith("aria-") ? k : k.replace(/-([a-z])/g, (_, c) => c.toUpperCase()));
   // A declared component's body, from its definition; text slots read their prop.
   const renderSpec = (sp, depth, props) => {
     const pad = "  ".repeat(depth);
@@ -3021,6 +3080,7 @@ app.post("/api/selection", wrap((req) => {
 
 // History (§1) & Checkpoints (§2)
 app.get("/api/history", wrap(() => historyPayload()));
+app.get("/api/history/search", wrap((req) => searchHistory(req.query || {})));
 app.post("/api/history/jump", wrap((req) => {
   let idx = req.body?.index;
   if (idx === undefined && req.body?.id) {
@@ -3307,7 +3367,22 @@ const methodNotAllowed = (req, res) =>
 app.get(["/mcp", "/paper-lite/mcp"], methodNotAllowed);
 app.delete(["/mcp", "/paper-lite/mcp"], methodNotAllowed);
 
-for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => { flushWrites(); renderer.stop(); setTimeout(() => process.exit(0), 1200); });
+// Graceful shutdown: wait for pending checkpoint commits and writes to reach disk, then exit. Signals cover POSIX and Ctrl+C / Ctrl+Break;
+// on Windows `kill("SIGTERM")` terminates the process outright, so a parent can instead send "shutdown" over IPC.
+let shuttingDown = false;
+async function shutdown(reason) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  setTimeout(() => process.exit(1), 5000).unref(); // never hang on a stuck disk write
+  try {
+    await Promise.allSettled([...pendingCommits.values()]); // checkpoint commits still landing in git
+    await flushWrites();
+  } catch (err) { console.error(`[weft] flush on ${reason} failed:`, err); }
+  renderer.stop();
+  process.exit(0);
+}
+for (const sig of ["SIGINT", "SIGTERM", ...(process.platform === "win32" ? ["SIGBREAK"] : [])]) process.on(sig, () => shutdown(sig));
+if (process.send) process.on("message", (msg) => { if (msg === "shutdown") shutdown("ipc"); });
 
 await fonts.load();
 await loadWorkspace();
