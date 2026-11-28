@@ -421,7 +421,31 @@
 
   #inspector { flex: 1; min-height: 0; overflow: auto; }
   #inspector-foot { padding: 12px 16px; border-top: 1px solid var(--line); background: var(--panel); flex-shrink: 0; }
-  .sec { padding: 14px 16px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; }
+  .sec { padding: 12px 16px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; }
+  /* Collapsible sections (Section.svelte): a title row like Figma's; collapsed ones are just that row. */
+  .sec.closed { padding-bottom: 12px; gap: 0; }
+  .sec[data-section] > .sec-h { justify-content: flex-start; gap: 6px; }
+  .sec-body { display: flex; flex-direction: column; gap: 8px; }
+  .sec-body[hidden] { display: none; }
+  .sec-toggle { display: inline-flex; align-items: center; gap: 6px; background: none; border: 0; padding: 0; cursor: pointer; font: inherit; color: inherit; min-width: 0; }
+  .sec-chev svg { transition: transform 0.12s; }
+  .sec.closed .sec-chev svg { transform: rotate(-90deg); }
+  .sec.closed .sec-title { color: var(--text-2); }
+  .sec-toggle:hover .sec-title { color: var(--text); }
+  .sec-title { color: var(--text); font-weight: 600; font-size: 12px; white-space: nowrap; }
+  .sec-h .muted { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sec-acts { margin-left: auto; display: inline-flex; align-items: center; gap: 2px; }
+  .sec-h > .sec-toggle + .sec-acts, .sec-h > .muted + .sec-acts { margin-left: auto; }
+  .sub-h { display: flex; align-items: center; justify-content: space-between; color: var(--muted); font-size: 11px; font-weight: 500; margin-top: 2px; }
+  .chips.compact .chip { height: 24px; padding: 0 8px; font-size: 11px; }
+  .surface-row { display: flex; align-items: center; gap: 6px; }
+  .surface-row .surface-fld { flex: 1; min-width: 0; }
+  .surface-sw { width: 22px; height: 22px; border-radius: 50%; border: 1px solid var(--line-2); cursor: pointer; flex-shrink: 0; padding: 0; }
+  .surface-sw.on { box-shadow: 0 0 0 2px var(--panel), 0 0 0 3.5px var(--accent); }
+  .class-list { display: flex; flex-wrap: wrap; gap: 4px; }
+  .class-chip.plain { padding-right: 8px; }
+  .css-edit { display: flex; flex-direction: column; gap: 8px; }
+  .css-edit[hidden] { display: none; }
   .sec:last-child { border-bottom: 0; }
   .sec-h {
     display: flex; align-items: center; justify-content: space-between; gap: 8px;
