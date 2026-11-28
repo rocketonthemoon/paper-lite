@@ -466,6 +466,12 @@ export function createComponentEngine({
     const parent = getNode((typeof parentId === "string" ? parentId.trim() : "") || s0.rootId);
     assertCanNest(parent, comp.tree.tag);
     const warnings = [];
+    // An override whose key names no slot, key or layer would otherwise be dropped without a word.
+    const unknown = Object.keys(overrides || {}).filter((k) => !findTreeNode(comp.tree, k));
+    if (unknown.length) {
+      const slots = collectComponentSlots(comp.tree).map((sl) => sl.slot || sl.key);
+      warnings.push(`Override${unknown.length > 1 ? "s" : ""} ${unknown.map((k) => `"${k}"`).join(", ")} match${unknown.length > 1 ? "" : "es"} no slot in "${comp.id}" and ${unknown.length > 1 ? "were" : "was"} ignored (slots: ${slots.join(", ")})`);
+    }
     const res = mutate(source, () => instantiateIntoState(comp, parent.id, index, overrides || {}, name || null, warnings), {
       tool: "instantiate_component",
       target: comp.id,
@@ -488,6 +494,7 @@ export function createComponentEngine({
   function updateComponent({ component, html, slot = "root", patch, appendHtml, removeSlot }, source = "mcp") {
     const prevComp = getState().components?.[component];
     if (!prevComp) throw new HttpError(404, `Component "${component}" not found`);
+    if (html === undefined && !patch && !appendHtml?.html && !removeSlot) throw new HttpError(400, "Nothing to update: pass html, patch, appendHtml or removeSlot");
     const warnings = [];
     let nextTree;
     if (html !== undefined) {
