@@ -296,11 +296,11 @@ export function updateOverlay() {
     canFlex: !VOID_TAGS.has(selNode.tag) && !SVG_TAGS.has(selNode.tag),
     isFlex: selNode.styles.display === "flex" || selNode.styles.display === "inline-flex",
   } : null;
-  const boxes = ed.agentNodes.flatMap(({ id }) => {
+  const boxes = ed.agentNodes.flatMap(({ id, color }) => {
     const el = elOf(id);
     if (!el) return [];
     const r = rectOnStage(el);
-    return [{ x: r.x - 9, y: r.y - 9, w: r.w + 18, h: r.h + 18 }];
+    return [{ x: r.x - 9, y: r.y - 9, w: r.w + 18, h: r.h + 18, color }]; // the color of the agent working there
   });
   const cursors = ed.agentCursors.flatMap((c) => {
     const els = (c.nodeIds || []).map(elOf).filter(Boolean);

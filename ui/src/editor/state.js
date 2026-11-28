@@ -26,7 +26,7 @@ export const ed = {
   inspectorDirty: false,
   cssJsonOpen: false, // UX #03: collapsed raw CSS JSON by default
   comments: [], // thread comments synced via SSE
-  agentNodes: [], // [{ id, label }] nodes an MCP agent is working on
+  agentNodes: [], // [{ id, label, color }] nodes an MCP agent is working on, in that agent's color
   agentCursors: [], // live MCP agent cursors
   followAgent: localStorage.getItem("weft:follow-agent") === "1",
   followTimer: 0,

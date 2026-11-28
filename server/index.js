@@ -7,7 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import zlib from "node:zlib";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
@@ -1184,15 +1184,43 @@ function friendlyAgentName(raw) {
   return s.slice(0, 32);
 }
 
-function agentFromRequest(req, initClientName = null) {
-  const key = req.get("x-weft-client") || req.get("mcp-session-id") || req.get("user-agent") || "mcp-default";
+// A color no agent active on the canvas right now is using, so agents working side by side never share one. Falls
+// back to cycling by session count once every color is taken.
+const AGENT_ACTIVE_MS = 30 * 60_000; // a session that made a request this recently still "owns" its color
+function freeAgentColor() {
+  const now = Date.now();
+  const busy = new Set([...agentSessions.values()].filter((x) => now - (x.seenAt || 0) <= AGENT_ACTIVE_MS).map((x) => x.color));
+  const free = AGENT_COLORS.find((c) => !busy.has(c));
+  if (free) return free;
+  // All taken: reuse the color whose most recent holder has been idle longest.
+  const lastSeen = new Map(AGENT_COLORS.map((c) => [c, 0]));
+  for (const x of agentSessions.values()) lastSeen.set(x.color, Math.max(lastSeen.get(x.color) || 0, x.seenAt || 0));
+  return [...lastSeen].sort((a, b) => a[1] - b[1])[0][0];
+}
+
+// "Claude", then "Claude 2", "Claude 3", … while other active sessions already use the name, so two agents in the
+// same canvas can be told apart by label as well as by color.
+function distinctAgentName(base) {
+  const now = Date.now();
+  const taken = new Set([...agentSessions.values()].filter((x) => now - (x.seenAt || 0) <= AGENT_ACTIVE_MS).map((x) => x.name));
+  if (!taken.has(base)) return base;
+  let i = 2;
+  while (taken.has(`${base} ${i}`)) i += 1;
+  return `${base} ${i}`;
+}
+
+// Who is calling. The MCP endpoint is stateless, so the server hands every client its own Mcp-Session-Id on
+// initialize (see the /mcp handler); clients send it back on each request. Without it, every instance of the same
+// client (same User-Agent) would be one agent: one color, and each could undo the others' steps.
+function agentFromRequest(req, initClientName = null, issuedKey = null) {
+  const key = req.get("x-weft-client") || issuedKey || req.get("mcp-session-id") || req.get("user-agent") || "mcp-default";
   let sess = agentSessions.get(key);
   if (!sess) {
-    const idx = agentSessions.size;
     sess = {
       id: newId(),
-      name: friendlyAgentName(initClientName),
-      color: AGENT_COLORS[idx % AGENT_COLORS.length],
+      name: distinctAgentName(friendlyAgentName(initClientName)),
+      color: freeAgentColor(),
+      seenAt: Date.now(),
     };
     agentSessions.set(key, sess);
     // Every new MCP session adds one; keep the most recent few hundred so a long-running server doesn't grow forever.
@@ -1200,7 +1228,8 @@ function agentFromRequest(req, initClientName = null) {
   } else {
     agentSessions.delete(key); // most recently used last, so eviction drops idle sessions first
     agentSessions.set(key, sess);
-    if (initClientName) sess.name = friendlyAgentName(initClientName);
+    sess.seenAt = Date.now();
+    if (initClientName && friendlyAgentName(initClientName) !== sess.name.replace(/ \d+$/, "")) sess.name = distinctAgentName(friendlyAgentName(initClientName));
   }
   return sess;
 }
@@ -1208,7 +1237,7 @@ function agentFromRequest(req, initClientName = null) {
 function presenceList() {
   const now = Date.now();
   for (const [id, p] of presence) if (now - p.at > PRESENCE_TTL || !state?.nodes[id]) presence.delete(id);
-  return [...presence].map(([id, p]) => ({ id, label: p.label }));
+  return [...presence].map(([id, p]) => ({ id, label: p.label, color: p.color }));
 }
 
 function agentCursorList() {
@@ -1259,9 +1288,10 @@ function touch(nodeIds, toolName = null, detail = null) {
   const store = mcpContextStore.getStore();
   const label = store?.agent?.name || "Agent";
   const agentId = store?.agent?.id || null;
+  const color = store?.agent?.color || AGENT_COLORS[0];
   const wasEmpty = presenceList().length === 0;
   const now = Date.now();
-  for (const id of nodeIds) if (state.nodes[id] && !isPage(id)) presence.set(id, { label, agentId, at: now });
+  for (const id of nodeIds) if (state.nodes[id] && !isPage(id)) presence.set(id, { label, agentId, color, at: now });
   setAgentCursor({ nodeIds, tool: toolName || store?.tool, detail: detail || store?.detail, mode: "edit" });
   const nowNonEmpty = presenceList().length > 0;
   emitPresence(wasEmpty !== nowNonEmpty);
@@ -3555,7 +3585,13 @@ function mcpToolDetail(toolName, args) {
 app.post(["/mcp", "/paper-lite/mcp"], async (req, res) => {
   const msgs = Array.isArray(req.body) ? req.body : [req.body];
   const initMsg = msgs.find((m) => m?.method === "initialize");
-  const agent = agentFromRequest(req, initMsg?.params?.clientInfo?.name || null);
+  // A new connection without its own client id gets a session id; the client returns it on every later request.
+  let issuedKey = null;
+  if (initMsg && !req.get("x-weft-client") && !req.get("mcp-session-id")) {
+    issuedKey = `weft-${randomUUID()}`;
+    res.setHeader("Mcp-Session-Id", issuedKey);
+  }
+  const agent = agentFromRequest(req, initMsg?.params?.clientInfo?.name || null, issuedKey);
   const callMsg = msgs.find((m) => m?.method === "tools/call");
   const tool = callMsg?.params?.name || "";
   const detail = tool ? mcpToolDetail(tool, callMsg?.params?.arguments) : "";
@@ -3574,7 +3610,16 @@ app.post(["/mcp", "/paper-lite/mcp"], async (req, res) => {
 const methodNotAllowed = (req, res) =>
   res.status(405).json({ jsonrpc: "2.0", error: { code: -32000, message: "Method not allowed (stateless server)" }, id: null });
 app.get(["/mcp", "/paper-lite/mcp"], methodNotAllowed);
-app.delete(["/mcp", "/paper-lite/mcp"], methodNotAllowed);
+// A client ending a session we issued: forget it and take its cursor off the canvas.
+app.delete(["/mcp", "/paper-lite/mcp"], (req, res) => {
+  const key = req.get("mcp-session-id");
+  const sess = key?.startsWith("weft-") ? agentSessions.get(key) : null;
+  if (!sess) return methodNotAllowed(req, res);
+  agentSessions.delete(key);
+  agentCursors.delete(sess.id);
+  emitPresence(false);
+  res.status(200).end();
+});
 
 // Graceful shutdown: wait for pending checkpoint commits and writes to reach disk, then exit. Signals cover POSIX and Ctrl+C / Ctrl+Break;
 // on Windows `kill("SIGTERM")` terminates the process outright, so a parent can instead send "shutdown" over IPC.

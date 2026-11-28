@@ -9,7 +9,7 @@
 </script>
 
 {#each a.boxes as b, i (i)}
-  <div class="agent-box" style:left="{b.x}px" style:top="{b.y}px" style:width="{b.w}px" style:height="{b.h}px"></div>
+  <div class="agent-box" style:left="{b.x}px" style:top="{b.y}px" style:width="{b.w}px" style:height="{b.h}px" style:border-color={b.color}></div>
 {/each}
 {#each a.cursors as c, i (i)}
   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->

@@ -4,6 +4,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { mcpCall, startServer } from "./helpers.js";
 
 test("MCP edge cases: instances in duplicated containers, artboard sizes and placement, override and patch typos, var loops", { timeout: 60_000 }, async (t) => {
@@ -238,6 +240,42 @@ test("MCP edge cases: instances in duplicated containers, artboard sizes and pla
     assert.ok(!working.includes(mineB.id), "B's outline is gone");
     await A("finish_working_on_nodes", {});
     await A("delete_nodes", { nodeIds: [mineA.id, mineB.id] });
+  });
+
+  await t.test("each MCP connection is its own agent: session id, color, name and outline color", async () => {
+    // Same client name and User-Agent, like two Claude Code windows: before, these were one agent.
+    const connect = async () => {
+      const client = new Client({ name: "claude-code", version: "1" });
+      const transport = new StreamableHTTPClientTransport(new URL(`${srv.baseUrl}/mcp`));
+      await client.connect(transport);
+      return { client, transport };
+    };
+    const [one, two] = [await connect(), await connect()];
+    try {
+      assert.match(one.transport.sessionId, /^weft-/);
+      assert.notEqual(one.transport.sessionId, two.transport.sessionId);
+      const tool = async (c, name, args) => JSON.parse((await c.client.callTool({ name, arguments: args })).content[0].text);
+      const x = await tool(one, "create_node", { parentId: a.id, name: "One" });
+      const y = await tool(two, "create_node", { parentId: a.id, name: "Two" });
+      const undo = await one.client.callTool({ name: "undo", arguments: {} });
+      assert.ok(undo.isError && /another agent session/.test(undo.content[0].text), "separate agents can't undo each other");
+
+      const ctl = new AbortController();
+      const res = await fetch(`${srv.baseUrl}/events`, { signal: ctl.signal });
+      const reader = res.body.getReader();
+      let buf = "";
+      while (!/event: presence\ndata: .*\n/.test(buf)) buf += new TextDecoder().decode((await reader.read()).value);
+      ctl.abort();
+      const presence = JSON.parse(/event: presence\ndata: (.*)\n/.exec(buf)[1]);
+      const cursorOne = presence.agents.find((c) => c.nodeIds.includes(x.id));
+      const cursorTwo = presence.agents.find((c) => c.nodeIds.includes(y.id));
+      assert.notEqual(cursorOne.color, cursorTwo.color, "different colors");
+      assert.notEqual(cursorOne.name, cursorTwo.name, "different labels (Claude, Claude 2)");
+      assert.equal(presence.nodes.find((n) => n.id === x.id).color, cursorOne.color, "outline in the agent's color");
+      await tool(one, "delete_nodes", { nodeIds: [x.id, y.id] });
+    } finally {
+      for (const c of [one, two]) { await c.transport.terminateSession().catch(() => {}); await c.client.close(); }
+    }
   });
 
   await t.test("update_root_css warns about var() loops", async () => {
