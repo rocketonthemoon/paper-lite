@@ -63,7 +63,9 @@ export function revertPatches(doc, patches) {
       const a = after.nodes[id] ?? null;
       const cur = doc.nodes[id] ?? null;
       if (b?.children) beforeOrder.set(id, b.children);
-      for (const n of [b, a, cur]) if (n?.parentId) parents.add(n.parentId);
+      // Only structural changes (created, deleted, moved) touch a parent's child list; a style change doesn't.
+      const structural = !b || !a || !same(b.parentId, a.parentId) || (cur && !same(cur.parentId, a.parentId));
+      if (structural) for (const n of [b, a, cur]) if (n?.parentId) parents.add(n.parentId);
       if (isPageNode(doc, id, b, a) || !same(b?.children, a?.children)) parents.add(id); // its own child list changed
 
       if (!b) {
@@ -138,7 +140,14 @@ export function revertPatches(doc, patches) {
     if (before.meta && after.meta) revertMeta(doc, before.meta, after.meta, metaSkipped, reverted);
 
     // Rebuild the child lists of every parent involved from parentId, in the step's original order.
-    for (const pid of parents) rebuildChildren(doc, pid, beforeOrder.get(pid), after.nodes[pid]?.children);
+    // Only layers in this step can be missing from a child list (everything else was consistent before), so index
+    // those by parent once instead of scanning the whole document for every parent.
+    const byParent = new Map();
+    for (const id of Object.keys(before.nodes)) {
+      const pid = doc.nodes[id]?.parentId;
+      if (pid && parents.has(pid)) byParent.set(pid, [...(byParent.get(pid) || []), id]);
+    }
+    for (const pid of parents) rebuildChildren(doc, pid, beforeOrder.get(pid), after.nodes[pid]?.children, byParent.get(pid) || []);
 
     // A restored or reverted layer must not link to a component (or instance root) that no longer exists: detach it.
     for (const id of Object.keys(before.nodes)) {
@@ -163,18 +172,20 @@ function isPageNode(doc, id, b, a) {
   return doc.pages.includes(id) || (b && !b.parentId) || (a && !a.parentId);
 }
 
-function rebuildChildren(doc, pid, beforeList, afterList) {
+function rebuildChildren(doc, pid, beforeList, afterList, candidates) {
   const parent = doc.nodes[pid];
   if (!parent) return;
   const belongs = (c) => doc.nodes[c] && doc.nodes[c].parentId === pid;
   // When nobody reordered since the step, start from the order before it; otherwise keep today's order.
   const base = beforeList && same(parent.children, afterList) ? beforeList : parent.children;
   const list = [...new Set(base)].filter(belongs);
+  const listed = new Set(list);
   // Children that now point here but aren't listed (restored, or moved back): place them after the sibling they
   // followed before the step.
   const order = beforeList || [];
-  for (const [id, n] of Object.entries(doc.nodes)) {
-    if (n.parentId !== pid || list.includes(id)) continue;
+  for (const id of candidates) {
+    if (doc.nodes[id]?.parentId !== pid || listed.has(id)) continue;
+    listed.add(id);
     const i = order.indexOf(id);
     let at = list.length;
     if (i > 0) {

@@ -197,3 +197,20 @@ test("the last page is never removed", () => {
   assert.equal(d.rootId, "Q");
   assert.ok(r.skipped.some((k) => k.id === "Q"));
 });
+
+test("reverting a large style-only step stays fast (no full scan per parent)", () => {
+  // 2,000 cards with a paragraph each (6,000+ layers); the step restyles every paragraph.
+  const d = doc();
+  for (let i = 0; i < 2000; i++) {
+    d.nodes[`c${i}`] = { id: `c${i}`, name: `Card ${i}`, tag: "div", parentId: "A", children: [`p${i}`], text: "", styles: {}, attrs: {} };
+    d.nodes[`p${i}`] = { id: `p${i}`, name: `P ${i}`, tag: "p", parentId: `c${i}`, children: [], text: "t", styles: {}, attrs: {} };
+    d.nodes.A.children.push(`c${i}`);
+  }
+  const mine = step(d, (s) => { for (let i = 0; i < 2000; i++) s.nodes[`p${i}`].styles.color = "red"; });
+  const t = Date.now();
+  const r = revertPatches(d, [mine]);
+  const ms = Date.now() - t;
+  assert.equal(r.reverted.length, 2000);
+  assert.equal(d.nodes.p7.styles.color, undefined);
+  assert.ok(ms < 2000, `took ${ms} ms`);
+});
