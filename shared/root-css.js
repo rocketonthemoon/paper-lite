@@ -193,6 +193,11 @@
       }
       const decl = text.slice(i, j).trim();
       i = j + 1;
+      // Block-less at-rules (@import, @charset, @font-face without a block, …) aren't declarations; name them plainly.
+      if (decl[0] === "@") {
+        const rule = decl.split(/[\s(;]/)[0];
+        fail(`${rule} isn't supported in the root CSS${/^@import$/i.test(rule) ? " (fonts come from add_font; paste the CSS itself)" : " (only @media blocks are)"}`);
+      }
       const k = decl.indexOf(":");
       if (k < 1) fail(`Bad declaration "${decl.slice(0, 40)}" (expected property: value;)`);
       const prop = decl.slice(0, k).trim(), value = decl.slice(k + 1).trim();

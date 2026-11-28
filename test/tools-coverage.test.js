@@ -407,7 +407,8 @@ test("MCP tools: every registered tool works end to end", { timeout: 180_000 }, 
   });
 
   await t.test("structure tools: create_node, duplicate_nodes, move_nodes, delete_nodes", async () => {
-    const extra = await ok(B, "create_node", { parentId: section, tag: "img", name: "Logo", attrs: { src: "https://example.com/logo.png", alt: "Logo" }, text: "ignored?", index: 0 });
+    const extra = await ok(B, "create_node", { parentId: section, tag: "img", name: "Logo", attrs: { src: "https://example.com/logo.png", alt: "Logo" }, index: 0 });
+    await fails(B, "create_node", { parentId: section, tag: "img", text: "no text on img" }, /can't hold text/);
     assert.equal((await ok(B, "get_children", { nodeId: section }))[0].id, extra.id, "index 0 inserts first");
     await fails(B, "create_node", { parentId: section, tag: "img", attrs: { src: "javascript:alert(1)" } }, /Unsafe URL/);
 

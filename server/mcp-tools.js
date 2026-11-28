@@ -105,6 +105,32 @@ const trunc = (s, n = 60) => (s && s.length > n ? `${s.slice(0, n - 1)}…` : s 
 const text = (value) => ({ content: [{ type: "text", text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }] });
 const READ = { readOnlyHint: true, openWorldHint: false };
 const WRITE = { readOnlyHint: false, destructiveHint: false, openWorldHint: false };
+// Unknown arguments are refused instead of silently dropped: a typo such as `style` for `styles` would otherwise
+// "succeed" and change nothing. The error names the closest known key.
+function editDistance(a, b) {
+  const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
+  for (let j = 1; j <= b.length; j++) d[0][j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+  }
+  return d[a.length][b.length];
+}
+function strictShape(shape) {
+  const known = Object.keys(shape);
+  return z.strictObject(shape, {
+    error: (iss) => {
+      if (iss.code !== "unrecognized_keys") return undefined;
+      return iss.keys.map((k) => {
+        const close = known
+          .map((n) => ({ n, d: editDistance(k.toLowerCase(), n.toLowerCase()) }))
+          .filter(({ n, d }) => d <= Math.max(2, Math.floor(n.length / 3)) || n.toLowerCase().startsWith(k.toLowerCase()) || k.toLowerCase().startsWith(n.toLowerCase()))
+          .sort((x, y) => x.d - y.d)[0];
+        return `Unknown argument "${k}"${close ? ` (did you mean "${close.n}"?)` : ""}; expected one of: ${known.join(", ") || "(none)"}`;
+      }).join("; ");
+    },
+  });
+}
+
 const ids = z.array(z.string()).min(1);
 const classesSchema = z.array(z.string()).max(12).describe('Shared classes from the root CSS, applied in order, e.g. ["card", "card-elevated"]');
 const styleSchema = z
@@ -115,7 +141,8 @@ const styleSchema = z
  * @param {import("@modelcontextprotocol/sdk/server/mcp.js").McpServer} server
  * @param {object} ctx  canvas operations provided by server.js
  */
-export function registerTools(server, ctx) {
+export function registerTools(mcpServer, ctx) {
+  const server = { registerTool: (name, config, cb) => mcpServer.registerTool(name, { ...config, inputSchema: strictShape(config.inputSchema ?? {}) }, cb) };
   const S = () => ctx.state();
   const summary = (id) => {
     const n = S().nodes[id];
@@ -398,7 +425,7 @@ export function registerTools(server, ctx) {
   server.registerTool("update_styles", {
     description: "Batch style changes in one undo step: [{ nodeIds: [...], styles: { camelCase: value | null } }]. Put every style change you have in one call.",
     inputSchema: {
-      updates: z.array(z.object({ nodeIds: ids, styles: styleSchema })).min(1),
+      updates: z.array(strictShape({ nodeIds: ids, styles: styleSchema })).min(1),
       lint: z.boolean().optional().describe("Design system lint hints for un-tokenized spacing, radii, font sizes and colors (default: true)"),
     },
     annotations: WRITE,
@@ -412,7 +439,7 @@ export function registerTools(server, ctx) {
       nodeIds: targetIds,
     });
     ctx.touch(touched, "update_styles", keys);
-    const hints = ctx.rootCss.hints(touched, { lint });
+    const hints = ctx.rootCss.hints(touched, { lint, props: updates.flatMap((u) => Object.keys(u.styles || {})) });
     return text(hints.length ? { updated: touched.length, hints } : { updated: touched.length });
   });
 
@@ -434,7 +461,7 @@ export function registerTools(server, ctx) {
     inputSchema: {
       nodeId: z.string().optional(),
       ...nodePatchFields,
-      updates: z.array(z.object({ nodeId: z.string(), ...nodePatchFields })).min(1).optional().describe("Batch multiple node updates in one undo step"),
+      updates: z.array(strictShape({ nodeId: z.string(), ...nodePatchFields })).min(1).optional().describe("Batch multiple node updates in one undo step"),
     },
     annotations: WRITE,
   }, async ({ nodeId, updates, ...patch }) => {
@@ -448,10 +475,11 @@ export function registerTools(server, ctx) {
         nodeIds: targetIds,
       });
       ctx.touch(targetIds, "update_node", targetName);
-      const hints = updates.some((u) => u.styles) ? ctx.rootCss.hints(targetIds) : [];
+      const hints = updates.some((u) => u.styles) ? ctx.rootCss.hints(targetIds, { props: updates.flatMap((u) => Object.keys(u.styles || {})) }) : [];
       return text(hints.length ? { updated: updated.length, nodes: updated.map((n) => summary(n.id)), hints } : { updated: updated.length, nodes: updated.map((n) => summary(n.id)) });
     }
     if (!nodeId) throw new Error("Provide nodeId or updates");
+    if (!Object.values(patch).some((v) => v !== undefined)) throw new Error("Nothing to update: pass name, tag, text, classes, addClasses, removeClasses, styles, attrs or detachComponent");
     const n = ctx.updateNode(nodeId, patch, "mcp", { tool: "update_node", target: patch.name || S().nodes[nodeId]?.name, nodeIds: [nodeId] });
     ctx.touch([nodeId], "update_node", patch.styles ? Object.keys(patch.styles).slice(0, 2).join(", ") : n.name);
     return text(summary(nodeId));
@@ -476,13 +504,13 @@ export function registerTools(server, ctx) {
   }, async (args) => {
     const res = ctx.updateNodesMatching(args, "mcp");
     if (res.nodeIds.length) ctx.touch(res.nodeIds, "update_nodes_matching", `${res.updated} layers`);
-    const hints = args.styles && res.nodeIds.length ? ctx.rootCss.hints(res.nodeIds) : [];
+    const hints = args.styles && res.nodeIds.length ? ctx.rootCss.hints(res.nodeIds, { props: Object.keys(args.styles) }) : [];
     return text(hints.length ? { ...res, hints } : res);
   });
 
   server.registerTool("set_text_content", {
     description: "Set the text of text layers in one undo step: [{ nodeId, text }].",
-    inputSchema: { updates: z.array(z.object({ nodeId: z.string(), text: z.string() })).min(1) },
+    inputSchema: { updates: z.array(strictShape({ nodeId: z.string(), text: z.string() })).min(1) },
     annotations: WRITE,
   }, async ({ updates }) => {
     const targetIds = updates.map((u) => u.nodeId);
@@ -498,7 +526,7 @@ export function registerTools(server, ctx) {
 
   server.registerTool("rename_nodes", {
     description: "Rename layers in one undo step: [{ nodeId, name }].",
-    inputSchema: { updates: z.array(z.object({ nodeId: z.string(), name: z.string().min(1) })).min(1) },
+    inputSchema: { updates: z.array(strictShape({ nodeId: z.string(), name: z.string().min(1) })).min(1) },
     annotations: WRITE,
   }, async ({ updates }) => {
     const targetIds = updates.map((u) => u.nodeId);
@@ -530,6 +558,9 @@ export function registerTools(server, ctx) {
     inputSchema: { nodeIds: ids },
     annotations: { ...WRITE, destructiveHint: true },
   }, async ({ nodeIds }) => {
+    // Every id must exist up front, like every other tool (a mistyped id used to be skipped without a word).
+    const missing = nodeIds.filter((id) => !S().nodes[id]);
+    if (missing.length) throw new Error(`Node${missing.length > 1 ? "s" : ""} ${missing.map((id) => `"${id}"`).join(", ")} not found; nothing was deleted`);
     const targetName = nodeIds.length === 1 ? (S().nodes[nodeIds[0]]?.name || "Layer") : `${nodeIds.length} layers`;
     // Check existence as we go: an id may already be gone because an earlier id was its ancestor (or a repeat).
     const deleted = ctx.batch("mcp", () => nodeIds.flatMap((id) => (S().nodes[id] ? ctx.deleteNode(id, "mcp").deleted : [])), {
@@ -689,7 +720,7 @@ export function registerTools(server, ctx) {
   server.registerTool("register_icons", {
     description: "Register reusable SVG icons for the open project (one undo step). Once registered, write_html can use <icon name=\"icon-name\" /> anywhere (repeating cards, nav items) without repeating inline <svg> markup. Icons are strictly sanitised (SVG shapes + presentation attrs only; no scripts, href, or url()).",
     inputSchema: {
-      icons: z.array(z.object({ name: z.string().min(1), svg: z.string().min(1) })).min(1).optional().describe("Batch list of { name, svg } icons to register"),
+      icons: z.array(strictShape({ name: z.string().min(1), svg: z.string().min(1) })).min(1).optional().describe("Batch list of { name, svg } icons to register"),
       name: z.string().optional().describe("Single icon name (alternative to icons array)"),
       svg: z.string().optional().describe("Single <svg>...</svg> markup (alternative to icons array)"),
       replace: z.boolean().optional().describe("Replace the entire project icon registry instead of merging"),
@@ -771,7 +802,7 @@ export function registerTools(server, ctx) {
       name: z.string().optional(),
       overrides: z.record(z.string(), z.union([
         z.string(),
-        z.object({
+        strictShape({
           name: z.string().optional(),
           tag: z.string().optional(),
           text: z.string().optional(),
@@ -794,7 +825,7 @@ export function registerTools(server, ctx) {
       component: z.string().min(1),
       html: z.string().optional(),
       slot: z.string().optional().describe("Target slot, key, or layer name in master (default: \"root\")"),
-      patch: z.object({
+      patch: strictShape({
         name: z.string().optional(),
         tag: z.string().optional(),
         text: z.string().optional(),
@@ -804,8 +835,8 @@ export function registerTools(server, ctx) {
         styles: styleSchema.optional(),
         replaceStyles: z.boolean().optional(),
         attrs: z.record(z.string(), z.union([z.string(), z.null()])).optional(),
-      }).optional(),
-      appendHtml: z.object({
+      }).optional().describe("Changes for the layer named by slot. Unknown keys are refused (a patch keyed by slot name is a mistake: pass slot instead)"),
+      appendHtml: strictShape({
         html: z.string().min(1),
         parentSlot: z.string().optional(),
         index: z.number().int().optional(),

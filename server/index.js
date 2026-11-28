@@ -11,7 +11,7 @@ import { randomBytes } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
-  HttpError, ID_RE, SVG_TAGS, VOID_TAGS, cleanName, cleanTag, emptyPage, emptyProject, lenientMerge, mergeAttrs, mergeStyles,
+  HttpError, ID_RE, SLOT_NAME_RE, SVG_TAGS, VOID_TAGS, cleanName, cleanText, holdsNoText, cleanTag, emptyPage, emptyProject, lenientMerge, mergeAttrs, mergeStyles,
   newId, normalizeProject, emptyRootCss, mergeRootCss, rootCssText, rootCssFlat, rootBaseClasses, definedRootClasses,
   isBaseRule, rootClassesIn, cleanClassList, varsIn, analyzeRootCssUsage, pruneUnusedRootCss,
 } from "./model.js";
@@ -305,13 +305,16 @@ async function loadWorkspace() {
       } catch {}
     }
   }
-  // Older versions created the startup "Untitled" project without the placeholder flag: an untouched, empty one
-  // (never edited since it was created) is one, too.
-  for (const p of workspace.projects) {
-    if (!p.placeholder && p.name === "Untitled" && p.createdAt === p.updatedAt && !p.layers && !p.artboards && p.pages === 1) {
-      p.placeholder = true;
-      backfilled = true;
-    }
+  // Older versions created the startup "Untitled" project without the placeholder flag. Only the workspace's first
+  // project can be that one (the New project dialog also suggests "Untitled", so the name alone proves nothing), and
+  // only while it is still empty and has never been edited.
+  const first = workspace.projects.reduce((a, p) => (!a || String(p.createdAt) < String(a.createdAt) ? p : a), null);
+  if (first && !first.placeholder && !workspace.placeholderChecked && first.name === "Untitled" && first.createdAt === first.updatedAt && !first.layers && !first.artboards && first.pages === 1) {
+    first.placeholder = true;
+  }
+  if (!workspace.placeholderChecked) {
+    workspace.placeholderChecked = true; // one-time migration: projects created from now on carry the flag themselves
+    backfilled = true;
   }
   if (backfilled) await saveWorkspace();
   if (!workspace.projects.length) {
@@ -1391,10 +1394,12 @@ function createNode(input, source = "api", meta = null) {
   const attrs = mergeAttrs({}, input.attrs, tag);
   const classes = input.classes === undefined ? [] : definedClasses(cleanClassList(input.classes));
   const nodeName = cleanName(input.name, tag);
+  const text = cleanText(input.text);
+  if (holdsNoText(tag) && text.trim()) throw new HttpError(400, `<${tag}> can't hold text`);
   const toolFallback = isPage(parent.id) ? "Draw Frame" : (tag === "p" && input.text !== undefined ? "Create Text" : "Draw Rect");
   return mutate(source, (s) => {
     const id = newId();
-    s.nodes[id] = { id, name: nodeName, tag, parentId: parent.id, children: [], text: String(input.text ?? ""), styles, attrs };
+    s.nodes[id] = { id, name: nodeName, tag, parentId: parent.id, children: [], text: holdsNoText(tag) ? "" : text, styles, attrs };
     if (classes.length) s.nodes[id].classes = classes;
     insertChild(s.nodes[parent.id], id, input.index);
     return s.nodes[id];
@@ -1414,7 +1419,12 @@ function updateNode(id, patch, source = "api", meta = null) {
       if (toSvg !== wasSvg) throw new HttpError(400, `Can't switch between HTML and SVG tags while the layer has children`);
     }
   }
-  if (patch.text !== undefined) next.text = String(patch.text);
+  const finalTag = next.tag ?? node.tag;
+  if (patch.text !== undefined) {
+    next.text = cleanText(patch.text);
+    if (holdsNoText(finalTag) && next.text.trim()) throw new HttpError(400, `<${finalTag}> can't hold text`);
+  }
+  if (next.tag && holdsNoText(next.tag) && node.text) next.text = ""; // switching to img/svg/… drops text it can't show
   if (patch.styles !== undefined) next.styles = mergeStyles(patch.replaceStyles ? {} : node.styles, patch.styles);
   if (patch.attrs !== undefined) next.attrs = mergeAttrs(node.attrs, patch.attrs, next.tag ?? node.tag);
   if (patch.classes !== undefined || patch.addClasses !== undefined || patch.removeClasses !== undefined) {
@@ -1471,9 +1481,16 @@ function updateNode(id, patch, source = "api", meta = null) {
     if (moving) {
       const oldParent = s.nodes[n.parentId];
       oldParent.children = oldParent.children.filter((c) => c !== id);
+      const wasArtboard = isPage(n.parentId);
       n.parentId = patch.parentId ?? n.parentId;
+      // Anything moved onto a page becomes an artboard and needs a world position: the next free spot (not 0,0, where
+      // it would sit on top of the first artboard), unless this same patch places it.
+      const placed = patch.styles && (patch.styles.left !== undefined || patch.styles.top !== undefined);
+      if (isPage(n.parentId) && !wasArtboard && !placed) {
+        const pos = nextArtboardPosition(n.parentId);
+        n.styles = mergeStyles(n.styles, { position: "absolute", left: pos.x, top: pos.y });
+      }
       insertChild(s.nodes[n.parentId], id, patch.index);
-      // Anything moved onto a page becomes an artboard and needs a world position.
       if (isPage(n.parentId) && n.styles.position !== "absolute") n.styles = mergeStyles(n.styles, { position: "absolute", left: 0, top: 0 });
     }
     return n;
@@ -1545,15 +1562,18 @@ function duplicateNode(id, source = "api") {
   if (isPage(id)) throw new HttpError(400, "Pages cannot be duplicated");
   const node = getNode(id);
   return mutate(source, (s) => {
-    const dupRootSourceId = node.componentId && !node.componentRootId ? node.id : null;
-    const copy = (srcId, parentId, newInstRoot = null) => {
+    // Every component instance root inside the copied subtree (not only the duplicated node itself) gets a new id, and
+    // its layers must point at that copy: otherwise update_component sees them as strays and rebuilds them, dropping
+    // their overrides. Roots are always visited before their layers, so the map is filled in time.
+    const newRootOf = new Map();
+    const copy = (srcId, parentId) => {
       const src = s.nodes[srcId];
       const nid = newId();
-      const instRoot = newInstRoot || (srcId === dupRootSourceId ? nid : null);
       const cloned = { ...structuredClone(src), id: nid, parentId, children: [] };
-      if (cloned.componentRootId && dupRootSourceId && cloned.componentRootId === dupRootSourceId && instRoot) cloned.componentRootId = instRoot;
+      if (src.componentId && !src.componentRootId) newRootOf.set(srcId, nid);
+      if (cloned.componentRootId && newRootOf.has(cloned.componentRootId)) cloned.componentRootId = newRootOf.get(cloned.componentRootId);
       s.nodes[nid] = cloned;
-      s.nodes[nid].children = src.children.map((c) => copy(c, nid, instRoot));
+      s.nodes[nid].children = src.children.map((c) => copy(c, nid));
       return nid;
     };
     const nid = copy(id, node.parentId);
@@ -1563,6 +1583,12 @@ function duplicateNode(id, source = "api") {
       const top = isPage(node.parentId);
       dup.styles.left = `${(parseFloat(dup.styles.left) || 0) + (top ? (parseFloat(dup.styles.width) || 0) + 80 : 16)}px`;
       if (!top) dup.styles.top = `${(parseFloat(dup.styles.top) || 0) + 16}px`;
+      // An artboard copy goes right of the original, unless another artboard is already there.
+      else if (artboardOverlaps(node.parentId, dup, id)) {
+        const pos = nextArtboardPosition(node.parentId);
+        dup.styles.left = `${pos.x}px`;
+        dup.styles.top = `${pos.y}px`;
+      }
     }
     insertChild(s.nodes[node.parentId], nid, s.nodes[node.parentId].children.indexOf(id) + 1);
     return dup;
@@ -1585,6 +1611,21 @@ function artboardSize(id) {
   return { width: /px$/.test(st.width || "") && w > 0 ? w : 1280, height: /px$/.test(st.height || "") && h > 0 ? h : 900 };
 }
 
+function artboardRect(st) {
+  const x = parseFloat(st.left) || 0, y = parseFloat(st.top) || 0;
+  return { x, y, w: parseFloat(st.width) || 390, h: parseFloat(st.height) || 844 };
+}
+
+// Does `board` (styles of an artboard not yet on the page) overlap any artboard on the page other than `ignoreId`?
+function artboardOverlaps(pageId, board, ignoreId) {
+  const r = artboardRect(board.styles);
+  return state.nodes[pageId].children.some((cid) => {
+    if (cid === ignoreId || cid === board.id) return false;
+    const o = artboardRect(state.nodes[cid].styles);
+    return r.x < o.x + o.w && o.x < r.x + r.w && r.y < o.y + o.h && o.y < r.y + r.h;
+  });
+}
+
 // Next free spot for a new artboard on a page: right of the existing ones on the top row.
 function nextArtboardPosition(pageId = state.rootId) {
   const boards = state.nodes[pageId].children.map((id) => state.nodes[id].styles);
@@ -1594,7 +1635,17 @@ function nextArtboardPosition(pageId = state.rootId) {
   return { x: Math.round(right + 80), y: Math.round(top) };
 }
 
+const MAX_ARTBOARD_SIZE = 100_000;
+// A numeric or px artboard size must be positive and sane: a negative one makes artboards overlap, and a huge one
+// pushes every later artboard far off to the right. Keywords and other units ("fit-content", "100%") pass through.
+function checkArtboardSize(label, v) {
+  const px = typeof v === "number" ? v : /^\s*-?\d*\.?\d+(px)?\s*$/.test(String(v)) ? parseFloat(v) : null;
+  if (px !== null && !(px > 0 && px <= MAX_ARTBOARD_SIZE)) throw new HttpError(400, `Artboard ${label} must be between 1 and ${MAX_ARTBOARD_SIZE}px (got ${JSON.stringify(v)})`);
+}
+
 function createArtboard({ name = "Frame", width = 390, height = 844, x, y, styles = {}, pageId }, source = "mcp") {
+  checkArtboardSize("width", width);
+  checkArtboardSize("height", height);
   const trimmedPage = typeof pageId === "string" ? pageId.trim() : "";
   const page = trimmedPage ? getPage(trimmedPage).id : state.rootId;
   const pos = x === undefined || y === undefined ? nextArtboardPosition(page) : { x, y };
@@ -1722,6 +1773,19 @@ function getRootCss(opts = {}, doc = state) {
 
 // Patch the root CSS. `css` text is parsed and merged like vars/classes; replace: true starts from empty.
 // Removing a class also removes it from every layer that used it, in the same undo step.
+// Each var() reference loop among :root variables, e.g. [["--a", "--b", "--a"]].
+function varCycles(vars) {
+  const cycles = [], done = new Set();
+  const walk = (name, path) => {
+    if (path.includes(name)) { cycles.push([...path.slice(path.indexOf(name)), name]); return; }
+    if (done.has(name) || !(name in vars)) return;
+    for (const ref of varsIn(String(vars[name]))) walk(ref, [...path, name]);
+    done.add(name);
+  };
+  for (const name of Object.keys(vars)) walk(name, []);
+  return cycles;
+}
+
 async function updateRootCss({ vars, classes, css, rules, replace = false, pruneUnused = false } = {}, source = "api") {
   const before = state.rootCss || emptyRootCss();
   let next = mergeRootCss(before, { css, vars, classes, rules }, { replace });
@@ -1795,6 +1859,8 @@ async function updateRootCss({ vars, classes, css, rules, replace = false, prune
     }
   }
   if (missingVars.size) warnings.push(`Undefined variables referenced in root CSS: ${[...missingVars].join(", ")}`);
+  const cycles = varCycles(next.vars);
+  if (cycles.length) warnings.push(`Variables that reference each other in a loop are invalid in CSS and resolve to nothing: ${cycles.map((c) => c.join(" → ")).join("; ")}`);
   return {
     addedClasses,
     updatedClasses,
@@ -1904,10 +1970,11 @@ function addSubtree(spec, parentId, index, warnings) {
   }
   const attrs = lenientMerge((b, p) => mergeAttrs(b, p, tag), spec.attrs, warnings, label);
   const id = newId();
-  const noText = SVG_TAGS.has(tag) || VOID_TAGS.has(tag);
-  const text = String(spec.text ?? "");
+  const noText = holdsNoText(tag);
+  const text = cleanText(spec.text);
   if (noText && text.trim()) warnings.push(`${label}: <${tag}> can't hold text; dropped "${text.length > 40 ? `${text.slice(0, 37)}…` : text}"`);
   state.nodes[id] = { id, name: label, tag, parentId: parent.id, children: [], text: noText ? "" : text, styles, attrs };
+  if (spec.slot && SLOT_NAME_RE.test(spec.slot)) state.nodes[id].slot = spec.slot; // kept for create_component({ nodeId })
   let classes = [];
   for (const c of spec.classes || []) {
     try { classes = cleanClassList([...classes, c]); } catch (err) { warnings.push(`${label}: ${err.message}`); }

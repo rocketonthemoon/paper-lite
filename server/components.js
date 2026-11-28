@@ -5,7 +5,7 @@
 // HTML/JSX exports and single-step undo all work automatically.
 import {
   HttpError, COMPONENT_NAME_RE, SLOT_NAME_RE, SVG_TAGS, VOID_TAGS,
-  cleanClassList, cleanName, cleanTag, definedRootClasses, lenientMerge, mergeAttrs, mergeStyles,
+  cleanClassList, cleanName, cleanText, cleanTag, definedRootClasses, lenientMerge, mergeAttrs, mergeStyles,
   newId, normalizeComponentTree,
 } from "./model.js";
 import { htmlToSpecs } from "./html-import.js";
@@ -110,7 +110,9 @@ export function createComponentEngine({
       const n = doc.nodes[nid];
       if (!n) throw new HttpError(404, `Node "${nid}" not found`);
       let key;
+      const slot = !isRoot && typeof n.slot === "string" && SLOT_NAME_RE.test(n.slot) && !usedKeys.has(n.slot) ? n.slot : undefined;
       if (isRoot) key = "root";
+      else if (slot) key = slot; // data-slot="…" from write_html names the slot, as it does in component html
       else if (n.componentKey && SLOT_NAME_RE.test(n.componentKey) && !usedKeys.has(n.componentKey)) key = n.componentKey;
       else {
         do { counter.n += 1; key = `k${counter.n}`; } while (usedKeys.has(key));
@@ -125,6 +127,7 @@ export function createComponentEngine({
       const children = VOID_TAGS.has(n.tag) ? [] : n.children.map((cid) => build(cid, false));
       return {
         key,
+        ...(slot ? { slot } : {}),
         tag: n.tag,
         name: n.name,
         text: SVG_TAGS.has(n.tag) || VOID_TAGS.has(n.tag) ? "" : String(n.text ?? ""),
@@ -264,7 +267,7 @@ export function createComponentEngine({
     const noText = SVG_TAGS.has(tag) || VOID_TAGS.has(tag);
     let text = noText ? "" : String(spec.text ?? "");
     if (!noText && ovInput?.text !== undefined) {
-      text = String(ovInput.text);
+      text = cleanText(ovInput.text);
       ov.text = true;
     }
     const id = isRoot ? instanceRootId : newId();
@@ -466,6 +469,12 @@ export function createComponentEngine({
     const parent = getNode((typeof parentId === "string" ? parentId.trim() : "") || s0.rootId);
     assertCanNest(parent, comp.tree.tag);
     const warnings = [];
+    // An override whose key names no slot, key or layer would otherwise be dropped without a word.
+    const unknown = Object.keys(overrides || {}).filter((k) => !findTreeNode(comp.tree, k));
+    if (unknown.length) {
+      const slots = collectComponentSlots(comp.tree).map((sl) => sl.slot || sl.key);
+      warnings.push(`Override${unknown.length > 1 ? "s" : ""} ${unknown.map((k) => `"${k}"`).join(", ")} match${unknown.length > 1 ? "" : "es"} no slot in "${comp.id}" and ${unknown.length > 1 ? "were" : "was"} ignored (slots: ${slots.join(", ")})`);
+    }
     const res = mutate(source, () => instantiateIntoState(comp, parent.id, index, overrides || {}, name || null, warnings), {
       tool: "instantiate_component",
       target: comp.id,
@@ -488,6 +497,7 @@ export function createComponentEngine({
   function updateComponent({ component, html, slot = "root", patch, appendHtml, removeSlot }, source = "mcp") {
     const prevComp = getState().components?.[component];
     if (!prevComp) throw new HttpError(404, `Component "${component}" not found`);
+    if (html === undefined && !patch && !appendHtml?.html && !removeSlot) throw new HttpError(400, "Nothing to update: pass html, patch, appendHtml or removeSlot");
     const warnings = [];
     let nextTree;
     if (html !== undefined) {
@@ -534,7 +544,7 @@ export function createComponentEngine({
           if (target.children.length && VOID_TAGS.has(nextTag)) throw new HttpError(400, `<${nextTag}> can't contain child layers`);
           target.tag = nextTag;
         }
-        if (patch.text !== undefined) target.text = SVG_TAGS.has(target.tag) || VOID_TAGS.has(target.tag) ? "" : String(patch.text);
+        if (patch.text !== undefined) target.text = SVG_TAGS.has(target.tag) || VOID_TAGS.has(target.tag) ? "" : cleanText(patch.text);
         if (patch.styles !== undefined) target.styles = mergeStyles(patch.replaceStyles ? {} : target.styles, patch.styles);
         if (patch.attrs !== undefined) target.attrs = mergeAttrs(target.attrs, patch.attrs, target.tag);
         let nextClasses = target.classes ? [...target.classes] : [];

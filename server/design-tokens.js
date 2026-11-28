@@ -281,7 +281,9 @@ const CATEGORY_LABEL = {
  * - Suggestions stay in category: color tokens only for color values, spacing/radius/font tokens only for properties
  *   of the same category (so `fontSize: 18px` never suggests `--radius-lg`). Uncategorized variables match anything.
  */
-export function analyzeDesignLint(nodeIds, doc, { lint = true, limit = 20 } = {}) {
+// `props`: only check these style keys (the ones a call just set), so hints never point at styles it didn't touch.
+export function analyzeDesignLint(nodeIds, doc, { lint = true, limit = 20, props = null } = {}) {
+  const only = props ? new Set(props) : null;
   const root = doc?.rootCss || { vars: {}, rules: [] };
   const vars = root.vars || {};
   const byValue = new Map();
@@ -320,7 +322,10 @@ export function analyzeDesignLint(nodeIds, doc, { lint = true, limit = 20 } = {}
     const n = doc.nodes[id];
     if (!n) continue;
     for (const [k, rawVal] of Object.entries(n.styles || {})) {
+      if (only && !only.has(k)) continue;
       if (doc.pages.includes(n.parentId) && (k === "left" || k === "top" || k === "position")) continue;
+      // The white fill every new artboard gets by default isn't the author's choice; don't nag about it.
+      if (doc.pages.includes(n.parentId) && k === "backgroundColor" && String(rawVal).toLowerCase() === "#ffffff") continue;
       const v = String(rawVal);
 
       // 1. Unknown var(--...) references
