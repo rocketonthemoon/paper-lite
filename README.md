@@ -155,6 +155,8 @@ RENDERER=blitz npm start
 - **Fallback:** headless Chrome still answers anything Blitz can't:
   - artboards whose layers or root CSS use CSS Blitz doesn't draw yet: `filter`, `backdrop-filter`, `clip-path`,
     multi-column layout, `writing-mode`, `text-overflow`, `line-clamp`;
+  - `get_computed_styles` for shapes inside an `<svg>` (Blitz draws an SVG as one image, so its shapes have no box)
+    and for layers under a `transform` (Chrome reports the transformed bounding box, Blitz the untransformed one);
   - calls where the sidecar is missing or fails.
 
   Chrome only starts if one of these happens.
@@ -163,13 +165,13 @@ RENDERER=blitz npm start
   | | Blitz | Headless Chrome |
   | --- | --- | --- |
   | Memory | ~30 MB | ~460 MB |
-  | Screenshot, warm | 30–45 ms | 60–80 ms |
-  | Computed styles, warm | 20–30 ms | 26–32 ms |
+  | Screenshot, warm | 20–30 ms | 60–80 ms |
+  | Computed styles, warm | 12–14 ms | 22–37 ms |
   | First call | ~20 ms (+ one fetch of web fonts) | ~0.5–1 s to start Chrome |
 - **Known differences:**
   - Layout, text, gradients, shadows, borders, outlines, transforms, blend modes, masks and CSS variables match closely.
-  - Generic font names (`serif`, `sans-serif`) can resolve to a different system font than Chrome's, so text that doesn't
-    set a font may wrap differently.
+  - `serif` (also the default for text with no font) and `sans-serif` use Chrome's default fonts (Times New Roman,
+    Arial, or their metric-compatible stand-ins such as Liberation Serif / Sans), so text wraps as in Chrome.
   - Computed values are formatted slightly differently in places: Chrome writes `0px none rgb(0, 0, 0)` for an unset
     border, Blitz `0px rgb(0, 0, 0)`; lengths can differ below 1/64 px.
 

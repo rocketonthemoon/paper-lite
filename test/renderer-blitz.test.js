@@ -61,6 +61,30 @@ test("Blitz renders artboards like headless Chrome (boxes, styles, screenshot si
   assert.deepEqual([capped.width, capped.height, capped.scale], [320, 200, 0.5]);
 });
 
+test("Blitz lays out text in the generic fonts like headless Chrome (serif by default, sans-serif)", {
+  skip: (!blitzBuilt && "weft-render not built") || (!chromeFound && "no Chrome"), timeout: 120_000,
+}, async (t) => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "weft-blitz-text-"));
+  const srv = await startServer(dataDir);
+  const chrome = new Renderer(srv.baseUrl), blitz = new BlitzRenderer(srv.baseUrl);
+  t.after(async () => { chrome.stop(); blitz.stop(); await srv.stop(); await fs.rm(dataDir, { recursive: true, force: true }); });
+  const ab = await mcpCall(srv.baseUrl, "create_artboard", { name: "Text", width: 640, height: 400 });
+  // Wrapping paragraphs: a different font would change where lines break and so the heights.
+  const copy = "The quick brown fox jumps over the lazy dog while the five boxing wizards jump quickly over the fence again.";
+  await mcpCall(srv.baseUrl, "write_html", { parentId: ab.id, html: `<h2 data-name="Default" style="margin:0;width:300px">${copy}</h2>
+    <p data-name="Sans" style="font-family:sans-serif;font-size:15px;width:260px;margin:0">${copy}</p>
+    <p data-name="Serif" style="font-family:serif;font-size:15px;width:260px;margin:0">${copy}</p>` });
+  const s = await (await fetch(`${srv.baseUrl}/api/state`)).json();
+  const ids = Object.values(s.nodes).filter((n) => ["Default", "Sans", "Serif"].includes(n.name)).map((n) => n.id);
+  const args = { artboardId: ab.id, nodeIds: ids, width: 640, height: 400, properties: ["font-size"] };
+  const c = await chrome.computed(args), b = await blitz.computed(args);
+  for (const id of ids) {
+    for (const k of ["x", "y", "width", "height"]) {
+      assert.ok(Math.abs(c[id].box[k] - b[id].box[k]) <= 1, `${s.nodes[id].name} ${k}: Chrome ${c[id].box[k]}, Blitz ${b[id].box[k]}`);
+    }
+  }
+});
+
 test("PreferBlitz: Chrome for unsupported CSS, a missing sidecar or a Blitz error", async () => {
   const calls = [];
   const fake = (name, { available = true, fail = false } = {}) => ({
@@ -72,7 +96,7 @@ test("PreferBlitz: Chrome for unsupported CSS, a missing sidecar or a Blitz erro
   });
   const fallbacks = [];
   let r = new PreferBlitz(fake("blitz"), fake("chrome"), {
-    unsupported: ({ artboardId }) => (artboardId === "blurry" ? "uses filter" : null),
+    unsupported: ({ artboardId }, method) => (artboardId === "blurry" ? "uses filter" : artboardId === "rotated" && method === "computed" ? "is transformed" : null),
     onFallback: (method, err) => fallbacks.push(`${method}: ${err.message}`),
   });
   assert.equal(await r.screenshot({ artboardId: "plain" }), "blitz");
@@ -100,7 +124,7 @@ test("RENDERER=blitz: MCP screenshots and computed styles go through Blitz", {
   skip: !blitzBuilt && "weft-render not built", timeout: 120_000,
 }, async (t) => {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "weft-blitz-srv-"));
-  // No Chrome at all (CHROME_PATH is a file that isn't a browser), so only Blitz can answer.
+  // CHROME_PATH points at a file that isn't a browser, so the Chrome fallback has to look for an installed one.
   const srv = await startServer(dataDir, { RENDERER: "blitz", CHROME_PATH: process.execPath, TAB_MEASURE_MS: "0" });
   t.after(async () => { await srv.stop(); await fs.rm(dataDir, { recursive: true, force: true }); });
   const ab = await mcpCall(srv.baseUrl, "create_artboard", { name: "Shot", width: 300, height: 200 });
@@ -118,4 +142,15 @@ test("RENDERER=blitz: MCP screenshots and computed styles go through Blitz", {
   const box = Object.values(s.nodes).find((n) => n.name === "Box");
   const cs = await mcpCall(srv.baseUrl, "get_computed_styles", { nodeIds: [box.id], properties: ["width", "background-color"] });
   assert.deepEqual(cs[box.id], { box: { x: 20, y: 20, width: 100, height: 50 }, styles: { width: "100px", "background-color": "rgb(51, 102, 255)" } });
+  // Boxes Blitz reports differently are measured by Chrome: a shape inside an SVG (Blitz: 0×0) and a rotated layer
+  // (Chrome reports the rotated bounding box, Blitz the 20×20 layout box).
+  if (chromeFound) {
+    await mcpCall(srv.baseUrl, "write_html", { parentId: ab.id, html: `<svg data-name="Ic" viewBox="0 0 10 10" width="10" height="10"><path data-name="Shape" d="M0 0L10 10" stroke="#000"/></svg><div data-name="Tilted" style="width:20px;height:20px;transform:rotate(10deg)"></div>` });
+    const s2 = await (await fetch(`${srv.baseUrl}/api/state`)).json();
+    const byName = (name) => Object.values(s2.nodes).find((n) => n.name === name).id;
+    const shape = (await mcpCall(srv.baseUrl, "get_computed_styles", { nodeIds: [byName("Shape")] }))[byName("Shape")];
+    assert.ok(shape.box.width > 0 && shape.box.height > 0, `the SVG shape has a box (${JSON.stringify(shape.box)})`);
+    const tilted = (await mcpCall(srv.baseUrl, "get_computed_styles", { nodeIds: [byName("Tilted")] }))[byName("Tilted")];
+    assert.ok(tilted.box.width > 20, `the rotated layer's bounding box is wider than 20px (${tilted.box.width})`);
+  }
 });

@@ -158,8 +158,9 @@ export class BlitzRenderer {
 }
 
 /**
- * Blitz first, headless Chrome for anything it can't do: the artboard uses CSS Blitz doesn't draw (`unsupported`
- * returns why), the sidecar is missing or crashed, or it returned an error. Chrome is only started when needed.
+ * Blitz first, headless Chrome for anything it can't do: the artboard uses CSS Blitz doesn't draw, or the call asks
+ * for boxes Blitz reports differently (`unsupported(args, method)` returns why), the sidecar is missing or crashed,
+ * or it returned an error. Chrome is only started when needed.
  * `onFallback` hears about failures (the server logs each reason once).
  */
 export class PreferBlitz {
@@ -175,7 +176,7 @@ export class PreferBlitz {
   }
 
   async attempt(method, args) {
-    if (this.blitz.available && !this.unsupported(args)) {
+    if (this.blitz.available && !this.unsupported(args, method)) {
       try {
         return await this.blitz[method](args);
       } catch (err) {

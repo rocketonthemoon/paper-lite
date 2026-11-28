@@ -2784,9 +2784,24 @@ function blitzUnsupported(artboardId) {
   }
   return null;
 }
+// Boxes Blitz reports differently from Chrome's getBoundingClientRect, so get_computed_styles asks Chrome: shapes
+// inside an <svg> (Blitz draws an SVG as one image, its shapes have no box of their own), and layers under a transform
+// (Chrome reports the transformed bounding box, Blitz the untransformed one). Screenshots of both are fine.
+const TRANSFORMS = ["transform", "rotate", "scale", "translate"];
+function blitzCantMeasure(artboardId, nodeIds = []) {
+  const transformed = (styles) => TRANSFORMS.some((k) => styles?.[k] != null && styles[k] !== "" && styles[k] !== "none");
+  if ((state.rootCss || emptyRootCss()).rules.some((r) => transformed(r.styles))) return "root CSS uses transforms";
+  for (const id of nodeIds) {
+    for (let n = state.nodes[id]; n; n = n.id === artboardId ? null : state.nodes[n.parentId]) {
+      if (n.id !== id && n.tag === "svg") return `"${state.nodes[id].name}" is a shape inside an SVG`;
+      if (transformed(n.styles)) return `"${n.name}" is transformed`;
+    }
+  }
+  return null;
+}
 const renderer = process.env.RENDERER === "blitz"
   ? new PreferBlitz(new BlitzRenderer(`http://127.0.0.1:${PORT}`, { contentKey: renderKey, assetsKey: () => fontsRev }), chromeRenderer, {
-    unsupported: ({ artboardId }) => blitzUnsupported(artboardId),
+    unsupported: ({ artboardId, nodeIds }, method) => blitzUnsupported(artboardId) || (method === "computed" ? blitzCantMeasure(artboardId, nodeIds) : null),
     onFallback: (method, err) => {
       const why = err.message.split("\n")[0];
       if (blitzFallbacks.has(why)) return;
