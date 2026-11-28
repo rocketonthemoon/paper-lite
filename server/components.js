@@ -394,14 +394,30 @@ export function createComponentEngine({
       syncSpec(comp.tree, rootNode.parentId, true);
 
       const pid = safePageOf(rootNode.id);
+      // Layers of this instance the new tree no longer has. Anything inside them that isn't part of the instance
+      // (a layer someone added or moved in) moves up to the nearest ancestor that stays, instead of being orphaned.
+      const stray = new Set(Object.keys(s.nodes).filter((nid) => s.nodes[nid].componentRootId === rootNode.id && !visited.has(nid)));
+      for (const nid of stray) {
+        for (const cid of [...s.nodes[nid].children]) {
+          if (stray.has(cid) || !s.nodes[cid]) continue;
+          let up = s.nodes[nid].parentId;
+          while (stray.has(up)) up = s.nodes[up].parentId;
+          if (!s.nodes[up]) continue;
+          s.nodes[cid].parentId = up;
+          s.nodes[up].children.push(cid);
+        }
+      }
       for (const [nid, n] of Object.entries(s.nodes)) {
-        if (n.componentRootId === rootNode.id && !visited.has(nid)) {
+        if (stray.has(nid)) {
           for (const cm of s.comments || []) {
             if (cm.nodeId === nid) {
               if (!cm.layerName) cm.layerName = n.name;
               if (!cm.pageId && pid) cm.pageId = pid;
             }
           }
+          // Take it out of whatever parent lists it now, so no child list points at a removed layer.
+          const parent = s.nodes[n.parentId];
+          if (parent) parent.children = parent.children.filter((c) => c !== nid);
           delete s.nodes[nid];
           removedNodes += 1;
         }

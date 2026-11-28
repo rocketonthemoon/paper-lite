@@ -8,8 +8,11 @@
 // it can, so moves, creations and deletions stay consistent.
 
 const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
-const OBJECT_FIELDS = new Set(["styles", "attrs", "componentOverrides"]);
+const OBJECT_FIELDS = new Set(["styles", "attrs"]);
 const SKIP_FIELDS = new Set(["id", "children"]);
+// A layer's component link is one unit: reverting only some of these would leave it half-linked.
+const LINK_FIELDS = ["componentId", "componentKey", "componentRootId", "componentOverrides"];
+const linkOf = (n) => Object.fromEntries(LINK_FIELDS.map((k) => [k, n?.[k]]));
 
 /**
  * @param {object} doc      the live document ({ nodes, pages, rootId, rootCss, icons, components }); mutated in place
@@ -80,8 +83,15 @@ export function revertPatches(doc, patches) {
       // Changed by the step: field by field.
       const keys = new Set([...Object.keys(b), ...Object.keys(a), ...Object.keys(cur)]);
       let changed = false;
+      if (!same(linkOf(b), linkOf(a))) {
+        if (!same(linkOf(cur), linkOf(a))) skip(id, cur.name, "component link");
+        else {
+          for (const k of LINK_FIELDS) { if (b[k] === undefined) delete cur[k]; else cur[k] = structuredClone(b[k]); }
+          changed = true;
+        }
+      }
       for (const k of keys) {
-        if (SKIP_FIELDS.has(k)) continue;
+        if (SKIP_FIELDS.has(k) || LINK_FIELDS.includes(k)) continue;
         if (OBJECT_FIELDS.has(k)) {
           const bo = b[k] || {}, ao = a[k] || {}, co = { ...(cur[k] || {}) };
           for (const p of new Set([...Object.keys(bo), ...Object.keys(ao)])) {
@@ -127,6 +137,16 @@ export function revertPatches(doc, patches) {
 
     // Rebuild the child lists of every parent involved from parentId, in the step's original order.
     for (const pid of parents) rebuildChildren(doc, pid, beforeOrder.get(pid), after.nodes[pid]?.children);
+
+    // A restored or reverted layer must not link to a component (or instance root) that no longer exists: detach it.
+    for (const id of Object.keys(before.nodes)) {
+      const n = doc.nodes[id];
+      if (!n?.componentId) continue;
+      const rootOk = !n.componentRootId || doc.nodes[n.componentRootId]?.componentId === n.componentId;
+      if (doc.components?.[n.componentId] && rootOk) continue;
+      delete n.componentId; delete n.componentKey; delete n.componentRootId; delete n.componentOverrides;
+      skip(id, n.name, "component link: the component or instance no longer exists");
+    }
   }
 
   if (!doc.pages.includes(doc.rootId)) doc.rootId = doc.pages[0];
@@ -169,6 +189,8 @@ function revertMeta(doc, b, a, metaSkipped, reverted) {
     const base = same(doc.pages, a.pages) ? b.pages : doc.pages;
     const list = [...new Set(base)].filter((id) => doc.nodes[id]);
     b.pages.forEach((id, i) => { if (doc.nodes[id] && !list.includes(id)) list.splice(Math.min(i, list.length), 0, id); });
+    // A page the step created but someone else has since filled stays (its node was kept), so it stays listed too.
+    for (const id of doc.pages) if (doc.nodes[id] && !list.includes(id)) list.push(id);
     doc.pages = list;
   }
   // Root CSS variables one by one; rules as a whole.
@@ -190,6 +212,11 @@ function revertMeta(doc, b, a, metaSkipped, reverted) {
     for (const k of new Set([...Object.keys(bo), ...Object.keys(ao)])) {
       if (same(bo[k], ao[k])) continue;
       if (!same(doc[key][k], ao[k])) { metaSkipped.add(`${key === "icons" ? "icon" : "component"} ${k}`); continue; }
+      // A component some layer still links to (one kept because it was edited since) can't go away.
+      if (key === "components" && bo[k] === undefined && Object.values(doc.nodes).some((n) => n.componentId === k)) {
+        metaSkipped.add(`component ${k} (still used)`);
+        continue;
+      }
       if (bo[k] === undefined) delete doc[key][k]; else doc[key][k] = structuredClone(bo[k]);
       reverted.add(`${key}:${k}`);
     }
