@@ -9,6 +9,7 @@ export default [
       sourceType: "module",
       globals: {
         AbortController: "readonly",
+        AbortSignal: "readonly",
         Blob: "readonly",
         Buffer: "readonly",
         FormData: "readonly",
