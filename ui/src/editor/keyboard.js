@@ -1,8 +1,8 @@
 // Keyboard shortcuts for the canvas (tools, nudging, undo / redo, zoom, copy / paste, …).
 import { ed } from "./state.js";
-import { $, api, commentThreadEl, isTextNode, num, patchStyles, setSnap, snapInput, stage, toast } from "./core.js";
+import { $, api, commentThreadEl, isTextNode, num, patchStyles, setSnap, snapInput, stage, toast, topmostSelected } from "./core.js";
 import { copyExport, openPreview, toggleFlex } from "./inspector.js";
-import { duplicateSelected, removeSelected, select, setTool, startEdit } from "./selection.js";
+import { batchEdit, duplicateSelected, removeSelected, select, selectMany, setTool, startEdit } from "./selection.js";
 import { zoomCmd } from "./view.js";
 import { openProjectMenu, projectMenu } from "./projects.js";
 import { cmdkEl, openCmdk } from "./cmdk.js";
@@ -28,6 +28,12 @@ export function setup() {
     if (!projectMenu.hidden && e.key === "Escape") { e.preventDefault(); return openProjectMenu(false); }
     if (mod && k === "f" && dashEl.hidden) { e.preventDefault(); $("#layer-filter").focus(); $("#layer-filter").select(); return; }
     if (typing(e)) return;
+    // Ctrl/Cmd+A: every layer at the selection's level (its siblings), or every artboard on the page.
+    if (mod && k === "a" && dashEl.hidden && ed.S) {
+      e.preventDefault();
+      const parent = ed.sel ? ed.S.nodes[ed.sel]?.parentId : ed.S.rootId;
+      return selectMany(ed.S.nodes[parent]?.children || [], ed.sel);
+    }
     if (!dashModal.hidden) { if (e.key === "Escape") closeDashModal(); return; }
     if (!dashEl.hidden) { if (e.key === "Escape") openDashboard(false); return; }
     if (e.code === "Space" || e.key === " ") { e.preventDefault(); if (!ed.spaceDown) { ed.spaceDown = true; stage.classList.add("pan-ready"); } return; }
@@ -49,6 +55,21 @@ export function setup() {
     const tools = { v: "select", h: "hand", f: "frame", r: "rect", t: "text", c: "comment" };
     if (!e.shiftKey && tools[k]) return setTool(tools[k]);
     if (!ed.sel) return;
+    if (ed.multi.length) {
+      if (k === "delete" || k === "backspace") { e.preventDefault(); return removeSelected(); }
+      if (k === "escape") return select(null);
+      const nudge = { arrowleft: [-1, 0], arrowright: [1, 0], arrowup: [0, -1], arrowdown: [0, 1] }[k];
+      if (nudge) {
+        e.preventDefault();
+        const step = e.shiftKey ? 10 : 1;
+        const ops = topmostSelected().filter((id) => ed.S.nodes[id].styles.position === "absolute").map((id) => {
+          const st = ed.S.nodes[id].styles;
+          return { op: "update", id, patch: { styles: { left: num(st.left) + nudge[0] * step, top: num(st.top) + nudge[1] * step } } };
+        });
+        if (ops.length) batchEdit(ops);
+      }
+      return;
+    }
     if (!e.shiftKey && k === "p") return openPreview(ed.sel);
     const n = ed.S.nodes[ed.sel];
     if (k === "delete" || k === "backspace") { e.preventDefault(); return removeSelected(); }

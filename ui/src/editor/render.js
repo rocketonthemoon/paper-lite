@@ -2,7 +2,7 @@
 // changed nodes are rebuilt), the view transform and grid, and the measurements the overlay components draw
 // (labels, context bar, agents; ../components/canvas) plus the layer rows for the Layers panel.
 import { ed } from "./state.js";
-import { $, GRID, SVG_NS, SVG_TAGS, VOID_TAGS, app, commentsPanelEl, elOf, expanded, isArtboard, isDarkColor, isTextNode, px, stage, viewKey, world } from "./core.js";
+import { $, GRID, SVG_NS, SVG_TAGS, VOID_TAGS, app, commentsPanelEl, elOf, expanded, isArtboard, isDarkColor, isTextNode, markSelected, px, selectedIds, stage, viewKey, world } from "./core.js";
 import { renderInspector } from "./inspector.js";
 import { shareSelection, startEdit } from "./selection.js";
 import { renderPages } from "./pages.js";
@@ -150,7 +150,19 @@ export function render() {
   if (!ed.S) return;
   if (ed.editingId || ed.busy || ed.pointerHeld) { ed.pendingRender = true; return; }
   ed.pendingRender = false;
-  if (ed.pendingSel && ed.S.nodes[ed.pendingSel]) { ed.sel = ed.pendingSel; ed.pendingSel = null; shareSelection(); }
+  if (ed.pendingSel && ed.S.nodes[ed.pendingSel]) { ed.sel = ed.pendingSel; ed.pendingSel = null; ed.multi = []; shareSelection(); }
+  if (ed.pendingMulti && ed.pendingMulti.every((id) => ed.S.nodes[id])) {
+    ed.multi = ed.pendingMulti.length > 1 ? ed.pendingMulti : [];
+    ed.sel = ed.pendingMulti[ed.pendingMulti.length - 1] ?? null;
+    ed.pendingMulti = null;
+    shareSelection();
+  }
+  // Layers deleted (here or by an agent) leave the selection.
+  if (ed.multi.length) {
+    ed.multi = ed.multi.filter((id) => ed.S.nodes[id]);
+    if (ed.multi.length < 2) { ed.sel = ed.multi[0] ?? null; ed.multi = []; }
+    else if (!ed.multi.includes(ed.sel)) ed.sel = ed.multi[ed.multi.length - 1];
+  }
   if (ed.sel && !ed.S.nodes[ed.sel]) ed.sel = null;
   if (ed.hoverId && !ed.S.nodes[ed.hoverId]) ed.hoverId = null;
   stage.style.background = ed.S.nodes[ed.S.rootId].styles.backgroundColor || "";
@@ -167,7 +179,6 @@ export function render() {
     if (vw) el.style.width = `${vw}px`;
     else el.style.removeProperty("width");
   }
-  for (const el of world.querySelectorAll(".is-selected")) el.classList.remove("is-selected");
   const onb = $("#empty-onboarding");
   if (onb) {
     const isEmpty = ed.S.nodes[ed.S.rootId].children.length === 0;
@@ -178,7 +189,7 @@ export function render() {
       $("#onb-mcp-cmd").textContent = `claude mcp add --transport http weft ${location.origin}/mcp`;
     }
   }
-  if (ed.sel) elOf(ed.sel)?.classList.add("is-selected");
+  markSelected();
   updateCommentsBadge();
   renderLayers();
   renderInspector();
@@ -249,6 +260,7 @@ export function commentPinMap() {
 // over as window.weft.overlay, and still places the selection and hover boxes and the context bar itself.
 export function updateOverlay() {
   if (!ed.S || !window.weft) return;
+  const selected = new Set(selectedIds());
   const hug = (v) => (!v || v === "auto" || v === "fit-content" ? "Hug" : px(v));
   const labels = ed.S.nodes[ed.S.rootId].children.flatMap((id) => {
     const el = elOf(id);
@@ -257,13 +269,19 @@ export function updateOverlay() {
     const vp = ed.viewportOverrides[id] || null;
     const wLabel = vp ? `${vp}px` : hug(st.width);
     const dim = r.w > 180 || vp ? `${wLabel} × ${hug(st.height)} · ${Math.round(ed.view.z * 100)}%` : "";
-    return [{ id, name: ed.S.nodes[id].name, dim, vp, sel: id === ed.sel, x: r.x, y: r.y - 20, maxW: Math.max(40, r.w) }];
+    return [{ id, name: ed.S.nodes[id].name, dim, vp, sel: selected.has(id), x: r.x, y: r.y - 20, maxW: Math.max(40, r.w) }];
   });
   const selEl = ed.sel && elOf(ed.sel);
-  const selRect = selEl ? rectOnStage(selEl) : null;
+  // Several layers: the selection box goes around all of them (no resize handles), and each gets its own outline.
+  const multiRects = ed.multi.length ? ed.multi.map((id) => elOf(id)).filter(Boolean).map(rectOnStage) : [];
+  const unionOf = (rs) => {
+    const x0 = Math.min(...rs.map((r) => r.x)), y0 = Math.min(...rs.map((r) => r.y));
+    return { x: x0, y: y0, w: Math.max(...rs.map((r) => r.x + r.w)) - x0, h: Math.max(...rs.map((r) => r.y + r.h)) - y0 };
+  };
+  const selRect = multiRects.length ? unionOf(multiRects) : selEl ? rectOnStage(selEl) : null;
   const selNode = ed.sel && ed.S.nodes[ed.sel];
   const onStage = selRect && selRect.x + selRect.w > 0 && selRect.x < stage.clientWidth && selRect.y + selRect.h > 44 && selRect.y < stage.clientHeight;
-  const showCtx = Boolean(onStage && selNode && !ed.busy && !ed.editingId && ed.tool === "select");
+  const showCtx = Boolean(onStage && selNode && !ed.multi.length && !ed.busy && !ed.editingId && ed.tool === "select");
   const ctx = showCtx ? {
     name: selNode.name,
     preview: isArtboard(ed.sel), // screens only; layers preview from the inspector header or P
@@ -297,7 +315,13 @@ export function updateOverlay() {
   window.weft.events.dispatchEvent(new Event("overlay"));
 
   placeBox($("#sel-box"), selRect);
-  if (selEl) $("#sel-size").textContent = `${Math.round(selEl.offsetWidth)} × ${Math.round(selEl.offsetHeight)}`;
+  $("#sel-box").classList.toggle("multi", multiRects.length > 0);
+  if (multiRects.length) $("#sel-size").textContent = `${ed.multi.length} layers`;
+  else if (selEl) $("#sel-size").textContent = `${Math.round(selEl.offsetWidth)} × ${Math.round(selEl.offsetHeight)}`;
+  const outlines = $("#multi-boxes");
+  while (outlines.children.length > multiRects.length) outlines.lastChild.remove();
+  while (outlines.children.length < multiRects.length) outlines.append(Object.assign(document.createElement("span"), { className: "multi-box" }));
+  multiRects.forEach((r, i) => placeBox(outlines.children[i], r));
   // Contextual quick-action bar above the selection (kept clear of the artboard label, pill and HUD), placed after
   // its contents are rendered so its size is known.
   const ctxBar = $("#ctx-bar");
@@ -335,6 +359,7 @@ export function iconFor(n) {
 // The tree is ui/src/components/LayersPanel.svelte. This builds its rows (it needs the editor's state: selection,
 // expanded artboards, agents, comments) and hands them over through window.weft.
 export function layerRows() {
+  const selected = new Set(selectedIds());
   if (!ed.S) return { rows: [], filtered: false };
   for (let p = ed.sel && ed.S.nodes[ed.sel]?.parentId; p && p !== ed.S.rootId; p = ed.S.nodes[p]?.parentId) expanded.add(p);
   const agentIds = new Set(ed.agentNodes.map((a) => a.id));
@@ -349,7 +374,7 @@ export function layerRows() {
       twist, // "open" | "closed" | "none"
       draggable: !q,
       artboard: n.parentId === ed.S.rootId,
-      sel: id === ed.sel,
+      sel: selected.has(id),
       agent: agentIds.has(id),
       icon: iconFor(n),
       dim: n.parentId === ed.S.rootId ? `${px(n.styles.width || "auto")}×${px(n.styles.height || "auto")}` : null,

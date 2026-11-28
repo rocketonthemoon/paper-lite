@@ -2,7 +2,9 @@
 // can't be assigned). State only one module uses stays in that module.
 export const ed = {
   S: null, // canvas state from server
-  sel: null, // selected node id
+  sel: null, // selected node id (with several selected, the one the inspector and context bar refer to)
+  multi: [], // every selected id when more than one layer is selected (marquee, Shift+click, Ctrl+A); else empty
+  pendingMulti: null, // ids to select once they arrive from the server (a duplicated multi-selection)
   hoverId: null,
   tool: "select",
   toolEpoch: 0, // toolEpoch counts tool picks, so a late reply can tell it was overtaken

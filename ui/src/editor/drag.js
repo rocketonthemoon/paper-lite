@@ -1,16 +1,28 @@
 // Drag and resize of the selected layer, with interact.js (bundled from npm). The preview moves the
-// element directly; the server gets one patch when the gesture ends.
+// element directly; the server gets one patch when the gesture ends. Dragging any layer of a multi-selection moves
+// all of them (those placed absolutely), saved as one undo step.
 import interact from "interactjs";
 import { ed } from "./state.js";
-import { GRID, elOf, num, patchStyles, snapInput } from "./core.js";
+import { GRID, elOf, num, patchStyles, snapInput, topmostSelected } from "./core.js";
 import { markStale, render, updateOverlay } from "./render.js";
-import { select } from "./selection.js";
+import { batchEdit, select } from "./selection.js";
 
 let op = null;
 const snapV = (v) => (snapInput.checked ? Math.round(v / GRID) * GRID : Math.round(v));
 
 function dragStart(e, id, fromLabel = false) {
   const n = ed.S.nodes[id];
+  if (n && ed.multi.includes(id) && ed.tool === "select" && !ed.spaceDown && !ed.editingId) {
+    const items = topmostSelected().filter((sid) => ed.S.nodes[sid]?.styles.position === "absolute" && elOf(sid)).map((sid) => {
+      const el = elOf(sid), st = ed.S.nodes[sid].styles;
+      markStale(el);
+      return { id: sid, el, x0: num(st.left, el.offsetLeft), y0: num(st.top, el.offsetTop) };
+    });
+    if (!items.length) { e.interaction.stop(); return; }
+    op = { items, dx: 0, dy: 0 };
+    ed.busy = true;
+    return;
+  }
   if (!n || ed.tool !== "select" || ed.spaceDown || ed.editingId || n.styles.position !== "absolute" || (!fromLabel && id !== ed.sel)) {
     e.interaction.stop();
     return;
@@ -23,6 +35,15 @@ function dragStart(e, id, fromLabel = false) {
 }
 function dragMove(e) {
   if (!op) return;
+  if (op.items) {
+    op.dx += e.dx / ed.view.z; op.dy += e.dy / ed.view.z;
+    for (const it of op.items) {
+      it.x = snapV(it.x0 + op.dx); it.y = snapV(it.y0 + op.dy);
+      it.el.style.left = `${it.x}px`; it.el.style.top = `${it.y}px`;
+    }
+    updateOverlay();
+    return;
+  }
   op.dx += e.dx / ed.view.z; op.dy += e.dy / ed.view.z;
   op.x = snapV(op.x0 + op.dx); op.y = snapV(op.y0 + op.dy);
   op.el.style.left = `${op.x}px`; op.el.style.top = `${op.y}px`;
@@ -30,6 +51,14 @@ function dragMove(e) {
 }
 function dragEnd() {
   if (!op) return;
+  if (op.items) {
+    const moved = op.items.filter((it) => it.x !== undefined && (it.x !== it.x0 || it.y !== it.y0));
+    op = null; ed.busy = false;
+    if (moved.length) batchEdit(moved.map((it) => ({ op: "update", id: it.id, patch: { styles: { left: it.x, top: it.y } } })));
+    else if (ed.pendingRender) render();
+    else updateOverlay();
+    return;
+  }
   const { id, x, y, x0, y0 } = op;
   op = null; ed.busy = false;
   if (x !== undefined && (x !== x0 || y !== y0)) patchStyles(id, { left: x, top: y });
@@ -72,6 +101,8 @@ export function setupInteract() {
   interact("#world .is-selected")
     .draggable({ listeners: { start: (e) => dragStart(e, e.target.dataset.nodeId), move: dragMove, end: dragEnd } })
     .resizable({ edges: { left: true, right: true, top: true, bottom: true }, margin: 6,
-      listeners: { start: resizeStart, move: resizeMove, end: resizeEnd } });
+      listeners: { start: resizeStart, move: resizeMove, end: resizeEnd } })
+    // Several layers selected: no resizing (it applies to one layer), so a press near an edge drags them all instead.
+    .actionChecker((pointer, event, action) => (action?.name === "resize" && ed.multi.length ? { name: "drag" } : action));
   interact("#labels .ab-label").draggable({ listeners: { start: (e) => dragStart(e, e.target.dataset.id, true), move: dragMove, end: dragEnd } });
 }

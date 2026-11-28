@@ -34,6 +34,19 @@ export const app = $("#app"), stage = $("#stage"), world = $("#world"),
 export const px = (v) => (v == null ? "" : String(v).replace(/^(-?[\d.]+)px$/, "$1"));
 export const num = (v, fallback = 0) => { const n = parseFloat(v); return Number.isFinite(n) ? n : fallback; };
 export const elOf = (id) => world.querySelector(`[data-node-id="${CSS.escape(id)}"]`);
+// Everything selected: the multi-selection, else the single selected layer.
+export const selectedIds = () => (ed.multi.length ? ed.multi : ed.sel ? [ed.sel] : []);
+// Without layers inside other selected layers (moving or deleting a parent already takes its children along).
+export const topmostSelected = () => {
+  const ids = selectedIds(), set = new Set(ids);
+  return ids.filter((id) => { for (let p = ed.S.nodes[id]?.parentId; p; p = ed.S.nodes[p]?.parentId) if (set.has(p)) return false; return true; });
+};
+// The .is-selected class (outline, and what interact.js drags) on exactly the selected layers' elements.
+export function markSelected() {
+  const ids = new Set(selectedIds());
+  for (const el of world.querySelectorAll(".is-selected")) if (!ids.has(el.dataset.nodeId)) el.classList.remove("is-selected");
+  for (const id of ids) elOf(id)?.classList.add("is-selected");
+}
 export const isArtboard = (id) => ed.S && ed.S.nodes[id] && ed.S.nodes[id].parentId === ed.S.rootId;
 export const isTextNode = (id) => { const n = ed.S.nodes[id]; return n && !n.children.length && !VOID_TAGS.has(n.tag) && !SVG_TAGS.has(n.tag) && (n.text !== "" || TEXT_TAGS.has(n.tag)); };
 export const isDarkColor = (c) => {

@@ -315,6 +315,10 @@
   #sel-box i { position: absolute; width: 7px; height: 7px; background: #fff; border: 1.5px solid var(--accent); border-radius: 1px; }
   #sel-box .nw { left: -6px; top: -6px; } #sel-box .ne { right: -6px; top: -6px; }
   #sel-box .sw { left: -6px; bottom: -6px; } #sel-box .se { right: -6px; bottom: -6px; }
+  /* Several layers selected: one box around all of them (no resize handles) and a thin outline on each. */
+  #sel-box.multi i { display: none; }
+  #multi-boxes { position: absolute; inset: 0; pointer-events: none; }
+  .multi-box { position: absolute; display: none; outline: 1px solid var(--accent); outline-offset: 1px; }
   #sel-size {
     position: absolute; top: 100%; left: -2px; transform: translate(0, 8px);
     background: var(--accent); color: #fff; font-family: var(--font-mono); font-weight: 600;
@@ -439,6 +443,9 @@
 
   .hint { color: var(--muted); font-size: 12px; line-height: 1.4; }
   .hint code { font-family: var(--font-mono); font-size: 11px; color: var(--text-2); }
+  .multi-names { list-style: none; margin: 0 0 10px; padding: 0; display: grid; gap: 2px; font-size: 12px; color: var(--text-2); }
+  .multi-names li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .multi-names .more { color: var(--muted); }
 
   .grid2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
   .fld {
@@ -1075,6 +1082,7 @@
     <div id="world"></div>
     <div id="overlay">
       <div id="labels"></div>
+      <div id="multi-boxes" aria-hidden="true"></div>
       <div id="hover-box" class="box"></div>
       <div id="sel-box" class="box"><i class="nw"></i><i class="ne"></i><i class="sw"></i><i class="se"></i><span id="sel-size"></span></div>
       <div id="ctx-bar" role="toolbar" aria-label="Quick actions"></div>
