@@ -151,7 +151,7 @@ export function registerTools(server, ctx) {
       selection: ctx.selection().ids,
       openComments: ctx.comments.openCount(),
       agentWorkingOn: ctx.presence().map((p) => p.id),
-      screenshots: ctx.renderer.available ? "available" : "unavailable (no Chrome/Chromium found; set CHROME_PATH, or build weft-render and set RENDERER=blitz)",
+      screenshots: ctx.renderer.available ? "available" : "unavailable (no Chrome/Chromium found; set CHROME_PATH)",
     });
   });
 

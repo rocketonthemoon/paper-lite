@@ -5,4 +5,3 @@ test
 .github
 eslint.config.mjs
 *.log
-weft-render/target

@@ -18,7 +18,6 @@ import {
 import { FontLibrary, familiesIn, renameWithRetry } from "./fonts.js";
 import { htmlToSpecs } from "./html-import.js";
 import { Renderer } from "./renderer.js";
-import { BlitzRenderer, PreferBlitz } from "./renderer-blitz.js";
 import { registerTools, SERVER_INSTRUCTIONS } from "./mcp-tools.js";
 import { CheckpointRepo } from "./checkpoint-store.js";
 import { MAX_ICONS, expandIconSpecs, parseSvgIcon } from "./icons.js";
@@ -2762,62 +2761,7 @@ function setSessionTitle(text) {
 // ---------------------------------------------------------------------------
 // MCP (tools live in mcp-tools.js)
 // ---------------------------------------------------------------------------
-// Screenshots and computed styles: headless Chrome, or with RENDERER=blitz the Blitz sidecar (weft-render/) first,
-// falling back to Chrome for any call it can't answer.
-const renderKey = () => `${state.id}:${state.version}:${fontsRev}`;
-const chromeRenderer = new Renderer(`http://127.0.0.1:${PORT}`, { contentKey: renderKey });
-const blitzFallbacks = new Set();
-// CSS Blitz (0.3 beta) doesn't draw like Chrome yet, found by comparing the two: artboards that use any of these, on a
-// layer or in the root CSS, go to Chrome. Each check gets the value and says whether Blitz can't draw it.
-const always = () => true;
-const BLITZ_UNSUPPORTED = {
-  // Filters aren't drawn like Chrome: vello_cpu applies blur and drop-shadow only single-threaded, and even then clips
-  // the result to the element's box; colour filters (grayscale, brightness, …) aren't implemented.
-  filter: always,
-  backdropFilter: always,
-  // polygon(), ellipse() and inset() match Chrome; circle() resolves percentages differently and inset(… round …)
-  // loses its rounding.
-  clipPath: (v) => !/^(?:polygon|ellipse)\(|^inset\((?![^)]*\bround\b)/.test(String(v).trim()),
-  columns: always, columnCount: always, columnWidth: always,
-  writingMode: (v) => !/^horizontal-tb$/.test(String(v).trim()),
-  textOverflow: (v) => String(v).trim() !== "clip",
-  lineClamp: always, WebkitLineClamp: always,
-};
-function blitzUnsupported(artboardId) {
-  const uses = (styles) => Object.keys(BLITZ_UNSUPPORTED).find((k) => styles && styles[k] != null && styles[k] !== ""
-    && styles[k] !== "none" && BLITZ_UNSUPPORTED[k](styles[k]));
-  for (const r of (state.rootCss || emptyRootCss()).rules) { const k = uses(r.styles); if (k) return `root CSS uses ${k}`; }
-  const stack = [artboardId];
-  while (stack.length) {
-    const n = state.nodes[stack.pop()];
-    if (!n) continue;
-    const k = uses(n.styles);
-    if (k) return `"${n.name}" uses ${k}`;
-    stack.push(...n.children);
-  }
-  return null;
-}
-// get_computed_styles asks Chrome for shapes inside an <svg>: Blitz draws an SVG as one image, so its shapes have no
-// box of their own. (Transformed layers are measured by weft-render itself, like getBoundingClientRect.)
-function blitzCantMeasure(artboardId, nodeIds = []) {
-  for (const id of nodeIds) {
-    for (let n = state.nodes[state.nodes[id]?.parentId]; n && n.id !== artboardId; n = state.nodes[n.parentId]) {
-      if (n.tag === "svg") return `"${state.nodes[id].name}" is a shape inside an SVG`;
-    }
-  }
-  return null;
-}
-const renderer = process.env.RENDERER === "blitz"
-  ? new PreferBlitz(new BlitzRenderer(`http://127.0.0.1:${PORT}`, { contentKey: renderKey, assetsKey: () => fontsRev }), chromeRenderer, {
-    unsupported: ({ artboardId, nodeIds }, method) => blitzUnsupported(artboardId) || (method === "computed" ? blitzCantMeasure(artboardId, nodeIds) : null),
-    onFallback: (method, err) => {
-      const why = err.message.split("\n")[0];
-      if (blitzFallbacks.has(why)) return;
-      blitzFallbacks.add(why);
-      console.warn(`[weft] Blitz couldn't ${method === "screenshot" ? "take a screenshot" : "measure"} (${why}); using headless Chrome.`);
-    },
-  })
-  : chromeRenderer;
+const renderer = new Renderer(`http://127.0.0.1:${PORT}`, { contentKey: () => `${state.id}:${state.version}:${fontsRev}` });
 
 // Computed styles from an open editor tab. The canvas already has the page laid out with the same CSS as the
 // render page, so a tab that shows this artboard at the current version answers in a few ms, where headless Chrome
